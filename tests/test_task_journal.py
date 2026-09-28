@@ -55,6 +55,18 @@ def test_task_journal_enforces_lifecycle_and_rejects_terminal_regression() -> No
         journal.transition(task.id, TaskStatus.RUNNING)
 
 
+def test_task_journal_can_attach_runtime_change_observer() -> None:
+    changes = []
+    journal = TaskJournal()
+    journal.set_on_change(changes.append)
+
+    task = journal.create_task(title="Research task", origin=TaskOrigin.BACKGROUND)
+    journal.transition(task.id, TaskStatus.RUNNING)
+
+    assert [record.status for record in changes] == [TaskStatus.QUEUED, TaskStatus.RUNNING]
+    assert all(record.id == task.id for record in changes)
+
+
 def test_task_journal_supports_waiting_approval_progress_and_idempotent_cancel() -> None:
     journal = TaskJournal()
     task = journal.create_task(title="Open account portal")

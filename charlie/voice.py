@@ -47,6 +47,10 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?,;])\s+")
 _ASR_WORKER_STAGE_MESSAGE = "asr_worker_stage"
 _ASR_WORKER_STALL_THRESHOLD_S = 9.0
 _ASR_WORKER_WATCHDOG_INTERVAL_S = 0.5
+_VAD_NOISE_CALIBRATION_SECONDS = 1.5
+_VAD_NOISE_PERCENTILE = 20.0
+_VAD_NOISE_MULTIPLIER = 4.0
+_VAD_MIN_EFFECTIVE_THRESHOLD = 0.01
 
 
 @dataclass(frozen=True)
@@ -183,6 +187,9 @@ class VoiceEngine:
         self.tts_active = threading.Event()
         self.stop_event = threading.Event()
         self.stop_tts_event = threading.Event()
+        self._tts_cancel_lock = threading.Lock()
+        self._tts_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._tts_task: Optional[asyncio.Task] = None
         self._stopped = False
         self._shutdown_result: Optional[VoiceShutdownResult] = None
         self._shutdown_errors: list[str] = []
@@ -217,11 +224,10 @@ class VoiceEngine:
         # any part of it, not only the last one.
         self._recent_spoken_words: set = set()
         self.speech_echo_window = _ECHO_WINDOW_SEC
-        self._widget_callback = None
         self._event_emit_lock = threading.Lock()
         self._event_emit_futures: set = set()
 
-        # Speaker output state (driven by the dashboard audio controls).
+        # Speaker output state.
         # `muted` silences TTS playback; `volume` is a 0.0-1.0 linear gain
         # applied to the audio samples before they reach the output device.
         self.muted: bool = False
@@ -300,10 +306,6 @@ class VoiceEngine:
     def _current_diagnostic_context(self) -> Optional[VoiceDiagnosticTrace]:
         with self._diagnostic_context_lock:
             return self._diagnostic_context
-
-    def set_widget_callback(self, cb: Callable[[str], None]) -> None:
-        """Register callback for mode changes (listening/speaking/idle)."""
-        self._widget_callback = cb
 
     def set_wake_word_callback(self, cb: Callable[[], None]) -> None:
         """Register callback for wake-word detection events."""
@@ -387,18 +389,18 @@ class VoiceEngine:
         self._schedule_event_emit("audio_level", {"level": level})
 
     def _schedule_event_emit(self, event_type: str, payload: dict) -> None:
-        bus = getattr(self, "_event_bus", None)
-        loop = getattr(self, "_event_loop", None)
-        if bus is None or loop is None or self._stopped:
-            return
-        coroutine = bus.emit(event_type, payload, meta=EventMeta(source=EventSource.VOICE))
-        try:
-            future = asyncio.run_coroutine_threadsafe(coroutine, loop)
-        except Exception:
-            coroutine.close()
-            logger.debug("%s emit failed", event_type, exc_info=True)
-            return
         with self._event_emit_lock:
+            bus = getattr(self, "_event_bus", None)
+            loop = getattr(self, "_event_loop", None)
+            if bus is None or loop is None or self._stopped:
+                return
+            coroutine = bus.emit(event_type, payload, meta=EventMeta(source=EventSource.VOICE))
+            try:
+                future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+            except Exception:
+                coroutine.close()
+                logger.debug("%s emit failed", event_type, exc_info=True)
+                return
             self._event_emit_futures.add(future)
 
         def _discard(completed) -> None:
@@ -415,11 +417,7 @@ class VoiceEngine:
             future.cancel()
 
     def _emit_vad_start(self) -> None:
-        """Publish speech-onset so the dashboard can show a listening state.
-
-        Without wake-word mode, nothing else ever emits "vad_start" -- the
-        dashboard's listening animation would otherwise never trigger.
-        """
+        """Publish speech-onset for runtime observers."""
         self._schedule_event_emit("vad_start", {})
 
     @staticmethod
@@ -429,6 +427,23 @@ class VoiceEngine:
         if arr.size == 0:
             return 0.0
         return float(np.sqrt(np.mean(np.square(arr))))
+
+    @staticmethod
+    def _effective_vad_threshold(configured_threshold: float, noise_rms_samples) -> float:
+        """Adapt VAD to endpoint noise while retaining configured ceiling."""
+
+        configured = float(configured_threshold)
+        if configured <= 0 or not noise_rms_samples:
+            return configured
+        samples = np.asarray(noise_rms_samples, dtype=np.float32)
+        samples = samples[np.isfinite(samples)]
+        if samples.size == 0:
+            return configured
+        noise_floor = float(np.percentile(samples, _VAD_NOISE_PERCENTILE))
+        return max(
+            _VAD_MIN_EFFECTIVE_THRESHOLD,
+            min(configured, noise_floor * _VAD_NOISE_MULTIPLIER),
+        )
 
     @staticmethod
     def _speech_onset_confirmed(consecutive_loud_frames: int, required_frames: int = 2) -> bool:
@@ -690,6 +705,13 @@ class VoiceEngine:
                 self.playback_queue.get_nowait()
             except queue.Empty:
                 break
+        with self._tts_cancel_lock:
+            loop, task = self._tts_loop, self._tts_task
+            if loop is not None and task is not None and loop.is_running():
+                try:
+                    loop.call_soon_threadsafe(task.cancel)
+                except RuntimeError:
+                    pass
         # Do NOT call sd.stop() here -- this runs on the caller's thread
         # (e.g. the barge-in path), while _playback_worker's own thread
         # concurrently drives sd.play()/sd.stop()/sd.wait() on the same
@@ -722,7 +744,7 @@ class VoiceEngine:
             logger.debug("speech onset callback failed", exc_info=True)
 
     def set_audio_state(self, muted: Optional[bool] = None, volume: Optional[float] = None) -> dict:
-        """Apply dashboard speaker controls. Returns the resulting state.
+        """Apply speaker controls. Returns the resulting state.
 
         `muted` toggles silence; `volume` is a 0.0-1.0 linear gain. Either may
         be omitted to leave the existing value unchanged.
@@ -1041,11 +1063,36 @@ class VoiceEngine:
                 elif emotional_state in ("sad", "calm"):
                     speed = 0.95
 
-                asyncio.run(self._tts_stream_and_queue(text, speed, trace=trace))
+                asyncio.run(self._run_tts_item(text, speed, trace=trace))
             except queue.Empty:
                 continue
+            except asyncio.CancelledError:
+                if self.stop_event.is_set():
+                    break
             except Exception as e:
                 logger.error(f"tts_worker_error | {e}")
+
+    async def _run_tts_item(
+        self,
+        text: str,
+        speed: float,
+        *,
+        trace: Optional[VoiceDiagnosticTrace] = None,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        task = asyncio.current_task()
+        with self._tts_cancel_lock:
+            if self.stop_tts_event.is_set() or self.stop_event.is_set():
+                return
+            self._tts_loop = loop
+            self._tts_task = task
+        try:
+            await self._tts_stream_and_queue(text, speed, trace=trace)
+        finally:
+            with self._tts_cancel_lock:
+                if self._tts_task is task:
+                    self._tts_loop = None
+                    self._tts_task = None
 
     async def _tts_stream_and_queue(
         self,
@@ -1147,7 +1194,7 @@ class VoiceEngine:
                     sd.wait()
                     continue
 
-                # Apply dashboard volume gain; a muted device still drives the
+                # Apply configured volume gain; a muted device still drives the
                 # speaking callbacks (so the UI reflects state) but emits silence.
                 gain = self._apply_gain()
                 if gain != 1.0:
@@ -1423,7 +1470,7 @@ class VoiceEngine:
 
     def _play_wake_chime(self) -> None:
         """Play a short chime on wake-word detection. Non-blocking."""
-        # Respect the dashboard speaker controls.
+        # Respect the configured speaker controls.
         gain = self._apply_gain()
         if gain == 0.0:
             return
@@ -1974,6 +2021,13 @@ class VoiceEngine:
 
         # VAD state
         _vad_threshold = self.config.vad_threshold
+        _vad_noise_floor_rms: Optional[float] = None
+        _vad_noise_samples: list[float] = []
+        _vad_noise_calibration_frames = max(
+            1,
+            int(_VAD_NOISE_CALIBRATION_SECONDS * samplerate / block_size),
+        )
+        _vad_noise_calibrated = False
         _silence_timeout = self.config.vad_silence_timeout
         _phrase_min_duration = self.config.phrase_min_duration
         _phrase_max_duration = self.config.phrase_max_duration
@@ -2096,7 +2150,7 @@ class VoiceEngine:
                             self._last_activity_time = time.time()
                             # Play chime (non-blocking)
                             self._play_wake_chime()
-                            # Notify frontend
+                            # Notify the canonical runtime callback.
                             if self._on_wake_word:
                                 try:
                                     self._on_wake_word()
@@ -2121,6 +2175,26 @@ class VoiceEngine:
             rms = float(np.sqrt(np.mean(data**2) + 1e-10))
             _frame_count += 1
 
+            if not _vad_noise_calibrated and not is_speech:
+                _vad_noise_samples.append(rms)
+                if len(_vad_noise_samples) >= _vad_noise_calibration_frames:
+                    _vad_noise_floor_rms = float(
+                        np.percentile(_vad_noise_samples, _VAD_NOISE_PERCENTILE)
+                    )
+                    _vad_threshold = self._effective_vad_threshold(
+                        self.config.vad_threshold,
+                        _vad_noise_samples,
+                    )
+                    _vad_noise_calibrated = True
+                    logger.info(
+                        "vad_noise_calibrated | samples=%s noise_floor_rms=%.6f "
+                        "configured_threshold=%.4f effective_threshold=%.4f",
+                        len(_vad_noise_samples),
+                        _vad_noise_floor_rms,
+                        self.config.vad_threshold,
+                        _vad_threshold,
+                    )
+
             # Periodic RMS logging for mic level diagnostics
             if _frame_count % _rms_log_interval == 0:
                 logger.debug(
@@ -2129,6 +2203,11 @@ class VoiceEngine:
 
             # Pre-roll: always keep a sliding window of recent audio
             _pre_roll_buffer.append(data.copy())
+
+            # Do not let startup noise become an utterance while the endpoint
+            # baseline is still being measured.
+            if not _vad_noise_calibrated:
+                continue
 
             if not is_speech:
                 if rms > _vad_threshold:
@@ -2155,6 +2234,8 @@ class VoiceEngine:
                             "configured_sample_rate": samplerate,
                             "speech_onset_rms": rms,
                             "vad_threshold": _vad_threshold,
+                            "vad_configured_threshold": self.config.vad_threshold,
+                            "vad_noise_floor_rms": _vad_noise_floor_rms,
                             "onset_debounce_frames": _onset_debounce_frames,
                             "pre_roll_configured_ms": 800.0,
                             "pre_roll_buffer_samples": len(_pre_roll_buffer) * block_size,
@@ -2218,6 +2299,8 @@ class VoiceEngine:
                         "pre_roll_buffer_samples": speech_pre_roll_samples,
                         "speech_onset_rms": speech_onset_rms,
                         "vad_threshold": _vad_threshold,
+                        "vad_configured_threshold": self.config.vad_threshold,
+                        "vad_noise_floor_rms": _vad_noise_floor_rms,
                         "vad_min_speech_duration_ms": self.config.vad_min_speech_duration_ms,
                         "vad_min_silence_duration_ms": self.config.vad_min_silence_duration_ms,
                         "vad_speech_pad_ms": self.config.vad_speech_pad_ms,

@@ -1,6 +1,4 @@
-"""Tests for charlie/extensions/install.py -- the shared install logic used
-by both the web-server and voice processes, and the skill-script runner that
-replaced web_server.py's old "not yet implemented" stub."""
+"""Tests for the shared extension-install logic and skill-script runner."""
 
 import sys
 

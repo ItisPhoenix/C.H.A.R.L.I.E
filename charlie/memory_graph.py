@@ -403,6 +403,74 @@ class MemoryGraph:
         object_id = self.add_node("fact", obj)
         return self.add_edge(subject_id, object_id, relation)
 
+    def update_managed_fact(
+        self,
+        item_id: str,
+        *,
+        old_fact: Optional[Tuple[str, str, str]],
+        new_fact: Optional[Tuple[str, str, str]],
+        node_type: str,
+        content: str,
+        metadata: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Atomically replace a managed item snapshot and its graph relation."""
+        if node_type not in NODE_TYPES:
+            node_type = "fact"
+        conn = self.conn
+        now = utc_now_iso()
+
+        def fact_node_id(value: str) -> str:
+            row = conn.execute(
+                "SELECT id FROM nodes WHERE node_type = 'fact' AND content = ? LIMIT 1",
+                (value,),
+            ).fetchone()
+            if row:
+                return row["id"]
+            node_id = make_id()
+            conn.execute(
+                "INSERT INTO nodes (id, node_type, content, metadata, created_at, updated_at) "
+                "VALUES (?, 'fact', ?, NULL, ?, ?)",
+                (node_id, value, now, now),
+            )
+            return node_id
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if not conn.execute("SELECT 1 FROM nodes WHERE id = ?", (item_id,)).fetchone():
+                conn.rollback()
+                return None
+
+            old_key = (old_fact[0], normalize_relation(old_fact[1]), old_fact[2]) if old_fact else None
+            new_key = (new_fact[0], normalize_relation(new_fact[1]), new_fact[2]) if new_fact else None
+            if new_fact and new_key != old_key:
+                subject_id = fact_node_id(new_fact[0])
+                object_id = fact_node_id(new_fact[2])
+                if not conn.execute(
+                    "SELECT 1 FROM edges WHERE from_node_id = ? AND to_node_id = ? AND relation = ?",
+                    (subject_id, object_id, new_key[1]),
+                ).fetchone():
+                    conn.execute(
+                        "INSERT INTO edges (id, from_node_id, to_node_id, relation, created_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (make_id(), subject_id, object_id, new_key[1], now),
+                    )
+            if old_fact and old_key != new_key:
+                conn.execute(
+                    "DELETE FROM edges WHERE relation = ? "
+                    "AND from_node_id IN (SELECT id FROM nodes WHERE content = ?) "
+                    "AND to_node_id IN (SELECT id FROM nodes WHERE content = ?)",
+                    (old_key[1], old_fact[0], old_fact[2]),
+                )
+            conn.execute(
+                "UPDATE nodes SET node_type = ?, content = ?, metadata = ?, updated_at = ? WHERE id = ?",
+                (node_type, content, json_dumps(metadata) if metadata else None, now, item_id),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return self.get_node(item_id)
+
     def remove_fact(self, subject: str, predicate: str, obj: str) -> bool:
         """Remove a fact triple (edge) from the memory graph."""
         relation = normalize_relation(predicate)

@@ -4,8 +4,10 @@ Mocks sounddevice, Kokoro, and multiprocessing to avoid audio hardware.
 Focuses on the text humanization pipeline, RMS calculation, and init logic.
 """
 
+import asyncio
 import queue
 import sys
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -197,6 +199,28 @@ def test_vad_onset_requires_two_consecutive_loud_frames():
     assert VoiceEngine._speech_onset_confirmed(2, 2) is True
 
 
+def test_vad_threshold_adapts_quiet_device_below_configured_ceiling():
+    quiet_rms = [0.00002] * 20
+
+    assert VoiceEngine._effective_vad_threshold(0.05, quiet_rms) == pytest.approx(0.01)
+
+
+def test_vad_threshold_stays_above_noisy_floor_and_below_configured_ceiling():
+    noisy_rms = [0.008] * 20
+
+    assert VoiceEngine._effective_vad_threshold(0.05, noisy_rms) == pytest.approx(0.032)
+
+
+def test_vad_threshold_uses_configured_ceiling_for_high_noise_floor():
+    high_noise_rms = [0.02] * 20
+
+    assert VoiceEngine._effective_vad_threshold(0.05, high_noise_rms) == pytest.approx(0.05)
+
+
+def test_vad_threshold_falls_back_to_configured_value_without_calibration():
+    assert VoiceEngine._effective_vad_threshold(0.05, []) == pytest.approx(0.05)
+
+
 def test_vad_pre_roll_keeps_each_onset_frame_once_and_preserves_order():
     frames = [
         np.array([1, 2], dtype=np.float32),
@@ -297,6 +321,45 @@ class TestVoiceEngineInit:
             engine.stop_tts()
             mock_sd.stop.assert_not_called()
 
+    def test_stop_tts_cancels_synthesis_and_worker_remains_reusable(self):
+        engine = self._make_engine()
+        started = {name: threading.Event() for name in ("interrupt", "next", "shutdown")}
+        finished = {name: threading.Event() for name in started}
+
+        async def cancellable_synth(text, _speed):
+            name = next(name for name in started if name in text.lower())
+            started[name].set()
+            try:
+                if name != "next":
+                    await asyncio.Future()
+                yield np.ones(8, dtype=np.float32), 24000
+            finally:
+                finished[name].set()
+
+        engine._synth_stream = cancellable_synth
+        engine.tts_worker = threading.Thread(target=engine._tts_worker_loop, daemon=True)
+        engine.tts_worker.start()
+        try:
+            engine.speak("Interrupt synthesis now.")
+            assert started["interrupt"].wait(1.0)
+            engine.stop_tts()
+            assert finished["interrupt"].wait(1.0)
+            assert engine.tts_worker.is_alive()
+
+            engine.speak("Next synthesis still works.")
+            assert finished["next"].wait(1.0)
+            assert engine.tts_worker.is_alive()
+
+            engine.speak("Shutdown synthesis now.")
+            assert started["shutdown"].wait(1.0)
+            result = engine.stop()
+            assert finished["shutdown"].wait(1.0)
+            assert result.quiescent is True
+            assert result.alive_threads == ()
+        finally:
+            if engine.tts_worker.is_alive():
+                engine.stop()
+
     def test_play_wake_chime_does_not_spawn_thread(self):
         """_play_wake_chime must route through playback_queue, not a raw
         thread -- same bug class as test_stop_tts_does_not_call_sd_directly."""
@@ -315,13 +378,6 @@ class TestVoiceEngineInit:
         assert engine.muted
         engine.muted = False
         assert not engine.muted
-
-    def test_set_widget_callback(self):
-        engine = self._make_engine()
-        def cb(x):
-            return None
-        engine.set_widget_callback(cb)
-        assert engine._widget_callback is cb
 
     def test_set_wake_word_callback(self):
         engine = self._make_engine()
@@ -382,6 +438,51 @@ class TestVoiceEngineInit:
         assert first is not second
         assert first.quiescent is True
         assert second.quiescent is True
+
+    def test_stop_cancels_event_emit_that_races_with_shutdown(self, monkeypatch):
+        engine = self._make_engine()
+        engine._event_bus = Mock()
+        engine._event_loop = object()
+        submission_started = threading.Event()
+        allow_submission = threading.Event()
+        cancellation_started = threading.Event()
+        future = Mock()
+
+        async def emit(*_args, **_kwargs):
+            return None
+
+        engine._event_bus.emit = emit
+
+        def submit(coroutine, _loop):
+            coroutine.close()
+            submission_started.set()
+            assert allow_submission.wait(2.0)
+            return future
+
+        monkeypatch.setattr(charlie.voice.asyncio, "run_coroutine_threadsafe", submit)
+        cancel_pending = engine._cancel_pending_event_emits
+
+        def observe_cancellation():
+            cancellation_started.set()
+            cancel_pending()
+
+        monkeypatch.setattr(engine, "_cancel_pending_event_emits", observe_cancellation)
+        emitter = threading.Thread(target=engine._emit_vad_start)
+        stopper = threading.Thread(target=engine.stop)
+        emitter.start()
+        assert submission_started.wait(1.0)
+        stopper.start()
+        try:
+            assert cancellation_started.wait(1.0)
+        finally:
+            allow_submission.set()
+        emitter.join(timeout=1.0)
+        stopper.join(timeout=1.0)
+
+        assert not emitter.is_alive()
+        assert not stopper.is_alive()
+        future.cancel.assert_called_once_with()
+        assert engine._event_emit_futures == set()
 
     def test_stop_checks_thread_liveness_after_bounded_join(self, caplog):
         engine = self._make_engine()
@@ -563,6 +664,48 @@ class TestVoiceEngineInit:
         assert process.join_calls == [1.0, 1.0, 1.0]
         assert process.terminate_calls == 1
         assert process.kill_calls == 1
+
+    def test_stop_reports_asr_worker_still_alive_after_kill(self, caplog):
+        engine = self._make_engine()
+        engine.asr_input_queue = queue.Queue()
+
+        class StubbornProcess:
+            pid = 44
+
+            def __init__(self):
+                self.join_calls = []
+                self.terminate_calls = 0
+                self.kill_calls = 0
+
+            def join(self, timeout):
+                self.join_calls.append(timeout)
+
+            @staticmethod
+            def is_alive():
+                return True
+
+            def terminate(self):
+                self.terminate_calls += 1
+
+            def kill(self):
+                self.kill_calls += 1
+
+        process = StubbornProcess()
+        engine.asr_process = process
+        engine.voice_diagnostics = Mock()
+        engine.voice_diagnostics._resource_thread = None
+
+        with caplog.at_level("ERROR", logger="charlie.voice"):
+            result = engine.stop()
+
+        assert engine.asr_input_queue.get_nowait() is None
+        assert process.join_calls == [1.0, 1.0, 1.0]
+        assert process.terminate_calls == 1
+        assert process.kill_calls == 1
+        assert result.quiescent is False
+        assert result.asr_process_alive is True
+        assert any("ASR worker remained alive" in error for error in result.errors)
+        assert "voice_shutdown_complete" not in caplog.text
 
     def test_stop_reports_diagnostics_worker_overrun(self, caplog):
         engine = self._make_engine()

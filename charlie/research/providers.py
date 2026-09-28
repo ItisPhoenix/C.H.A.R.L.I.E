@@ -7,13 +7,44 @@ from dataclasses import dataclass
 from html import unescape
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Protocol
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 
 from charlie.research.models import SearchResult
 
 logger = logging.getLogger("charlie.research.providers")
+
+
+def _normalize_duckduckgo_href(href: str) -> str:
+    """Unwrap DDG result redirects and retain only valid HTTP(S) targets."""
+    value = unescape(href).strip()
+    if value.startswith("//"):
+        value = f"https:{value}"
+    try:
+        parsed = urlparse(value)
+        hostname = parsed.hostname
+        parsed.port
+    except ValueError:
+        return ""
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc or not hostname:
+        return ""
+
+    if hostname.lower() in {"duckduckgo.com", "www.duckduckgo.com"} and parsed.path == "/l/":
+        targets = parse_qs(parsed.query).get("uddg", [])
+        if len(targets) != 1:
+            return ""
+        value = targets[0].strip()
+        try:
+            parsed = urlparse(value)
+            hostname = parsed.hostname
+            parsed.port
+        except ValueError:
+            return ""
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc or not hostname:
+            return ""
+
+    return parsed._replace(scheme=parsed.scheme.lower()).geturl()
 
 
 class _DuckDuckGoParser(HTMLParser):
@@ -32,7 +63,7 @@ class _DuckDuckGoParser(HTMLParser):
         classes.update((attributes.get("class") or "").split())
         if tag == "a" and "result__a" in classes:
             self._kind = "title"
-            self._href = unescape(attributes.get("href") or "")
+            self._href = _normalize_duckduckgo_href(attributes.get("href") or "")
             self._buffer = []
         elif "result__snippet" in classes or (tag == "td" and "result-snippet" in classes):
             self._kind = "snippet"
@@ -187,7 +218,7 @@ class DuckDuckGoProvider:
         self, query: str, *, limit: int, domain_filters: Optional[List[str]] = None
     ) -> List[SearchResult]:
         if domain_filters:
-            query = f"{query} " + " ".join(f"site:{domain}" for domain in domain_filters)
+            query = " ".join(f"site:{domain}" for domain in domain_filters) + f" {query}"
         async with httpx.AsyncClient(timeout=self.timeout_s, follow_redirects=True) as client:
             response = await client.get(
                 "https://html.duckduckgo.com/html/",

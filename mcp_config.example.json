@@ -1,0 +1,20 @@
+{
+  "mcp": {
+    "MCP_DOCKER": {
+      "type": "local",
+      "command": [
+        "C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe",
+        "mcp",
+        "gateway",
+        "run",
+        "--profile",
+        "ai_coding"
+      ],
+      "enabled": true,
+      "timeout_ms": 9000000
+    }
+  },
+  "mcpToolPolicies": {
+    "MCP_DOCKER:fetch": "allow"
+  }
+}

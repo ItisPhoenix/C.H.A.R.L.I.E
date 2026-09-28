@@ -7,6 +7,7 @@ from charlie.core import (
     _apply_correction_to_memory,
     _assess_tool_result_relevance,
     _detect_correction,
+    _detect_explicit_recall,
     _detect_forget_rule,
     _detect_operator_persona,
     _detect_review_rules,
@@ -17,6 +18,12 @@ from charlie.core import (
     _strip_vocatives,
 )
 from charlie.prompt_builder import build_volatile_tier as _build_volatile_tier
+
+
+def test_explicit_recall_extracts_owner_prefixed_natural_question():
+    assert _detect_explicit_recall(
+        "Charlie, what temporary marker did I ask you to remember for my next check?"
+    ) == "temporary marker"
 
 # ---------------------------------------------------------------------------
 # Step 1: Correction Detection & Auto-Learning

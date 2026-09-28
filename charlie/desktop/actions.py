@@ -233,9 +233,13 @@ def key_press(keys: str) -> str:
     if not _HAS_PYAUTOGUI:
         return "Error: pyautogui is not installed -- desktop control unavailable."
     try:
-        parts = [k.strip() for k in keys.split("+") if k.strip()]
-        if not parts:
+        parts = [key.strip().casefold() for key in keys.split("+")]
+        if not keys.strip() or any(not key for key in parts):
             return "Error: no keys specified."
+        allowed_keys = {str(key).casefold() for key in pyautogui.KEYBOARD_KEYS}
+        invalid_keys = [key for key in parts if key not in allowed_keys]
+        if invalid_keys:
+            return f"Error: unsupported key(s) in chord: {', '.join(invalid_keys)}."
         pyautogui.hotkey(*parts)
         return f"Sent key chord: {keys}."
     except DesktopHalted:

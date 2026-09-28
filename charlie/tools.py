@@ -5,26 +5,30 @@ No business logic -- just tool I/O.
 """
 
 import asyncio
-import base64
+import hashlib
+import http.client
 import inspect
+import ipaddress
 import json
 import logging
 import os
 import re
+import socket
+import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import quote, urljoin, urlsplit
 
-from charlie import recovery
 from charlie.config import config
-from charlie.events import EventMeta, EventSource
 from charlie.execution_context import ExecutionContext, get_current_execution_context, terminate_process_tree
 from charlie.known_apps import APP_REGISTRY
-from charlie.presentation_control import PresentationRequest, get_presentation_controller
 from charlie.results import ResultsStore
 from charlie.session_store import SessionStore
 from charlie.utils import is_process_running
@@ -34,6 +38,10 @@ logger = logging.getLogger("charlie.tools")
 
 # --- Process-local facade (set via set_memory_service at init) ---
 _memory_service = None  # type: Optional[Any]
+_self_extension_orchestrator = None  # type: Optional[Any]
+_runtime_introspector = None  # type: Optional[Any]
+_self_knowledge_service = None  # type: Optional[Any]
+_charlie_doctor = None  # type: Optional[Any]
 # --- Pending vision-tier screenshot: written by desktop_screenshot, consumed
 # --- once by Brain._build_payload for the very next outgoing payload. ---
 _pending_vision_image = None  # type: Optional[str]
@@ -66,10 +74,6 @@ _SHELL_KILL_DRAIN_TIMEOUT = 2.0
 _SHELL_POLL_INTERVAL = 0.05
 _SHELL_CANCEL_DRAIN_TIMEOUT = 0.5
 
-# --- Dashboard live view (desktop_frame event) ---
-_DESKTOP_FRAME_FPS = 2.0
-_DESKTOP_FRAME_MAX_EDGE = 960
-
 # --- SearXNG keyword detection ---
 _TIME_SENSITIVE_KEYWORDS = (
     "today", "new", "recent", "latest", "breaking", "now", "live", "news",
@@ -90,6 +94,21 @@ class ToolExecutionResult:
     model_text: str
     structured_data: Any = None
     result_kind: Optional[str] = None
+
+
+def configure_runtime_services(
+    *,
+    self_extension_orchestrator: Any,
+    runtime_introspector: Any,
+    self_knowledge_service: Any,
+    doctor: Any,
+) -> None:
+    """Install main-owned services used by runtime tools."""
+    global _self_extension_orchestrator, _runtime_introspector, _self_knowledge_service, _charlie_doctor
+    _self_extension_orchestrator = self_extension_orchestrator
+    _runtime_introspector = runtime_introspector
+    _self_knowledge_service = self_knowledge_service
+    _charlie_doctor = doctor
 
 
 # Pre-compiled regex for stripping conversational fluff from search queries.
@@ -279,7 +298,9 @@ class ToolRegistry:
             "desktop_open_app",
             "desktop_close_app",
             "desktop_open_url",
+            "file_write",
             "shell_execute",
+            "download_public_pdf",
             "media_control",
             "media_snapshot",
             "calendar_list",
@@ -287,8 +308,17 @@ class ToolRegistry:
             "calendar_update",
             "calendar_delete",
             "calendar_get",
+            "automation_create",
+            "automation_update",
+            "automation_get",
+            "automation_list",
+            "automation_cancel",
         }:
             func = self._tools[name]["func"]
+            if name == "file_write" and func is file_write:
+                return _write_file_atomically(
+                    path=arguments["path"], content=arguments["content"]
+                )
             result = func(**arguments)
             return result if isinstance(result, ToolExecutionResult) else ToolExecutionResult(str(result))
         return ToolExecutionResult(self.execute_tool(name, arguments))
@@ -371,39 +401,6 @@ def _media_result_text(action: str, result: dict) -> str:
     return f"Media action '{action}' completed."
 
 
-@registry.register_tool(
-    name="presentation_request",
-    description=(
-        "Request a semantic Charlie HUD presentation change. Use only show, hide, or clear_screen; "
-        "the presentation registry resolves valid surfaces and the resolver chooses the final modality."
-    ),
-    schema={
-        "type": "object",
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["show", "hide", "clear_screen"],
-                "description": "Semantic presentation action.",
-            },
-            "surface": {
-                "type": "string",
-                "description": "Canonical presentation surface or registry alias; omit for clear_screen.",
-            },
-        },
-        "required": ["action"],
-        "additionalProperties": False,
-    },
-    is_interactive=True,
-)
-def presentation_request(action: str, surface: Optional[str] = None) -> str:
-    """Thin ToolRegistry adapter for the canonical PresentationController."""
-    result = get_presentation_controller().execute(
-        PresentationRequest(action=action, surface=surface, source=EventSource.BRAIN)
-    )
-    return result.message if result.accepted else f"Error: {result.message}"
-
-
-# ---------------------------------------------------------------------------
 # Built-in tools
 # ---------------------------------------------------------------------------
 
@@ -557,8 +554,8 @@ def _run_research_report(name: str, arguments: Dict[str, Any]):
     query = str(arguments.get("query", ""))
     mode = "quick" if name == "web_search" else str(arguments.get("mode", "auto"))
     domain = str(arguments.get("domain", ""))
-    effective_query = f"{query} site:{domain.strip()}" if domain.strip() else query
-    return ResearchEngine(config).run_sync(effective_query, mode)
+    domain_filters = list(dict.fromkeys(part.strip() for part in domain.split(",") if part.strip()))
+    return ResearchEngine(config).run_sync(query, mode, domain_filters=domain_filters or None)
 
 
 def _single_search(query: str) -> str:
@@ -604,6 +601,16 @@ _GATED_KEYWORDS = (
 _SHELL_METACHARS = (";", "|", "&", "`", "$", "(", ")")
 _SHELL_NAMES = ("cmd", "cmd.exe", "powershell", "powershell.exe")
 _CONVERSATIONAL = ("stop", "start", "cancel", "wait", "halt")
+_SAFE_SHELL_COMMAND = re.compile(
+    r"(?:python\s+(?:--version|-V)|python3\s+--version|where\s+python|taskkill\s+/\?|git\s+rev-parse\s+HEAD|"
+    r"exit\s+(?:[1-9]|[1-9]\d|1\d\d|2[0-4]\d|25[0-5]))\Z",
+    re.IGNORECASE,
+)
+
+
+def is_acceptance_safe_shell_command(command: str) -> bool:
+    """Match the few harmless commands that need no shell approval."""
+    return bool(_SAFE_SHELL_COMMAND.fullmatch(command.strip()))
 
 
 def is_command_keyword_blocked(command: str) -> Optional[str]:
@@ -652,6 +659,8 @@ def is_shell_command_gated(command: str) -> Optional[str]:
     if it doesn't. Only meaningful once `is_shell_command_blocked` has
     already passed -- gating never overrides a hard block.
     """
+    if is_acceptance_safe_shell_command(command):
+        return None
     return is_command_keyword_gated(command)
 
 
@@ -742,13 +751,15 @@ def shell_execute(command: str, *, voice_mode: bool = False) -> ToolExecutionRes
             "copy ",
         )
         # Accept the bare command too (e.g. "notepad" with no args), not just "notepad <arg>".
-        if not any(lowered == prefix.strip() or lowered.startswith(prefix) for prefix in allowed_prefixes):
+        if not is_acceptance_safe_shell_command(command) and not any(
+            lowered == prefix.strip() or lowered.startswith(prefix) for prefix in allowed_prefixes
+        ):
             return (
                 "Error: Command not on the allowed list for voice mode. "
-                "Use the web UI for unrestricted shell access."
+                "Unrestricted shell access is not available through the voice safety policy."
             )
 
-    # Universal guards: apply in every mode (voice and web UI).
+    # Universal guards: apply in every mode.
     blocked_reason = is_shell_command_blocked(command)
     if blocked_reason:
         return f"Error: {blocked_reason}"
@@ -1051,26 +1062,57 @@ def _resolve_safe_path(path_str: str) -> Path:
     return resolved
 
 
-def get_path_gate_reason(path_str: str) -> Optional[str]:
-    """Pure pre-flight check: does this path need approve/decline before a
-    file_read/file_write call touches it? Returns a human-readable reason, or
-    None if the path is clear. Resolves the same way file_read/file_write do
-    (user-placeholder substitution + _resolve_safe_path) so the reason
-    reflects the actual path that will be opened, not the raw argument.
+def get_path_gate_reason(path_str: str, *, tool_name: Optional[str] = None) -> Optional[str]:
+    """Return an approval reason for a sensitive or non-local file operation.
+
+    Callers without a tool name retain the legacy sensitive-path probe used by
+    background-task classification; the live file tools pass their operation.
     """
     try:
         resolved = _resolve_safe_path(_resolve_user_placeholders(path_str))
     except Exception:
-        return None
+        return "file path could not be resolved and requires approval" if tool_name else None
 
     from charlie.config import config
     path_lower = str(resolved).lower()
     system_root = config.system_root.lower()
     if system_root and system_root in path_lower:
-        return f"system root path '{config.system_root}'"
+        return f"system root path '{config.system_root}' at '{resolved}'"
+    sensitive_directories = {".ssh", ".aws", ".kube", ".gnupg"}
+    sensitive_directory = next(
+        (part for part in resolved.parts if part.casefold() in sensitive_directories),
+        None,
+    )
+    if sensitive_directory:
+        return f"sensitive path '{sensitive_directory}' at '{resolved}'"
     for blocked in _GATED_PATH_SUBSTRINGS:
         if blocked.lower() in path_lower:
-            return f"sensitive path '{blocked}'"
+            return f"sensitive path '{blocked}' at '{resolved}'"
+
+    if tool_name is None:
+        return None
+
+    home = Path.home()
+    roots = (
+        _WORKSPACE_DIR,
+        *(home / name for name in ("Documents", "Downloads", "Desktop")),
+    )
+    within_approved_root = False
+    for root in roots:
+        try:
+            resolved.relative_to(root.resolve(strict=False))
+            within_approved_root = True
+            break
+        except ValueError:
+            continue
+
+    if tool_name in {"file_write", "download_public_pdf"} and resolved.is_file():
+        return f"overwrite of existing file '{resolved}' requires approval"
+    if not within_approved_root:
+        return (
+            f"{tool_name} path '{resolved}' is outside Charlie's workspace, Documents, "
+            "Downloads, and Desktop"
+        )
     return None
 
 
@@ -1131,7 +1173,7 @@ def file_read(path: str) -> str:
 
 @registry.register_tool(
     name="file_write",
-    description="Write content to a file (creates or overwrites it).",
+    description="Create a file or atomically replace one after exact-path approval.",
     schema={
         "type": "object",
         "properties": {
@@ -1148,23 +1190,294 @@ def file_read(path: str) -> str:
     },
 )
 def file_write(path: str, content: str) -> str:
+    return _write_file_atomically(path, content).model_text
+
+
+def _write_file_atomically(path: str, content: str) -> ToolExecutionResult:
+    temp_path: Optional[Path] = None
     try:
         path = _resolve_user_placeholders(path)
-        path = os.path.abspath(path)
         safe_path = _resolve_safe_path(path)
         if safe_path.is_dir():
-            return f"Error: Cannot write to a directory ({path}). Please specify a file path."
+            return ToolExecutionResult(
+                f"Error: Cannot write to a directory ({safe_path}). Please specify a file path.",
+                {"ok": False, "verified": False},
+                "file_write",
+            )
 
-        dest_dir = os.path.dirname(safe_path)
-        os.makedirs(dest_dir, exist_ok=True)
-        with open(safe_path, "w", encoding="utf-8") as handle:
-            handle.write(content)
-        return f"Successfully wrote to {path}"
+        safe_path.parent.mkdir(parents=True, exist_ok=True)
+        expected = content.encode("utf-8")
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=safe_path.parent,
+            prefix=".charlie-",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            handle.write(expected)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        if safe_path.exists():
+            os.chmod(temp_path, safe_path.stat().st_mode & 0o777)
+        os.replace(temp_path, safe_path)
+        temp_path = None
+
+        actual = safe_path.read_bytes()
+        expected_hash = hashlib.sha256(expected).hexdigest()
+        actual_hash = hashlib.sha256(actual).hexdigest()
+        verified = actual == expected and actual_hash == expected_hash
+        structured = {
+            "ok": verified,
+            "verified": verified,
+            "byte_count": len(actual),
+            "sha256": actual_hash,
+        }
+        text = (
+            f"Successfully wrote to {safe_path} and verified {len(actual)} bytes."
+            if verified
+            else f"Error: File write verification failed for '{safe_path}'."
+        )
+        return ToolExecutionResult(text, structured, "file_write")
     except ValueError as e:
-        return f"Error: {e}"
+        return ToolExecutionResult(f"Error: {e}", {"ok": False, "verified": False}, "file_write")
     except Exception as e:
         logger.exception("File write error: %s", path)
-        return f"Error writing file: {e}"
+        return ToolExecutionResult(
+            f"Error writing file: {e}", {"ok": False, "verified": False}, "file_write"
+        )
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.warning("Could not remove failed file-write temporary: %s", temp_path)
+
+
+_PUBLIC_PDF_MAX_BYTES = 25 * 1024 * 1024
+_PUBLIC_PDF_MAX_REDIRECTS = 5
+_PUBLIC_PDF_CHUNK_SIZE = 64 * 1024
+_PUBLIC_PDF_TIMEOUT = 15.0
+_PUBLIC_NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _validate_public_pdf_url(url: str):
+    if not isinstance(url, str) or not url or any(ord(char) < 32 for char in url):
+        raise ValueError("A valid public HTTPS URL is required.")
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port if parsed.port is not None else 443
+        host = parsed.hostname
+    except ValueError as exc:
+        raise ValueError("A valid public HTTPS URL is required.") from exc
+    if parsed.scheme.lower() != "https":
+        raise ValueError("Only HTTPS URLs are allowed.")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("URL credentials are not allowed.")
+    if not host or not 1 <= port <= 65535:
+        raise ValueError("A valid public HTTPS host and port are required.")
+    try:
+        host = host.encode("idna").decode("ascii")
+        addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("The PDF host could not be resolved as public HTTPS.") from exc
+
+    public_addresses = []
+    for address_info in addresses:
+        family, socktype, protocol, _, sockaddr = address_info
+        if family not in (socket.AF_INET, socket.AF_INET6):
+            continue
+        try:
+            ip = ipaddress.ip_address(sockaddr[0].split("%", 1)[0])
+        except ValueError as exc:
+            raise ValueError("The PDF host resolved to an invalid IP address.") from exc
+        if ip.version == 6 and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        elif ip.version == 6 and ip in _PUBLIC_NAT64_PREFIX:
+            ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        if not ip.is_global:
+            raise ValueError("The PDF host must resolve only to public IP addresses.")
+        public_addresses.append((family, socktype, protocol, sockaddr))
+    if not public_addresses:
+        raise ValueError("The PDF host has no public IP address.")
+
+    host_header = f"[{host}]" if ":" in host else host
+    if port != 443:
+        host_header = f"{host_header}:{port}"
+    path = quote(parsed.path or "/", safe="/%:@!$&'()*+,;=-._~")
+    query = quote(parsed.query, safe="/%?:@!$&'()*+,;=-._~")
+    request_target = path + (f"?{query}" if query else "")
+    return host, host_header, request_target, tuple(public_addresses)
+
+
+@contextmanager
+def _open_public_pdf_response(host, host_header, request_target, addresses):
+    sock = None
+    last_error = None
+    context = ssl.create_default_context()
+    for family, socktype, protocol, sockaddr in addresses:
+        connection = socket.socket(family, socktype, protocol)
+        try:
+            connection.settimeout(_PUBLIC_PDF_TIMEOUT)
+            connection.connect(sockaddr)
+            sock = context.wrap_socket(connection, server_hostname=host)
+            break
+        except OSError as exc:
+            last_error = exc
+            connection.close()
+    if sock is None:
+        raise OSError("Could not establish a verified public HTTPS connection.") from last_error
+
+    try:
+        request = (
+            f"GET {request_target} HTTP/1.1\r\n"
+            f"Host: {host_header}\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode("ascii")
+        sock.sendall(request)
+        response = http.client.HTTPResponse(sock)
+        try:
+            response.begin()
+            yield response
+        finally:
+            response.close()
+    finally:
+        sock.close()
+
+
+def _readback_public_pdf(path: Path):
+    digest = hashlib.sha256()
+    byte_count = 0
+    with path.open("rb") as handle:
+        if handle.read(5) != b"%PDF-":
+            raise ValueError("Downloaded file does not have a PDF signature.")
+        handle.seek(0)
+        while chunk := handle.read(_PUBLIC_PDF_CHUNK_SIZE):
+            byte_count += len(chunk)
+            if byte_count > _PUBLIC_PDF_MAX_BYTES:
+                raise ValueError("PDF exceeds the 25 MiB download limit.")
+            digest.update(chunk)
+    return byte_count, digest.hexdigest()
+
+
+@registry.register_tool(
+    name="download_public_pdf",
+    description="Download a public HTTPS PDF to a local path and verify its saved bytes.",
+    schema={
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "Public HTTPS URL of a PDF."},
+            "path": {"type": "string", "description": "Local destination path for the PDF."},
+        },
+        "required": ["url", "path"],
+    },
+)
+def download_public_pdf(url: str, path: str) -> ToolExecutionResult:
+    temp_path = None
+    try:
+        safe_path = _resolve_safe_path(_resolve_user_placeholders(path))
+        if safe_path.is_dir():
+            raise ValueError("The destination must be a file path.")
+        safe_path.parent.mkdir(parents=True, exist_ok=True)
+
+        current_url = url
+        stream_hash = hashlib.sha256()
+        written = 0
+        expected_length = None
+        for redirects_followed in range(_PUBLIC_PDF_MAX_REDIRECTS + 1):
+            target = _validate_public_pdf_url(current_url)
+            with _open_public_pdf_response(*target) as response:
+                if response.status in {301, 302, 303, 307, 308}:
+                    if redirects_followed >= _PUBLIC_PDF_MAX_REDIRECTS:
+                        raise ValueError("The PDF URL exceeded the redirect limit.")
+                    location = response.getheader("Location")
+                    if not location:
+                        raise ValueError("The PDF server returned a redirect without a destination.")
+                    current_url = urljoin(current_url, location)
+                    continue
+                if response.status != 200:
+                    raise ValueError(f"The PDF server returned HTTP {response.status}.")
+
+                raw_length = response.getheader("Content-Length")
+                if raw_length is not None:
+                    try:
+                        expected_length = int(raw_length)
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError("The PDF server returned an invalid byte count.") from exc
+                    if expected_length < 0:
+                        raise ValueError("The PDF server returned an invalid byte count.")
+                    if expected_length > _PUBLIC_PDF_MAX_BYTES:
+                        raise ValueError("PDF exceeds the 25 MiB download limit.")
+
+                with tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    prefix=f".{safe_path.name}.",
+                    suffix=".tmp",
+                    dir=safe_path.parent,
+                    delete=False,
+                ) as temp:
+                    temp_path = Path(temp.name)
+                    while chunk := response.read(_PUBLIC_PDF_CHUNK_SIZE):
+                        written += len(chunk)
+                        if written > _PUBLIC_PDF_MAX_BYTES:
+                            raise ValueError("PDF exceeds the 25 MiB download limit.")
+                        if expected_length is not None and written > expected_length:
+                            raise ValueError("Downloaded byte count exceeds Content-Length.")
+                        temp.write(chunk)
+                        stream_hash.update(chunk)
+                    temp.flush()
+                    os.fsync(temp.fileno())
+            break
+        else:
+            raise ValueError("The PDF URL exceeded the redirect limit.")
+
+        if expected_length is not None and written != expected_length:
+            raise ValueError("Downloaded byte count does not match Content-Length.")
+        if written != temp_path.stat().st_size:
+            raise OSError("Temporary PDF byte count did not match disk size.")
+
+        stream_sha256 = stream_hash.hexdigest()
+        temp_count, temp_sha256 = _readback_public_pdf(temp_path)
+        if temp_count != written or temp_sha256 != stream_sha256:
+            raise OSError("Temporary PDF readback did not match downloaded bytes.")
+        if expected_length is not None and temp_count != expected_length:
+            raise OSError("Temporary PDF readback did not match Content-Length.")
+
+        os.replace(temp_path, safe_path)
+        temp_path = None
+        final_count, final_sha256 = _readback_public_pdf(safe_path)
+        if final_count != written or final_sha256 != stream_sha256:
+            raise OSError("Saved PDF readback did not match downloaded bytes.")
+        if expected_length is not None and final_count != expected_length:
+            raise OSError("Saved PDF readback did not match Content-Length.")
+
+        return ToolExecutionResult(
+            f"Downloaded and verified PDF ({final_count} bytes, SHA-256 {final_sha256}) to {safe_path}.",
+            {
+                "ok": True,
+                "verified": True,
+                "path": str(safe_path),
+                "byte_count": final_count,
+                "sha256": final_sha256,
+                "url": current_url,
+            },
+            "public_pdf_download",
+        )
+    except Exception as exc:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not remove incomplete PDF temp file: %s", temp_path)
+        logger.warning("Public PDF download failed: %s", type(exc).__name__)
+        return ToolExecutionResult(
+            f"Error downloading public PDF: {exc}",
+            {"ok": False, "failure_kind": type(exc).__name__},
+            "public_pdf_download",
+        )
 
 
 _MEMORY_MAX_CHARS = {
@@ -1206,10 +1519,48 @@ def _memory_capacity_error(target: str, entries: list, max_chars: int, new_len: 
     )
 
 
+_MEMORY_SECRET_RE = re.compile(
+    r"(?i)\b(?:password|passcode|api[\s_-]?key|access[\s_-]?token|refresh[\s_-]?token|"
+    r"client[\s_-]?secret|secret|private[\s_-]?key|credential)\b\s*(?:is|:|=)\s*\S+"
+)
+_MEMORY_PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----", re.IGNORECASE)
+_MEMORY_GOV_ID_RE = re.compile(
+    r"(?i)\b(?:aadhaar|aadhar|uidai)\b.{0,24}\b\d{4}[ -]?\d{4}[ -]?\d{4}\b|"
+    r"\bPAN\b.{0,16}\b[A-Z]{5}\d{4}[A-Z]\b|"
+    r"\bSSN\b.{0,16}\b\d{3}-\d{2}-\d{4}\b|"
+    r"\bpassport(?:\s+(?:number|no\.?))?\b.{0,16}\b[A-Z]\d{7}\b"
+)
+_MEMORY_CARD_RE = re.compile(
+    r"(?i)\b(?:credit|debit)\s+card(?:\s+(?:number|no\.?))?\s*[:#-]?\s*"
+    r"\d[\d -]{11,22}\d\b|(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)"
+)
+
+
+def _contains_sensitive_memory_content(*values: str) -> bool:
+    """Refuse obvious secrets and regulated identifiers at the persistent-write boundary."""
+    text = " ".join(value for value in values if value)
+    if _MEMORY_SECRET_RE.search(text) or _MEMORY_PRIVATE_KEY_RE.search(text) or _MEMORY_GOV_ID_RE.search(text):
+        return True
+    for candidate in _MEMORY_CARD_RE.findall(text):
+        digits = [int(digit) for digit in re.sub(r"\D", "", candidate)]
+        if 13 <= len(digits) <= 19:
+            checksum = sum(
+                (digit * 2 - 9 if digit * 2 > 9 else digit * 2) if index % 2 else digit
+                for index, digit in enumerate(reversed(digits))
+            )
+            if checksum % 10 == 0:
+                return True
+    return False
+
+
 @registry.register_tool(
     name="memory",
     description=(
-        "Manage persistent memory files. Actions: add appends an entry, "
+        "Manage persistent memory files and structured graph memories. For structured target, "
+        "add only durable user preferences or environment facts; use update for explicit corrections. "
+        "Never store task outputs or full conversations. Use search/undo with the managed memory service; "
+        "use target=all to search both structured and semantic saved memories. "
+        "File actions: add appends an entry, "
         "replace swaps an entry containing old_text, remove drops an entry, "
         "consolidate returns all entries with capacity for review. "
         "Entries are delimited by section sign."
@@ -1219,13 +1570,19 @@ def _memory_capacity_error(target: str, entries: list, max_chars: int, new_len: 
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["add", "replace", "remove", "consolidate"],
-                "description": "add = append, replace = swap entry, remove = drop, consolidate = list all.",
+                "enum": ["add", "replace", "remove", "consolidate", "search", "update", "undo"],
+                "description": (
+                    "For structured target: add/search/update/undo a graph memory item. "
+                    "For file targets: add/replace/remove/consolidate entries."
+                ),
             },
             "target": {
                 "type": "string",
-                "enum": ["memory", "user", "opinions"],
-                "description": "memory (max 2200), user (max 1375), opinions (max 800 chars).",
+                "enum": ["memory", "user", "opinions", "structured", "all"],
+                "description": (
+                    "memory/user/opinions are persistent text files; "
+                    "structured uses the managed memory graph; all searches structured and semantic saved memories."
+                ),
             },
             "content": {
                 "type": "string",
@@ -1235,13 +1592,134 @@ def _memory_capacity_error(target: str, entries: list, max_chars: int, new_len: 
                 "type": "string",
                 "description": "Substring to find in an entry (required for replace/remove).",
             },
+            "item_id": {"type": "string", "description": "Structured memory item id for update or undo."},
+            "query": {"type": "string", "description": "Search text for structured memory."},
+            "category": {
+                "type": "string",
+                "enum": ["preference", "fact", "person", "place", "concept", "task", "event"],
+                "description": "Structured memory category for add; defaults to fact.",
+            },
+            "subject": {
+                "type": "string",
+                "description": "Fact subject; provide all three triple fields to correct a graph fact.",
+            },
+            "predicate": {
+                "type": "string",
+                "description": "Fact relation; provide all three triple fields to correct a graph fact.",
+            },
+            "object": {
+                "type": "string",
+                "description": "Fact object; provide all three triple fields to correct a graph fact.",
+            },
         },
         "required": ["action", "target"],
     },
 )
-def memory(action: str, target: str, content: str = "", old_text: str = "") -> str:
+def memory(
+    action: str,
+    target: str,
+    content: str = "",
+    old_text: str = "",
+    item_id: str = "",
+    query: str = "",
+    category: str = "fact",
+    subject: str = "",
+    predicate: str = "",
+    object: str = "",
+) -> str:
+    if target == "all":
+        if action != "search":
+            return "Error: target 'all' supports search only."
+        if not query.strip():
+            return "Error: query is required for memory search."
+        if _memory_service is None:
+            return "Saved memory is not available."
+        try:
+            results = _memory_service.recall(query, n_results=5)
+            if results is None:
+                return "Memory search failed; the memory service may be unavailable."
+            if not results:
+                return "No relevant saved memories found."
+            lines = []
+            for item in results:
+                content = str(item.get("content") or item.get("text") or "").strip()
+                if content:
+                    lines.append(f"- [{item.get('source', 'saved')}] {content}")
+            return "Saved memories:\n" + "\n".join(lines) if lines else "No relevant saved memories found."
+        except Exception as e:
+            logger.exception("Combined memory search error")
+            return f"Memory search failed ({type(e).__name__})."
+
+    if target == "structured":
+        if _memory_service is None:
+            return "Structured memory is not available."
+        try:
+            if action == "add":
+                if not content and not (subject and predicate and object):
+                    return "Error: content or a complete subject/predicate/object is required."
+                if _contains_sensitive_memory_content(content, subject, predicate, object):
+                    return "Error: Sensitive credentials, payment data, or government IDs cannot be stored."
+                item = _memory_service.add_item(
+                    category=category,
+                    content=content,
+                    subject=subject,
+                    predicate=predicate,
+                    obj=object,
+                    provenance="tool_explicit_add",
+                )
+                if not item.get("id"):
+                    return "Error: Structured memory could not be saved."
+                return f"Remembered structured memory id={item['id']}; {item.get('content', content)}"
+            if action == "search":
+                if not query.strip():
+                    return "Error: query is required for structured memory search."
+                items = _memory_service.search_items(query, limit=10)
+                if not items:
+                    return "No matching structured memories found."
+                return "Structured memories:\n" + "\n".join(
+                    f"- id={item['id']}; {item['category']}: {item['content']}" for item in items
+                )
+            if action == "update":
+                if not item_id:
+                    return "Error: item_id is required for structured memory update."
+                if not content:
+                    return "Error: content is required for structured memory update."
+                if _contains_sensitive_memory_content(content, subject, predicate, object):
+                    return "Error: Sensitive credentials, payment data, or government IDs cannot be stored."
+                item = _memory_service.update_item(
+                    item_id,
+                    content=content,
+                    provenance="tool_explicit_correction",
+                    subject=subject or None,
+                    predicate=predicate or None,
+                    obj=object or None,
+                )
+                if item is None:
+                    return "Error: Memory item was not found."
+                return f"Updated structured memory id={item_id}; {item['content']}"
+            if action == "undo":
+                if not item_id:
+                    return "Error: item_id is required for structured memory undo."
+                item = _memory_service.undo_item_update(item_id, provenance="tool_owner_undo")
+                if item is None:
+                    if not any(row.get("id") == item_id for row in _memory_service.list_items(limit=1000)):
+                        return "Error: Memory item was not found."
+                    return "No structured memory update is available to undo."
+                return f"Restored structured memory id={item_id}; {item['content']}"
+            return f"Error: Unsupported structured memory action '{action}'."
+        except ValueError as e:
+            if "Triple-backed facts require subject, predicate, and object" in str(e):
+                return f"Error: {e}"
+            logger.exception("Structured memory tool error: action=%s", action)
+            return f"Error updating structured memory: {type(e).__name__}."
+        except Exception as e:
+            logger.exception("Structured memory tool error: action=%s", action)
+            return f"Error updating structured memory: {type(e).__name__}."
+
     if target not in _MEMORY_MAX_CHARS:
         return f"Error: target must be 'memory', 'user', or 'opinions', got '{target}'."
+    if action in ("add", "replace") and _contains_sensitive_memory_content(content, old_text):
+        return "Error: Sensitive credentials, payment data, or government IDs cannot be stored."
 
     max_chars = _MEMORY_MAX_CHARS[target]
     path = (
@@ -1323,7 +1801,7 @@ def memory(action: str, target: str, content: str = "", old_text: str = "") -> s
         "Tier-3 self-extension: author a brand-new tool in Python and queue it for "
         "your review. Use only when no existing tool covers the request and you're asked "
         "to 'learn' or permanently gain a new capability -- never for a one-off task. "
-        "Always requires your explicit approval on the dashboard before it can run."
+        "Always requires explicit owner approval before it can run."
     ),
     schema={
         "type": "object",
@@ -1399,6 +1877,8 @@ def start_background_task(text: str, priority: int = 0, depends_on=None) -> str:
     },
 )
 def vector_memory(action: str, content: str) -> str:
+    if action == "remember" and _contains_sensitive_memory_content(content):
+        return "Error: Sensitive credentials, payment data, or government IDs cannot be stored."
     if _memory_service is None or not _memory_service.semantic_available():
         return "Vector memory is not available. Embedding service may be offline."
 
@@ -1410,7 +1890,6 @@ def vector_memory(action: str, content: str) -> str:
             auto_extract=False,
         )
         if count > 0:
-            emit_memory_updated("vector_memory", content)
             return f"Remembered: {content[:100]}"
         return "Failed to store memory."
 
@@ -1546,11 +2025,19 @@ def capabilities() -> str:
 def graph_add_fact(subject: str, predicate: str, object: str) -> str:
     if _memory_service is None:
         return "Knowledge graph is not available."
+    if _contains_sensitive_memory_content(subject, predicate, object):
+        return "Error: Sensitive credentials, payment data, or government IDs cannot be stored."
     try:
-        edge_id = _memory_service.add_fact(subject, predicate, object)
-        if edge_id is None:
+        item = _memory_service.add_item(
+            category="fact",
+            content=f"{subject} {predicate} {object}",
+            subject=subject,
+            predicate=predicate,
+            obj=object,
+            provenance="tool_explicit_add",
+        )
+        if item.get("id") is None:
             return "Knowledge graph is not available."
-        emit_memory_updated("memory_graph", f"{subject} -> {predicate} -> {object}")
         return f"Added: {subject} -> {predicate} -> {object}"
     except Exception as e:
         logger.exception("graph_add_fact error")
@@ -1625,12 +2112,7 @@ def graph_consolidate() -> str:
 # raw plugin tool names (e.g. "fs_read_file") so wrappers can look them up.
 _PLUGIN_ACTION_DESCRIPTIONS: Dict[str, str] = {
     "fs_list_dir": "List files and subdirectories inside a local directory.",
-    "fs_read_file": "Read the text contents of a file on the local filesystem.",
-    "fs_write_file": "Write text content to a file on the local filesystem.",
     "fs_search": "Search the local filesystem for files matching a glob pattern.",
-    "browser_fetch": "Fetch and return the rendered HTML/text of a web URL.",
-    "browser_screenshot": "Capture a screenshot image of a web URL.",
-    "cal_list_events": "List events from the local calendar store.",
     "code_exec_python": (
         "Execute a snippet of Python in a sandboxed interpreter. "
         "Network and system-level calls are blocked. Use only when the user "
@@ -1761,153 +2243,6 @@ def _desktop_ready() -> bool:
     return DESKTOP_AVAILABLE
 
 
-# --- Dashboard live-view event bus bridge (set via set_event_bus at init) ---
-_event_bus = None  # type: Optional[Any]
-_event_loop = None  # type: Optional[Any]
-_last_frame_emit_at = 0.0
-_self_extension_orchestrator = None  # type: Optional[Any]
-_runtime_introspector = None  # type: Optional[Any]
-_self_knowledge_service = None  # type: Optional[Any]
-_charlie_doctor = None  # type: Optional[Any]
-
-
-def set_event_bus(bus: Any, loop: Any) -> None:
-    """Wire the producer-side EventBus + its asyncio loop so desktop tool
-    functions (running on UIA_EXECUTOR, not the asyncio loop) can bridge a
-    desktop_frame event across threads. Called once from main.py at startup."""
-    global _event_bus, _event_loop
-    _event_bus = bus
-    _event_loop = loop
-
-    def _emit_presentation_event(event: dict[str, Any]) -> None:
-        if _event_bus is None or _event_loop is None:
-            return
-        try:
-            source = EventSource(event.get("source", EventSource.BRAIN.value))
-        except ValueError:
-            source = EventSource.BRAIN
-        meta = EventMeta(
-            source=source,
-            session_id=event.get("session_id"),
-            task_id=event.get("task_id"),
-            rationale=event.get("rationale"),
-        )
-        asyncio.run_coroutine_threadsafe(
-            _event_bus.emit(event["type"], event["payload"], meta=meta), _event_loop
-        )
-
-    get_presentation_controller().set_event_sink(_emit_presentation_event)
-
-
-def configure_runtime_services(
-    *,
-    self_extension_orchestrator: Any,
-    runtime_introspector: Any,
-    self_knowledge_service: Any,
-    doctor: Any,
-) -> None:
-    """Install runtime-owned services used by chat tools."""
-    global _self_extension_orchestrator, _runtime_introspector, _self_knowledge_service, _charlie_doctor
-    _self_extension_orchestrator = self_extension_orchestrator
-    _runtime_introspector = runtime_introspector
-    _self_knowledge_service = self_knowledge_service
-    _charlie_doctor = doctor
-
-
-def _downscale_png(png_bytes: bytes, max_edge: int = _DESKTOP_FRAME_MAX_EDGE) -> bytes:
-    """Resize `png_bytes` so its longer edge is `max_edge`, preserving aspect
-    ratio. Keeps the desktop_frame event payload small at the dashboard's
-    throttled frame rate."""
-    from io import BytesIO
-
-    from PIL import Image
-
-    img = Image.open(BytesIO(png_bytes))
-    scale = max_edge / max(img.size)
-    if scale < 1:
-        img = img.resize(
-            (round(img.size[0] * scale), round(img.size[1] * scale)), Image.LANCZOS
-        )
-    out = BytesIO()
-    img.save(out, format="PNG")
-    return out.getvalue()
-
-
-def _emit_desktop_frame(png_bytes: bytes, elements: List[Any]) -> None:
-    """Best-effort, throttled, fire-and-forget: push a desktop_frame event to
-    the dashboard's "Watch It Drive" live view. Never raises -- a failure
-    here must not affect the calling tool's return value."""
-    global _last_frame_emit_at
-    if _event_bus is None or _event_loop is None:
-        return
-    now = time.time()
-    if now - _last_frame_emit_at < 1.0 / _DESKTOP_FRAME_FPS:
-        return
-    _last_frame_emit_at = now
-    try:
-        image_b64 = base64.b64encode(_downscale_png(png_bytes)).decode("ascii")
-        payload = {
-            "session_id": recovery.get_active_session_id(),
-            "image_b64": image_b64,
-            "marks": [
-                {"mark_id": e.mark_id, "name": e.name, "bounds": list(e.bounds)}
-                for e in elements
-            ],
-        }
-        asyncio.run_coroutine_threadsafe(
-            _event_bus.emit("desktop_frame", payload, meta=EventMeta(source=EventSource.BRAIN)), _event_loop
-        )
-    except Exception:
-        logger.warning("desktop_frame emit failed", exc_info=True)
-
-
-def _capture_and_emit_frame(elements: List[Any]) -> None:
-    """Fire-and-forget: capture + annotate + downscale + emit a desktop_frame
-    for the dashboard live view, off the calling thread so it never adds
-    latency to desktop_observe/desktop_read_screen/desktop_screenshot's
-    return. No-ops silently if OCR/vision deps are missing."""
-    from charlie.desktop import ocr as desktop_ocr
-    from charlie.desktop import vision as desktop_vision
-    if not desktop_ocr.OCR_AVAILABLE or not desktop_vision.VISION_AVAILABLE:
-        return
-
-    def _work():
-        try:
-            png = desktop_ocr.capture()
-            annotated = desktop_vision.annotate_som(png, elements)
-            _emit_desktop_frame(annotated, elements)
-        except Exception:
-            logger.warning("desktop frame capture failed", exc_info=True)
-
-    threading.Thread(target=_work, daemon=True).start()
-
-
-def _emit_vision_observed(uia_count: int, ocr_count: int) -> None:
-    """Fire-and-forget signal that a real OCR/vision pass ran -- event-driven, no polling loop anywhere."""
-    if _event_bus is None or _event_loop is None:
-        return
-    try:
-        payload = {"session_id": recovery.get_active_session_id(), "uia_count": uia_count, "ocr_count": ocr_count}
-        asyncio.run_coroutine_threadsafe(
-            _event_bus.emit("vision_observed", payload, meta=EventMeta(source=EventSource.BRAIN)), _event_loop
-        )
-    except Exception:
-        logger.warning("vision_observed emit failed", exc_info=True)
-
-
-def emit_memory_updated(store: str, summary: str) -> None:
-    """Fire-and-forget: stays invisible unless explicitly commanded (see charlie.attention)."""
-    if _event_bus is None or _event_loop is None:
-        return
-    try:
-        payload = {"store": store, "summary": summary[:120]}
-        asyncio.run_coroutine_threadsafe(
-            _event_bus.emit("memory_updated", payload, meta=EventMeta(source=EventSource.BRAIN)), _event_loop
-        )
-    except Exception:
-        logger.warning("memory_updated emit failed", exc_info=True)
-
-
 # UIA tree element threshold above which OCR is skipped as unnecessary
 _UIA_RICH_THRESHOLD = 5
 
@@ -1925,7 +2260,6 @@ def _ocr_fallback_marks(uia_elements: List[Any]) -> List[Any]:
     except Exception:
         logger.warning("OCR fallback pass failed", exc_info=True)
         return uia_elements
-    _emit_vision_observed(len(uia_elements), len(ocr_elements))
     return merge_ocr_elements(uia_elements, ocr_elements) if ocr_elements else uia_elements
 
 
@@ -2104,7 +2438,6 @@ def desktop_observe() -> str:
         return _DESKTOP_DISABLED_MSG
     from charlie.desktop.uia import serialize_marks, snapshot_tree
     elements = _grounding_marks(_ocr_fallback_marks(snapshot_tree()))
-    _capture_and_emit_frame(elements)
     if not elements:
         return "No UI elements found in the foreground window."
     return serialize_marks(elements)
@@ -2133,7 +2466,6 @@ def desktop_read_screen() -> str:
     except Exception:
         logger.warning("desktop_read_screen OCR pass failed", exc_info=True)
         return "Error: OCR pass failed."
-    _capture_and_emit_frame(elements)
     if not elements:
         return "No readable text found on screen."
     return serialize_marks(elements)
@@ -2339,7 +2671,6 @@ def desktop_screenshot() -> str:
     elements = _grounding_marks(_ocr_fallback_marks(snapshot_tree()))
     text_result = serialize_marks(elements) if elements else "No UI elements found in the foreground window."
     if not config.vision_enabled:
-        _capture_and_emit_frame(elements)
         return text_result
     from charlie.desktop import ocr as desktop_ocr
     from charlie.desktop import vision as desktop_vision
@@ -2349,7 +2680,6 @@ def desktop_screenshot() -> str:
         png = desktop_ocr.capture()
         annotated = desktop_vision.annotate_som(png, elements)
         set_pending_vision_image(desktop_vision.to_data_url(annotated))
-        _emit_desktop_frame(annotated, elements)
     except Exception:
         logger.warning("desktop_screenshot vision annotation failed", exc_info=True)
     return text_result
@@ -2694,7 +3024,204 @@ def calendar_get(event_id: str) -> ToolExecutionResult:
     )
 
 
-# --- Headless browser tools (Playwright + Chrome) -- gated, off by default.
+def _automation_tool_result(operation: str, action: Callable[[], Any]) -> ToolExecutionResult:
+    try:
+        result = action()
+        data = {"ok": True, **result}
+
+        def describe_schedule(schedule: dict) -> str:
+            text = str(schedule.get("text", ""))[:120]
+            return (
+                f"id={schedule.get('id')}; {schedule.get('kind')}: {text}; "
+                f"{schedule.get('status')}; run={schedule.get('active_run_status') or 'idle'}; "
+                f"{schedule.get('recurrence')}; "
+                f"next_run_at={schedule.get('next_run_at')} ({schedule.get('timezone')})"
+            )
+
+        if operation == "list":
+            data["observed"] = True
+            schedules = result.get("automations", [])
+            if not schedules:
+                message = "No automation schedules are configured."
+            else:
+                limit = 25
+                lines = [describe_schedule(schedule) for schedule in schedules[:limit]]
+                message = "Automation schedules:\n" + "\n".join(lines)
+                if len(schedules) > limit:
+                    message += f"\nShowing {limit} of {len(schedules)} schedules."
+        elif operation == "get":
+            data["observed"] = True
+            message = f"Automation schedule observed: {describe_schedule(result)}"
+        elif operation == "cancel" and result.get("status") == "completed":
+            reason = f"Automation schedule {result.get('id')} is completed and was not cancelled."
+            return ToolExecutionResult(
+                f"Error: {reason}",
+                {
+                    **data,
+                    "ok": False,
+                    "failure_kind": "already_completed",
+                    "verification_status": "verified_failure",
+                    "reason": reason,
+                },
+                operation,
+            )
+        elif operation == "cancel" and result.get("status") == "cancelled":
+            data["verified"] = True
+            data["verification_status"] = "verified_success"
+            message = f"Automation schedule is already cancelled: {describe_schedule(result)}"
+        else:
+            data["verified"] = True
+            data["verification_status"] = "verified_success"
+            if operation == "create":
+                message = f"Automation schedule created and verified: {describe_schedule(result)}"
+            elif operation == "update":
+                message = f"Automation schedule updated and verified: {describe_schedule(result)}"
+            elif operation == "cancel" and result.get("status") == "cancelled":
+                message = f"Automation schedule cancelled and verified: {describe_schedule(result)}"
+            else:
+                message = f"Automation schedule state verified: {describe_schedule(result)}"
+        return ToolExecutionResult(message, data, operation)
+    except KeyError as exc:
+        reason = f"Automation schedule not found: {exc.args[0]}"
+        return ToolExecutionResult(
+            f"Error: {reason}", {"ok": False, "failure_kind": "not_found", "reason": reason}, operation
+        )
+    except ValueError as exc:
+        return ToolExecutionResult(
+            f"Error: {exc}", {"ok": False, "failure_kind": "invalid_arguments", "reason": str(exc)}, operation
+        )
+    except RuntimeError as exc:
+        return ToolExecutionResult(
+            f"Error: {exc}", {"ok": False, "failure_kind": "unavailable", "reason": str(exc)}, operation
+        )
+
+
+@registry.register_tool(
+    name="automation_create",
+    description="Create a durable reminder or task schedule. Recurring times follow the IANA timezone's local clock.",
+    schema={
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["reminder", "task"]},
+            "text": {"type": "string"},
+            "first_run_at": {"type": "string", "description": "Timezone-aware ISO-8601 timestamp."},
+            "recurrence": {"type": "string", "enum": ["once", "daily", "weekly"]},
+            "timezone": {"type": "string", "default": "Asia/Kolkata", "description": "IANA timezone."},
+        },
+        "required": ["kind", "text", "first_run_at", "recurrence"],
+        "additionalProperties": False,
+    },
+)
+def automation_create(
+    kind: str,
+    text: str,
+    first_run_at: str,
+    recurrence: str,
+    timezone: str = "Asia/Kolkata",
+) -> ToolExecutionResult:
+    from charlie.calendar_runtime import calendar_runtime_required
+
+    return _automation_tool_result(
+        "create",
+        lambda: calendar_runtime_required().execute_sync(
+            "create_automation", kind, text, first_run_at, recurrence, timezone_name=timezone
+        ),
+    )
+
+
+@registry.register_tool(
+    name="automation_update",
+    description="Update a durable reminder or task schedule without running it.",
+    schema={
+        "type": "object",
+        "properties": {
+            "schedule_id": {"type": "string"},
+            "kind": {"type": "string", "enum": ["reminder", "task"]},
+            "text": {"type": "string"},
+            "first_run_at": {"type": "string", "description": "Timezone-aware ISO-8601 timestamp."},
+            "recurrence": {"type": "string", "enum": ["once", "daily", "weekly"]},
+            "timezone": {"type": "string", "description": "IANA timezone."},
+        },
+        "required": ["schedule_id"],
+        "additionalProperties": False,
+    },
+)
+def automation_update(
+    schedule_id: str,
+    kind: str | None = None,
+    text: str | None = None,
+    first_run_at: str | None = None,
+    recurrence: str | None = None,
+    timezone: str | None = None,
+) -> ToolExecutionResult:
+    from charlie.calendar_runtime import calendar_runtime_required
+
+    values = {
+        key: value
+        for key, value in {
+            "kind": kind,
+            "text": text,
+            "first_run_at": first_run_at,
+            "recurrence": recurrence,
+            "timezone": timezone,
+        }.items()
+        if value is not None
+    }
+    return _automation_tool_result(
+        "update", lambda: calendar_runtime_required().execute_sync("update_automation", schedule_id, values)
+    )
+
+
+@registry.register_tool(
+    name="automation_get",
+    description="Read one durable reminder or task schedule.",
+    schema={
+        "type": "object",
+        "properties": {"schedule_id": {"type": "string"}},
+        "required": ["schedule_id"],
+        "additionalProperties": False,
+    },
+)
+def automation_get(schedule_id: str) -> ToolExecutionResult:
+    from charlie.calendar_runtime import calendar_runtime_required
+
+    return _automation_tool_result(
+        "get", lambda: calendar_runtime_required().execute_sync("get_automation", schedule_id)
+    )
+
+
+@registry.register_tool(
+    name="automation_list",
+    description="List durable reminder and task schedules, including cancelled records.",
+    schema={"type": "object", "properties": {}, "additionalProperties": False},
+)
+def automation_list() -> ToolExecutionResult:
+    from charlie.calendar_runtime import calendar_runtime_required
+
+    return _automation_tool_result(
+        "list", lambda: {"automations": calendar_runtime_required().execute_sync("list_automations")}
+    )
+
+
+@registry.register_tool(
+    name="automation_cancel",
+    description="Cancel a durable reminder or task schedule.",
+    schema={
+        "type": "object",
+        "properties": {"schedule_id": {"type": "string"}},
+        "required": ["schedule_id"],
+        "additionalProperties": False,
+    },
+)
+def automation_cancel(schedule_id: str) -> ToolExecutionResult:
+    from charlie.calendar_runtime import calendar_runtime_required
+
+    return _automation_tool_result(
+        "cancel", lambda: calendar_runtime_required().execute_sync("cancel_automation", schedule_id)
+    )
+
+
+# --- Browser tools (Playwright + Chrome) -- gated, off by default.
 
 _BROWSER_DISABLED_MSG = (
     "Browser control is disabled (set BROWSER_ENABLED=true and install the "
@@ -2712,8 +3239,8 @@ def _browser_ready() -> bool:
 @registry.register_tool(
     name="browser_task",
     description=(
-        "Do something inside a website in a headless browser -- search, click through, play a "
-        "video, fill a form -- and report back. Opens the user's real browser only when the "
+        "Do something inside a website in Charlie's controlled browser -- search, click through, play a "
+        "video, fill a form -- and report back. Exposes the controlled browser when the "
         "request implies it (play/watch/listen, or 'show me'/'open it'). Use for anything that "
         "requires being on a site; use web_search for questions answerable from search snippets, "
         "and browser_read to read one specific known URL."
@@ -2792,14 +3319,17 @@ def charlie_doctor_diagnose() -> str:
 
     doctor = _charlie_doctor or CharlieDoctor()
     report = doctor.diagnose()
-    return doctor.format_cli_report(report)
+    return doctor.format_report(report)
 
 
 @registry.register_tool(
     name="charlie_self_extension_propose",
     description=(
-        "Propose or execute a controlled self-extension (config update, reusable skill, "
-        "MCP tool connection, or small Python code tool) under safe checkpointing and verification."
+        "Propose a controlled self-extension (config update, reusable skill, MCP tool connection, "
+        "or small Python code tool). The main runtime stages an instructions-only candidate from "
+        "a durable owner correction; use this tool for an explicit request to create a skill or "
+        "another self-extension. Do not stage one-off facts or sensitive content. Reusable skills "
+        "stay inactive until the owner approves the exact content hash."
     ),
     schema={
         "type": "object",

@@ -159,20 +159,14 @@ def launch_and_verify(resolution: AppResolution, timeout_s: float = 3.0) -> bool
         return False
     try:
         target = resolution.launch_target
-        if Path(target).suffix.lower() in {".lnk", ".url"}:
-            os.startfile(target)  # type: ignore[attr-defined]
-            process = None
-        else:
-            process = subprocess.Popen([target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except (OSError, subprocess.SubprocessError):
+        os.startfile(target)  # type: ignore[attr-defined]
+    except OSError:
         return False
 
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        if process is not None and process.poll() is None:
-            return True
         current = resolve_local_app(resolution.name)
-        if current and (current.window_title or current.process_name):
+        if current and current.window_title:
             return True
         time.sleep(0.1)
     return False

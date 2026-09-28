@@ -1,9 +1,8 @@
 """Tests that session-scoped events emitted from main.py carry session_id.
 
-These events drive the frontend's per-session UI (transcript, tokens, tool
-calls, thinking, speaking, response_done). Events that are scoped to a session
-MUST include the active session_id in their payload, otherwise the frontend
-cannot attribute them to the right session.
+These events drive runtime observers (transcript, tool calls, thinking,
+speaking, response_done). Events that are scoped to a session MUST include the
+active session_id in their payload.
 
 Why we don't import main directly:
     main.py transitively imports heavy ML libraries (whisper, kokoro, torch)
@@ -70,7 +69,7 @@ def _run_callback(name: str, captured: List[Dict[str, Any]],
     namespace: Dict[str, Any] = {
         "event_bus": bus,
         "loop": None,
-        "current_web_session_id": session_id,
+        "current_session_id": session_id,
         "asyncio": _FakeAsyncio,
         "_submit_event_task": lambda coro, loop=None: None,
         "_submit_event_threadsafe": lambda coro, loop: None,
@@ -181,10 +180,8 @@ def test_foreground_turn_separates_task_id_from_turn_id() -> None:
     )
     process_source = ast.get_source_segment(_MAIN_SOURCE, process_fn) or ""
 
-    assert "get_task_journal" in process_source
-    assert "create_task" in process_source
-    assert "TaskStatus.VERIFYING" in process_source
-    assert "task_id=task_id" in process_source
+    assert "active_task_id = None" in process_source
+    assert "task_id = request.task_id" in process_source
     assert "turn_id=request.turn_id" in process_source
 
 
@@ -229,18 +226,7 @@ def test_tool_callback_preserves_the_owning_turn_identity():
 
 
 def test_transcript_emit_gated_to_voice_platform():
-    """Regression test: the 'transcript' event must only fire for
-    platform == "voice". The web client already renders its own optimistic
-    user bubble the instant it sends a chat command (see handleSendMessage
-    in page.tsx), so emitting 'transcript' for platform == "web" too
-    produced a duplicate user bubble on every web chat message. Voice has no
-    client-side echo of its own, so it still needs this event.
-
-    Structural (AST) check, matching this file's approach elsewhere: fully
-    executing _process() would require faking voice/store/brain deeply, so
-    instead we verify the emit call site's guard condition directly from
-    main.py's real source.
-    """
+    """The transcript event is emitted only for recognized voice input."""
     module_ast = ast.parse(_MAIN_SOURCE)
     process_fn = None
     for n in ast.walk(module_ast):
@@ -275,43 +261,33 @@ def test_transcript_emit_gated_to_voice_platform():
     )
 
 
-def test_background_learn_skips_screen_content_queries():
-    """Regression test: _background_learn stores the reply as a candidate
-    "user preference" -- a screen description ("I see two tabs...") is never
-    that, and storing it pollutes memory with stale screen snapshots that
-    later resurface (via memory_store.search) on unrelated "what's on my
-    screen" queries, making the answer look frozen at an old state.
-
-    Structural (AST) check, matching this file's approach elsewhere: see
-    test_transcript_emit_gated_to_voice_platform above for why.
-    """
+def test_voice_turn_does_not_schedule_automatic_memory_writes():
+    """Turn replies and raw conversations require an explicit memory request."""
     module_ast = ast.parse(_MAIN_SOURCE)
-    process_fn = None
-    for n in ast.walk(module_ast):
-        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_process":
-            process_fn = n
-            break
+    process_fn = next(
+        (
+            n for n in ast.walk(module_ast)
+            if isinstance(n, ast.AsyncFunctionDef) and n.name == "_process"
+        ),
+        None,
+    )
     assert process_fn is not None, "_process() not found in main.py"
 
-    found_guard = None
-    for n in ast.walk(process_fn):
-        if isinstance(n, ast.If):
-            defines_background_learn = any(
-                isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and c.name == "_background_learn"
-                for c in ast.walk(n)
-            )
-            if defines_background_learn:
-                found_guard = n
-                break
-
-    assert found_guard is not None, (
-        "_background_learn definition/guard not found in _process()"
-    )
-    guard_src = ast.unparse(found_guard.test)
-    assert "screen" in guard_src.lower(), (
-        f"_background_learn guard does not exclude screen-content queries: {guard_src}"
-    )
+    automatic_memory_functions = [
+        node.name
+        for node in ast.walk(process_fn)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_background_learn"
+    ]
+    automatic_memory_calls = [
+        node.func.attr
+        for node in ast.walk(process_fn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"_background_learn", "_background_save_to_memory"}
+    ]
+    assert automatic_memory_functions == []
+    assert automatic_memory_calls == []
 
 
 def test_on_speech_dedupes_identical_text_within_window():
@@ -355,7 +331,7 @@ def test_on_speech_dedupes_identical_text_within_window():
         "_DEDUPE_WINDOW_SEC": 20.0,
         "voice_diagnostic_traces": {},
     }
-    # on_speech declares `nonlocal current_web_session_id`, which needs a real
+    # on_speech declares `nonlocal current_session_id`, which needs a real
     # enclosing function scope (nonlocal is invalid at module level) -- wrap it
     # in a synthetic outer function that owns that local, mirroring the real
     # nesting inside main().
@@ -363,7 +339,7 @@ def test_on_speech_dedupes_identical_text_within_window():
     wrapper_src = (
         "def _wrapper():\n"
         "    _voice_fallback_session_id = 'voice_test-launch'\n"
-        "    current_web_session_id = _voice_fallback_session_id\n"
+        "    current_session_id = _voice_fallback_session_id\n"
         + textwrap.indent(src, "    ")
         + "\n    return on_speech\n"
     )

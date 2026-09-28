@@ -3,8 +3,6 @@
 import pytest
 
 from charlie.extensions import (
-    ExtensionManager,
-    InstalledExtension,
     SkillCard,
     build_skill_card,
     request_extension_install,
@@ -99,61 +97,3 @@ async def test_request_extension_install_returns_decline():
     result = await request_extension_install(brain, card)
 
     assert result is False
-
-
-class TestExtensionManager:
-    def test_propose_returns_pending_id_and_stashes_card(self):
-        manager = ExtensionManager()
-        card = build_skill_card("demo", "src", [], "text")
-
-        pending_id = manager.propose(card)
-
-        assert isinstance(pending_id, str) and pending_id
-        assert manager.pop_pending(pending_id) is card
-
-    def test_pop_pending_consumes_it(self):
-        manager = ExtensionManager()
-        card = build_skill_card("demo", "src", [], "text")
-        pending_id = manager.propose(card)
-
-        manager.pop_pending(pending_id)
-
-        assert manager.pop_pending(pending_id) is None
-
-    def test_pop_pending_unknown_id_returns_none(self):
-        manager = ExtensionManager()
-        assert manager.pop_pending("nope") is None
-
-    def test_record_and_list(self):
-        manager = ExtensionManager()
-        card = build_skill_card("demo", "src", [], "text")
-        ext = InstalledExtension(name="demo", kind="skill", source="src", card=card, tool_names=["skill_demo_run"])
-
-        manager.record(ext)
-
-        assert manager.list() == [ext]
-        assert manager.get("demo") is ext
-
-    def test_get_missing_returns_none(self):
-        manager = ExtensionManager()
-        assert manager.get("nope") is None
-
-    def test_remove_drops_it(self):
-        manager = ExtensionManager()
-        card = build_skill_card("demo", "src", [], "text")
-        manager.record(InstalledExtension(name="demo", kind="skill", source="src", card=card))
-
-        removed = manager.remove("demo")
-
-        assert removed is not None
-        assert manager.list() == []
-
-    def test_remove_missing_returns_none(self):
-        manager = ExtensionManager()
-        assert manager.remove("nope") is None
-
-    def test_two_proposals_get_distinct_pending_ids(self):
-        manager = ExtensionManager()
-        a = manager.propose(build_skill_card("a", "src", [], "one"))
-        b = manager.propose(build_skill_card("b", "src", [], "two"))
-        assert a != b

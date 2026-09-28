@@ -11,6 +11,7 @@ Provides structured, capability-owned semantic postconditions for mutations and 
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -213,14 +214,17 @@ def verify_file_write(
 
     if expected_content is not None:
         try:
-            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            expected_bytes = expected_content.encode("utf-8")
+            with open(file_path, "rb") as f:
                 content = f.read()
-            if content == expected_content or content.startswith(expected_content[:100]):
+            expected_hash = hashlib.sha256(expected_bytes).hexdigest()
+            actual_hash = hashlib.sha256(content).hexdigest()
+            if content == expected_bytes and actual_hash == expected_hash:
                 latency = (time.perf_counter() - start) * 1000.0
                 return VerificationResult(
                     status="completed",
                     verified=True,
-                    message=f"File write verified ({size} bytes, content match)",
+                    message=f"File write verified ({size} bytes, exact content hash {actual_hash})",
                     latency_ms=round(latency, 2),
                 )
             latency = (time.perf_counter() - start) * 1000.0
@@ -292,7 +296,7 @@ def verify_terminal_command(
     exit_code: Optional[int],
     output: str = "",
 ) -> VerificationResult:
-    """Verify command execution while keeping higher-level user goals separate."""
+    """Verify known read results; a generic zero exit proves execution only."""
 
     if exit_code is None:
         return VerificationResult(
@@ -309,22 +313,63 @@ def verify_terminal_command(
             verification_status="verified_failure",
         )
 
-    higher_level_goal = re.search(
-        r"\b(?:install|make\s+sure|ensure|verify|confirm|works?|working|test\s+it)\b",
-        request.casefold(),
-    )
-    if higher_level_goal:
+    normalized = re.sub(r"\s+", " ", command.strip()).casefold()
+    observed = str(output or "").strip()
+    if normalized in {"python --version", "python -v", "python3 --version"}:
+        matched = re.search(r"\bPython\s+\d+(?:\.\d+)+\b", observed, re.IGNORECASE)
+        if matched:
+            return VerificationResult(
+                status="completed",
+                verified=True,
+                message=f"Observed requested Python version: {matched.group(0)}.",
+                verification_status="verified_success",
+            )
+    elif normalized == "taskkill /?":
+        if re.search(r"(?im)^\s*TASKKILL\b", observed) and re.search(r"(?im)^\s*Description\s*:", observed):
+            return VerificationResult(
+                status="completed",
+                verified=True,
+                message="Observed the taskkill help heading and description.",
+                verification_status="verified_success",
+            )
+    elif normalized == "where python":
+        paths = [line.strip() for line in observed.splitlines() if line.strip()]
+        if any(os.path.isfile(path) for path in paths):
+            return VerificationResult(
+                status="completed",
+                verified=True,
+                message="Observed an installed Python executable path.",
+                verification_status="verified_success",
+            )
+    elif normalized == "git rev-parse head" and re.fullmatch(r"[0-9a-f]{40,64}", observed, re.IGNORECASE):
+        return VerificationResult(
+            status="completed",
+            verified=True,
+            message="Observed the repository revision returned by Git.",
+            verification_status="verified_success",
+        )
+    elif normalized.startswith("echo "):
+        expected = command.strip()[5:].strip().strip("\"'")
+        if observed == expected:
+            return VerificationResult(
+                status="completed",
+                verified=True,
+                message="Observed the exact requested text in command output.",
+                verification_status="verified_success",
+            )
+
+    if normalized in {"python --version", "python -v", "python3 --version", "taskkill /?", "where python"}:
         return VerificationResult(
             status="unverified",
             verified=False,
-            message="The command succeeded, but the requested higher-level postcondition was not checked.",
+            message="The command exited successfully, but its requested output was not observed.",
             verification_status="executed_unverified",
         )
     return VerificationResult(
-        status="completed",
-        verified=True,
-        message=f"Terminal command completed with exit code 0{': output observed' if output.strip() else ''}.",
-        verification_status="verified_success",
+        status="unverified",
+        verified=False,
+        message="The command exited successfully; no semantic postcondition was available to verify.",
+        verification_status="executed_unverified",
     )
 
 

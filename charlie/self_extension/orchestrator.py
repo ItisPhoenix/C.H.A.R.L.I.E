@@ -1,9 +1,11 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
 import time
+import unicodedata
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -20,6 +22,7 @@ from charlie.self_extension.classifier import ExtensionClassifier
 from charlie.self_extension.guard import AuthorizationGuard
 from charlie.self_extension.models import (
     ExtensionCheckpoint,
+    ExtensionClassification,
     ExtensionKind,
     ExtensionPlan,
     ExtensionRequest,
@@ -33,6 +36,89 @@ from charlie.settings_service import SettingsService
 logger = logging.getLogger("charlie.self_extension.orchestrator")
 
 _DEFAULT_TX_STORE = Path("data/extension_transactions.json")
+
+
+def repeated_success_signature(request: str, capability: str, operation: str) -> Optional[str]:
+    """Hash an exact, normalized owner request and the operation that verified it."""
+    from charlie.tools import _contains_sensitive_memory_content
+
+    text = str(request or "").strip()
+    capability_id = str(capability or "").strip().casefold()
+    operation_id = str(operation or "").strip().casefold()
+    if (
+        not text
+        or len(text) > 500
+        or _contains_sensitive_memory_content(text)
+        or not re.fullmatch(r"[a-z0-9_.:-]{1,100}", capability_id)
+        or not re.fullmatch(r"[a-z0-9_.:-]{1,100}", operation_id)
+    ):
+        return None
+
+    normalized = unicodedata.normalize("NFKC", text)
+    normalized = re.sub(r"(?i)^\s*charlie(?:[,:\s]+)", "", normalized, count=1)
+    normalized = " ".join(normalized.casefold().split()).rstrip(" .!?")
+    if len(normalized) < 8:
+        return None
+
+    # ponytail: exact normalized wording only; semantic clustering risks merging unrelated actions.
+    payload = json.dumps([normalized, capability_id, operation_id], ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def repeated_success_audit_metadata(envelope: Any, channel: str, tool_name: str = "") -> Dict[str, Any]:
+    """Return privacy-safe learning metadata only for safe owner Telegram successes."""
+    verification_status = getattr(envelope.verification_status, "value", envelope.verification_status)
+    risk_class = getattr(envelope.risk_class, "value", envelope.risk_class)
+    turn_id = envelope.turn_id
+    if (
+        channel != "telegram"
+        or tool_name == "shell_execute"
+        or not turn_id
+        or verification_status != "verified_success"
+        or risk_class != "safe"
+        or envelope.requires_approval
+        or envelope.data.get("persistence_status") == "failed"
+    ):
+        return {}
+    signature = repeated_success_signature(
+        envelope.request,
+        envelope.capability or "",
+        envelope.operation or tool_name,
+    )
+    if not signature:
+        return {}
+    return {
+        "turn_id": turn_id,
+        "verification_status": verification_status,
+        "risk_class": risk_class,
+        "requires_approval": False,
+        "repeated_success_signature": signature,
+    }
+
+
+def verified_success_turn_ids(audit_entries: List[dict], signature: str) -> set[str]:
+    """Return distinct turns with persisted, safe, semantically verified successes."""
+    turns: set[str] = set()
+    for entry in audit_entries:
+        try:
+            arguments = json.loads(entry.get("arguments", "{}"))
+        except (TypeError, ValueError):
+            continue
+        outcome = str(entry.get("outcome", ""))
+        if (
+            not isinstance(arguments, dict)
+            or outcome.split(":", 1)[0] != "completed"
+            or "persistence_failed" in outcome
+            or arguments.get("repeated_success_signature") != signature
+            or arguments.get("verification_status") != "verified_success"
+            or arguments.get("risk_class") != "safe"
+            or arguments.get("requires_approval") is not False
+        ):
+            continue
+        turn_id = arguments.get("turn_id")
+        if isinstance(turn_id, str) and turn_id:
+            turns.add(turn_id)
+    return turns
 
 
 class SelfExtensionOrchestrator:
@@ -164,18 +250,19 @@ class SelfExtensionOrchestrator:
         kind = request.classification.kind
         if kind == ExtensionKind.SKILL:
             name = self._plan_name(prompt, "custom_skill")
+            instructions = self._skill_instruction_text(prompt)
             request.plan = ExtensionPlan(
                 plan_id=f"plan-{uuid.uuid4().hex[:8]}",
                 kind=kind,
-                description=f"Register reusable skill '{name}'.",
-                steps=["validate SKILL.md", "save skill", "verify capability"],
+                description=f"Stage reusable skill candidate '{name}' for owner review.",
+                steps=["validate instructions-only SKILL.md", "stage inactive candidate", "request owner review"],
                 raw_text=(
                     "---\n"
                     f"name: {name}\n"
                     "description: Reusable procedure requested by the user.\n"
                     "---\n"
                     "# Procedure\n\n"
-                    f"Follow this requested procedure: {self._safe_markdown_text(prompt)}\n"
+                    f"{instructions}\n"
                 ),
             )
             request.affected_capabilities = [f"skill_{name}"]
@@ -248,6 +335,30 @@ class SelfExtensionOrchestrator:
     @staticmethod
     def _safe_markdown_text(prompt: str) -> str:
         return " ".join(prompt.replace("```", "").split())[:500]
+
+    @classmethod
+    def _skill_instruction_text(cls, prompt: str) -> str:
+        """Keep staging commands out of the candidate's reusable instructions."""
+        text = cls._safe_markdown_text(prompt)
+        text = re.sub(
+            r"(?i)^(?:please\s+)?(?:create|add|stage|propose|install)\b.*?\bskill\b"
+            r"(?:\s+(?:named|called)\s+[A-Za-z0-9_-]+)?\s*",
+            "",
+            text,
+            count=1,
+        )
+        purpose = re.search(r"(?i)\b(?:purpose|instructions?)\s*:\s*(.+)$", text)
+        if purpose:
+            text = purpose.group(1)
+        else:
+            text = re.sub(r"(?i)^(?:the skill|it)\s+(?:must|should|will)\s+", "", text)
+        text = re.sub(
+            r"(?i)\s*(?:this skill is for review only|stage it(?: as)? inactive|"
+            r"do not activate(?: it)?|don't activate(?: it)?|do not inspect files).*$",
+            "",
+            text,
+        ).strip(" \t\r\n.;:")
+        return text or cls._safe_markdown_text(prompt)
 
     @staticmethod
     def _plan_name(prompt: str, fallback: str) -> str:
@@ -557,7 +668,8 @@ class SelfExtensionOrchestrator:
             return self.execute_config_transaction(request, request.affected_settings, tx_id=tx_id)
 
         elif kind == ExtensionKind.SKILL:
-            skill_name = request.affected_capabilities[0] if request.affected_capabilities else "custom_skill"
+            skill_id = request.affected_capabilities[0] if request.affected_capabilities else "skill_custom_skill"
+            skill_name = skill_id.removeprefix("skill_")
             raw_text = (
                 request.plan.raw_text
                 if request.plan and hasattr(request.plan, "raw_text")
@@ -572,7 +684,20 @@ class SelfExtensionOrchestrator:
                     status=TransactionStatus.FAILED,
                     message="SKILL extension requires a validated plan with raw_text content.",
                 )
-            return self.execute_skill_transaction(request, skill_name=skill_name, raw_text=raw_text, tx_id=tx_id)
+            if not request.explicit_user_request:
+                tx.status = TransactionStatus.APPROVAL_REQUIRED
+                return ExtensionResult(
+                    success=False,
+                    transaction_id=tx_id,
+                    status=TransactionStatus.APPROVAL_REQUIRED,
+                    message="Staging a skill requires an explicit owner request.",
+                )
+            return self.stage_skill_candidate_transaction(
+                request,
+                skill_name=skill_name,
+                raw_text=raw_text,
+                tx_id=tx_id,
+            )
 
         elif kind == ExtensionKind.MCP_TOOL:
             if not request.plan or not getattr(request.plan, "mcp_name", None):
@@ -632,6 +757,195 @@ class SelfExtensionOrchestrator:
     # ─────────────────────────────────────────────────────────────────────────
     # Type-specific executors
     # ─────────────────────────────────────────────────────────────────────────
+
+    def stage_skill_candidate_transaction(
+        self,
+        request: ExtensionRequest,
+        skill_name: str,
+        raw_text: str,
+        tx_id: Optional[str] = None,
+    ) -> ExtensionResult:
+        """Stage an explicit skill request for owner review without activation."""
+        transaction_id = tx_id or f"tx-{uuid.uuid4().hex[:8]}"
+        tx = self._transactions.get(transaction_id) or ExtensionTransaction(
+            transaction_id=transaction_id, request=request
+        )
+        self._transactions[transaction_id] = tx
+        result = self._skill_adapter.stage_skill_candidate(skill_name, raw_text)
+        if not result.success:
+            tx.status = TransactionStatus.FAILED
+            tx.error_message = result.message
+            self._emit(EventType.SELF_EXTENSION_FAILED, {"tx_id": transaction_id, "reason": result.message})
+            return ExtensionResult(
+                success=False,
+                transaction_id=transaction_id,
+                status=TransactionStatus.FAILED,
+                message=result.message,
+            )
+        tx.status = TransactionStatus.PENDING_REVIEW
+        tx.finished_at = time.time()
+        self._emit(
+            EventType.SELF_EXTENSION_APPROVAL_REQUIRED,
+            {"tx_id": transaction_id, "reason": "skill candidate awaits exact-hash owner review"},
+        )
+        return ExtensionResult(
+            success=True,
+            transaction_id=transaction_id,
+            status=TransactionStatus.PENDING_REVIEW,
+            message=f"Skill candidate '{skill_name}' staged and awaiting owner review; it is not active.",
+            details={
+                "candidate_name": skill_name,
+                "content_hash": result.content_hash,
+                "review_status": "pending",
+                "activated": False,
+                "verified_as_installed": False,
+            },
+        )
+
+    def stage_reusable_correction_candidate(self, correction: str) -> Optional[ExtensionResult]:
+        """Stage a safe, durable owner correction as an inactive skill candidate."""
+        from charlie.core import _detect_correction
+        from charlie.tools import _contains_sensitive_memory_content
+
+        text = str(correction or "").strip()
+        if (
+            not _detect_correction(text)
+            or not re.search(r"\b(?:for future|in future|going forward|from now on|always|prefer)\b", text, re.I)
+            or not re.search(
+                r"\b(?:answer|response|report|summary|citation|cite|label|distinguish|separate|format|"
+                r"wording|write|explain|present|include|avoid|use|keep)\b",
+                text,
+                re.I,
+            )
+            or re.search(r"\b(?:do not|don't)\s+(?:stage|save|store|learn|remember)\b", text, re.I)
+            or _contains_sensitive_memory_content(text)
+            or len(text) > 500
+        ):
+            return None
+
+        instruction = self._safe_markdown_text(text)
+        instruction = re.sub(r"(?i)^\s*(?:charlie[:,]?\s*)?(?:actually[,.:]?\s*|no[,.:]?\s*)", "", instruction)
+        if not instruction:
+            return None
+        digest = hashlib.sha256(instruction.casefold().encode("utf-8")).hexdigest()[:12]
+        name = f"correction_{digest}"
+        raw_text = (
+            "---\n"
+            f"name: {name}\n"
+            "description: Owner correction for future work; pending review.\n"
+            "---\n"
+            "# Owner correction\n\n"
+            "When relevant, follow this user preference:\n\n"
+            f"{instruction}\n"
+        )
+        content_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+        if any(
+            candidate.get("name") == name and candidate.get("content_hash") == content_hash
+            for candidate in self._skill_adapter.list_skill_candidates()
+        ):
+            return None
+        active = self._registry.get(f"skill_{name}")
+        if active is not None and active.enabled:
+            return None
+
+        request = ExtensionRequest(
+            user_prompt=text,
+            explicit_user_request=True,
+            classification=ExtensionClassification(
+                kind=ExtensionKind.SKILL,
+                confidence=1.0,
+                reason="reusable behavior correction stated for future work",
+            ),
+            affected_capabilities=[f"skill_{name}"],
+            plan=ExtensionPlan(
+                plan_id=f"plan-{uuid.uuid4().hex[:8]}",
+                kind=ExtensionKind.SKILL,
+                description=f"Stage durable owner correction '{name}' for review.",
+                steps=["validate instructions-only skill", "stage inactive candidate", "request owner review"],
+                raw_text=raw_text,
+            ),
+        )
+        return self.execute_transaction(request)
+
+    def stage_repeated_success_candidate(
+        self,
+        request_text: str,
+        capability: str,
+        operation: str,
+        audit_entries: List[dict],
+        *,
+        current_turn_id: str,
+        expected_signature: str,
+        risk_class: str,
+        requires_approval: bool,
+    ) -> Optional[ExtensionResult]:
+        """Stage a candidate after two distinct safe turns independently verified the same request pattern."""
+        from charlie.core import _detect_correction
+        from charlie.tools import _contains_sensitive_memory_content
+
+        text = str(request_text or "").strip()
+        signature = repeated_success_signature(text, capability, operation)
+        if (
+            not signature
+            or signature != expected_signature
+            or risk_class != "safe"
+            or requires_approval
+            or _detect_correction(text)
+            or _contains_sensitive_memory_content(text)
+        ):
+            return None
+
+        verified_turns = verified_success_turn_ids(audit_entries, signature)
+        if len(verified_turns) < 2 or current_turn_id not in verified_turns:
+            return None
+
+        from charlie.log_redaction import redact_sensitive_text
+
+        safe_request = self._safe_markdown_text(redact_sensitive_text(text))
+        name = f"repeat_{signature[:12]}"
+        raw_text = (
+            "---\n"
+            f"name: {name}\n"
+            "description: Repeated verified owner workflow; pending review.\n"
+            "---\n"
+            "# Repeated verified workflow\n\n"
+            f"For requests like: “{safe_request}”\n\n"
+            f"Use Charlie's existing `{capability}.{operation}` operation. "
+            "Before reporting success, require a ResultEnvelope with `verified_success` "
+            "and an observation matching the requested postcondition.\n"
+        )
+        content_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+        if any(
+            candidate.get("name") == name and candidate.get("content_hash") == content_hash
+            for candidate in self._skill_adapter.list_skill_candidates()
+        ):
+            return None
+        active = self._registry.get(f"skill_{name}")
+        if active is not None and active.enabled:
+            return None
+
+        request = ExtensionRequest(
+            user_prompt=text,
+            explicit_user_request=False,
+            classification=ExtensionClassification(
+                kind=ExtensionKind.SKILL,
+                confidence=1.0,
+                reason="same owner request pattern succeeded with independent verification in distinct turns",
+            ),
+            affected_capabilities=[f"skill_{name}"],
+            plan=ExtensionPlan(
+                plan_id=f"plan-{uuid.uuid4().hex[:8]}",
+                kind=ExtensionKind.SKILL,
+                description=f"Stage repeated verified workflow '{name}' for owner review.",
+                steps=["confirm two distinct verified-success turns", "stage inactive instructions-only candidate"],
+                raw_text=raw_text,
+            ),
+        )
+        result = self.stage_skill_candidate_transaction(request, skill_name=name, raw_text=raw_text)
+        if result.success:
+            result.details["trigger"] = "two_distinct_verified_successes"
+            result.details["verified_turn_count"] = len(verified_turns)
+        return result
 
     def execute_config_transaction(
         self,
@@ -961,6 +1275,30 @@ class SelfExtensionOrchestrator:
             res = self._skill_adapter.set_enabled(name, enabled)
             return res.success
         return self._registry.set_enabled(extension_id, enabled)
+
+    def list_skill_candidates(self) -> List[dict]:
+        return self._skill_adapter.list_skill_candidates()
+
+    def stage_skill_candidate(self, name: str, raw_text: str):
+        return self._skill_adapter.stage_skill_candidate(name, raw_text)
+
+    def resolve_skill_candidate_review_token(self, token: str, expected_status: str = "pending"):
+        return self._skill_adapter.resolve_skill_candidate_review_token(token, expected_status)
+
+    def mark_skill_candidate_review_submitted(self, name: str, content_hash: str) -> bool:
+        return self._skill_adapter.mark_skill_candidate_review_submitted(name, content_hash)
+
+    def approve_skill_candidate(self, name: str, content_hash: str):
+        return self._skill_adapter.approve_skill_candidate(name, content_hash)
+
+    def reject_skill_candidate(self, name: str, content_hash: str):
+        return self._skill_adapter.reject_skill_candidate(name, content_hash)
+
+    def disable_skill_candidate(self, name: str, content_hash: str):
+        return self._skill_adapter.disable_skill_candidate(name, content_hash)
+
+    def get_active_skill_blocks(self) -> Dict[str, str]:
+        return self._skill_adapter.get_active_skill_blocks()
 
     def get_transaction(self, transaction_id: str) -> Optional[Dict[str, Any]]:
         tx = self._transactions.get(transaction_id)

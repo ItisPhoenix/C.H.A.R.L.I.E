@@ -84,7 +84,7 @@ def canonical_media_request_fingerprint(
     action: Any = None,
     percent: Any = None,
 ) -> str:
-    """Canonical identity shared by web correlation and main idempotency."""
+    """Canonical identity shared by runtime correlation and main idempotency."""
     body: dict[str, Any] = {"operation": operation}
     if operation == "control":
         body["action"] = action if isinstance(action, str) else None

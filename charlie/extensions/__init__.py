@@ -45,7 +45,7 @@ _SUSPICIOUS_HOST_RE = re.compile(
 
 
 def _scan_for_warnings(raw_text: str) -> List[str]:
-    """Heuristic scan surfaced in the approval dialog for a human to weigh --
+    """Heuristic scan included in the owner approval record for review --
     doesn't block installation on its own."""
     warnings = []
     for pattern in _INJECTION_PATTERNS:
@@ -59,7 +59,7 @@ def _scan_for_warnings(raw_text: str) -> List[str]:
 
 @dataclass
 class SkillCard:
-    """Provenance record shown in the approval dialog before an extension activates."""
+    """Provenance record reviewed before an extension activates."""
 
     name: str
     source: str
@@ -97,27 +97,12 @@ def build_skill_card(
 async def request_extension_install(brain: "Brain", card: SkillCard) -> bool:
     """Route an LLM-tool-call-initiated extension install/enable through the
     existing HITL approval channel -- no extension activates silently. Use
-    this only where a live Brain instance is reachable (the normal chat tool
-    loop). The web dashboard has no Brain in its process; its
-    ExtensionManager stores proposals and the REST approval path asks main to
-    perform the operation before recording the web mirror."""
+    this only where the main Brain instance is reachable."""
     return await brain.request_tool_approval(
         "install_extension",
         {"command": f"{card.name} (source: {card.source})", "skill_card": card.describe()},
         f"install the '{card.name}' extension",
     )
-
-
-@dataclass
-class InstalledExtension:
-    """A web read/UI mirror entry for one of the supported adapter kinds."""
-
-    name: str
-    kind: str  # "mcp" | "skill" | "openapi" | "plugin"
-    source: str
-    card: SkillCard
-    enabled: bool = True
-    tool_names: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -196,40 +181,3 @@ def canonical_extension_request_fingerprint(operation: str, payload: Dict[str, o
             }
         )
     return json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str)
-
-
-class ExtensionManager:
-    """In-process registry of installed extensions plus pending (proposed
-    but not yet confirmed) installs -- the web dashboard's gate: propose()
-    returns a SkillCard for the user to review, and the approval endpoint
-    records an entry only after main acknowledges the mutation. Not persisted
-    across restarts; each
-    process starts with an empty registry (a known gap, see
-    plans/PHASE_5_plugin_skill_system.md's REST section)."""
-
-    def __init__(self) -> None:
-        self._installed: Dict[str, InstalledExtension] = {}
-        self._pending: Dict[str, SkillCard] = {}
-
-    def propose(self, card: SkillCard) -> str:
-        """Stage a SkillCard for confirmation. Returns a pending_id."""
-        pending_id = hashlib.sha256(
-            f"{card.name}:{card.content_hash}:{len(self._pending)}".encode("utf-8")
-        ).hexdigest()[:12]
-        self._pending[pending_id] = card
-        return pending_id
-
-    def pop_pending(self, pending_id: str) -> Optional[SkillCard]:
-        return self._pending.pop(pending_id, None)
-
-    def record(self, ext: InstalledExtension) -> None:
-        self._installed[ext.name] = ext
-
-    def get(self, name: str) -> Optional[InstalledExtension]:
-        return self._installed.get(name)
-
-    def list(self) -> List[InstalledExtension]:
-        return list(self._installed.values())
-
-    def remove(self, name: str) -> Optional[InstalledExtension]:
-        return self._installed.pop(name, None)

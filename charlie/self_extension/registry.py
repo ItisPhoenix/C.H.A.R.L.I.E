@@ -30,7 +30,12 @@ def _redact_metadata(meta: Dict[str, Any]) -> Dict[str, Any]:
     """Scrub raw secrets from metadata before persisting."""
     clean: Dict[str, Any] = {}
     for k, v in meta.items():
-        if any(sk in k.lower() for sk in _SECRET_KEYS):
+        # This is a local callback lookup ID, not an authentication credential.
+        # It must survive restart so owner review buttons can resolve to the
+        # full content hash; ownership and hash checks remain authoritative.
+        if k.casefold() == "review_token":
+            clean[k] = v
+        elif any(sk in k.lower() for sk in _SECRET_KEYS):
             clean[k] = "[REDACTED]"
         elif isinstance(v, dict):
             clean[k] = _redact_metadata(v)
@@ -339,7 +344,7 @@ class ExtensionRegistry:
         from charlie.capabilities import CapabilityDescriptor, CapabilityOperation
 
         name = entry.name
-        discovered: list = entry.declared_tools or []
+        discovered: list = []
 
         if runtime_extension_operation is not None:
             meta = entry.metadata or {}
@@ -374,10 +379,9 @@ class ExtensionRegistry:
                     t.name
                     for t in mcp_client.list_tools()
                     if getattr(t, "server_name", "") == name
-                ] or discovered
+                ]
             except Exception as exc:
-                logger.warning("MCP rehydration connect failed for '%s': %s — using declared tools", name, exc)
-                # Use declared tools but mark availability as unhealthy
+                logger.warning("MCP rehydration connect failed for '%s': %s", name, exc)
                 if not discovered:
                     raise
 
@@ -392,6 +396,9 @@ class ExtensionRegistry:
         ops: Dict[str, Any] = {}
         for t in discovered:
             _t = t
+            policy = _client.tool_policy(f"{name}:{t}") if _client is not None else "ask"
+            if policy == "deny":
+                continue
 
             def _invoke(_t: str = _t, **kwargs: Any) -> Any:
                 if _client is None:
@@ -406,7 +413,7 @@ class ExtensionRegistry:
                 name=t,
                 description=f"[{name}] MCP tool",
                 parameters_schema={"type": "object"},
-                risk_class="reversible",
+                risk_class="safe" if policy == "allow" else "security_sensitive",
                 func=_invoke,
             )
 

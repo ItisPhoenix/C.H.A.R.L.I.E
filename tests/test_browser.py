@@ -767,46 +767,6 @@ def test_browser_task_direct_call_errors():
     assert "Brain.browser_task" in tools.browser_task("anything")
 
 
-@pytest.mark.asyncio
-async def test_brain_browser_task_emits_task_scoped_presentation(monkeypatch):
-    from charlie import recovery
-    from charlie.config import Config
-    from charlie.core import Brain
-
-    emitted = []
-
-    class Bus:
-        async def emit(self, event_type, payload, meta=None):
-            emitted.append((event_type, payload, meta))
-
-    async def fake_resolve(*args, **kwargs):
-        return BrowserResult(
-            url="https://shop.example/search?q=laptops",
-            answer="Verified laptop results.",
-            success=True,
-            verification="content-links",
-            site="shop.example",
-            query="laptops",
-        )
-
-    monkeypatch.setattr(recovery, "_event_bus", Bus())
-    monkeypatch.setattr(task, "resolve", fake_resolve)
-    brain = Brain(Config(llm_url="http://localhost", llm_key="x", llm_model="dummy", browser_enabled=True))
-
-    result = await brain.browser_task(
-        "Search shop.example for laptops.",
-        platform="web",
-        task_id="turn-1",
-        session_id="session-1",
-    )
-
-    assert result == "Verified laptop results."
-    by_type = {event_type: (payload, meta) for event_type, payload, meta in emitted}
-    assert {"browser_task_started", "browser_task_done", "presentation_intent"} <= by_type.keys()
-    assert all(by_type[event_type][1].task_id == "turn-1" for event_type in by_type)
-    assert by_type["presentation_intent"][0]["session_id"] == "session-1"
-
-
 # --- core.py routing: website + leftover text defers instead of launching ----
 
 

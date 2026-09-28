@@ -8,6 +8,7 @@ from charlie.verifiers import (
     run_verifier_for_match,
     verify_browser_navigate,
     verify_file_write,
+    verify_terminal_command,
     verify_volume,
 )
 
@@ -70,6 +71,20 @@ class TestFileWriteVerifier:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
+    def test_verify_file_write_rejects_matching_prefix_with_different_tail(self):
+        expected = "A" * 100 + " expected tail"
+        with tempfile.NamedTemporaryFile("wb", delete=False) as f:
+            f.write(("A" * 100 + " unexpected tail").encode("utf-8"))
+            temp_path = f.name
+
+        try:
+            result = verify_file_write(temp_path, expected_content=expected)
+            assert result.status == "partially_completed"
+            assert result.verified is False
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
     def test_verify_file_write_missing(self):
         res = verify_file_write("C:\\nonexistent_charlie_file_xyz_123.tmp")
         assert res.status == "failed"
@@ -110,3 +125,26 @@ class TestVerifierDispatcher:
         )
         assert res.status == "completed"
         assert res.verified is True
+
+
+def test_terminal_verifier_requires_observed_requested_output() -> None:
+    python = verify_terminal_command("python --version", "Tell me the Python version", 0, "Python 3.14.6\n")
+    assert python.status == "completed"
+    assert python.verification_status == "verified_success"
+
+    help_result = verify_terminal_command(
+        "taskkill /?",
+        "Tell me the first taskkill help heading",
+        0,
+        "TASKKILL [/S system]\n\nDescription:\nHelp text",
+    )
+    assert help_result.status == "completed"
+    assert help_result.verification_status == "verified_success"
+
+    arbitrary = verify_terminal_command("dir", "Tell me the files in this folder", 0, "report.pdf\n")
+    assert arbitrary.status == "unverified"
+    assert arbitrary.verification_status == "executed_unverified"
+
+    missing_output = verify_terminal_command("python --version", "Tell me the Python version", 0, "")
+    assert missing_output.status == "unverified"
+    assert missing_output.verification_status == "executed_unverified"

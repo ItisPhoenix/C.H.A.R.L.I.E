@@ -1,5 +1,5 @@
 """Watcher registry: polled check() functions, output always routed through
-charlie.attention.decide before a caller reacts -- watchers never spawn a surface directly.
+charlie.attention.decide before a caller responds -- watchers never perform effects directly.
 """
 
 import logging
@@ -85,6 +85,11 @@ def _alert_event(message: str, severity: str = "error") -> dict:
     return {"type": EventType.ALERT, "payload": {"severity": severity, "message": message}}
 
 
+def _bounded_text(value: Any, limit: int = 160) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
 def cpu_ram_watcher(
     get_cpu_ram: Callable[[], Tuple[float, float]],
     cpu_threshold_pct: float,
@@ -143,16 +148,47 @@ def stalled_task_watcher(
         result = None
         for task in get_tasks():
             task_id = getattr(task, "id", None)
-            if task_id is None or getattr(task, "status", None) != "running":
+            status = getattr(getattr(task, "status", None), "value", getattr(task, "status", None))
+            if task_id is None or status != "running":
                 continue
+            task_id = _bounded_text(task_id, 128)
             seen_ids.add(task_id)
-            step = getattr(task, "current_step", None)
+            step = getattr(task, "current_step", 0)
             same = task_id in last_step and last_step[task_id] == step
             stall_count[task_id] = stall_count.get(task_id, 0) + 1 if same else 1
             last_step[task_id] = step
+            if not same:
+                already_alerted.discard(task_id)
             if result is None and stall_count[task_id] >= sustained_polls and task_id not in already_alerted:
                 already_alerted.add(task_id)
-                result = _alert_event(f"Task '{task_id}' appears stalled at step {step}")
+                total_steps = getattr(task, "total_steps", None)
+                progress = getattr(task, "progress", None)
+                progress = round(float(progress), 3) if isinstance(progress, (int, float)) else None
+                current_action = _bounded_text(getattr(task, "current_action", None)) or None
+                waiting_reason = _bounded_text(getattr(task, "waiting_reason", None), 120) or None
+                updated_at = _bounded_text(getattr(task, "updated_at", None), 64) or None
+                diagnosis = {
+                    "task_id": task_id,
+                    "status": status,
+                    "current_step": step,
+                    "total_steps": total_steps,
+                    "progress": progress,
+                    "current_action": current_action,
+                    "waiting_reason": waiting_reason,
+                    "updated_at": updated_at,
+                }
+                details = [f"step {step}" + (f"/{total_steps}" if total_steps is not None else "")]
+                if progress is not None:
+                    details.append(f"{progress:.0%} complete")
+                if current_action:
+                    details.append(f"action: {current_action}")
+                if waiting_reason:
+                    details.append(f"waiting: {waiting_reason}")
+                if updated_at:
+                    details.append(f"updated: {updated_at}")
+                result = _alert_event(f"Task '{task_id}' appears stalled ({'; '.join(details)})")
+                result["payload"]["signal"] = {"kind": "stalled_task", "task_id": task_id}
+                result["payload"]["diagnosis"] = diagnosis
         for stale_id in set(already_alerted) - seen_ids:
             already_alerted.discard(stale_id)
             stall_count.pop(stale_id, None)
@@ -184,19 +220,94 @@ def repeated_tool_failure_watcher(
 
 
 def path_change_watcher(paths: List[str], interval_s: float = 30.0) -> Watcher:
-    """Generic mtime-diff watcher over a fixed path list; silent until a second poll has a baseline."""
-    last_mtimes: Dict[str, float] = {}
+    """Report metadata-only changes to fixed paths after establishing a baseline."""
+    last_stats: Dict[str, Optional[tuple[int, int, int]]] = {}
 
     def _check() -> Optional[dict]:
         changed = []
         for path in paths:
             try:
-                mtime = os.path.getmtime(path)
+                stat = os.stat(path)
+            except FileNotFoundError:
+                if path not in last_stats:
+                    last_stats[path] = None
+                    continue
+                previous = last_stats[path]
+                last_stats[path] = None
+                if previous is not None:
+                    path_label = _bounded_text(path, 256)
+                    changed.append({
+                        "change": "disappeared",
+                        "path": path_label,
+                        "previous": {
+                            "size_bytes": previous[0],
+                            "mtime_ns": previous[1],
+                            "mode": previous[2],
+                        },
+                        "current": None,
+                        "delta": {"exists": False},
+                    })
+                continue
             except OSError:
                 continue
-            if path in last_mtimes and mtime != last_mtimes[path]:
-                changed.append(path)
-            last_mtimes[path] = mtime
-        return _alert_event(f"Changed: {', '.join(changed)}", severity="warning") if changed else None
+            current = (stat.st_size, stat.st_mtime_ns, stat.st_mode)
+            if path not in last_stats:
+                last_stats[path] = current
+                continue
+            previous = last_stats[path]
+            if previous is None:
+                changed.append({
+                    "change": "appeared",
+                    "path": _bounded_text(path, 256),
+                    "previous": None,
+                    "current": {
+                        "size_bytes": stat.st_size,
+                        "mtime_ns": stat.st_mtime_ns,
+                        "mode": stat.st_mode,
+                    },
+                    "delta": {"exists": True},
+                })
+            elif current != previous:
+                previous_size, previous_mtime, previous_mode = previous
+                path_label = _bounded_text(path, 256)
+                changed.append({
+                    "change": "changed",
+                    "path": path_label,
+                    "previous": {
+                        "size_bytes": previous_size,
+                        "mtime_ns": previous_mtime,
+                        "mode": previous_mode,
+                    },
+                    "current": {
+                        "size_bytes": stat.st_size,
+                        "mtime_ns": stat.st_mtime_ns,
+                        "mode": stat.st_mode,
+                    },
+                    "delta": {
+                        "size_bytes": stat.st_size - previous_size,
+                        "mtime_ms": round((stat.st_mtime_ns - previous_mtime) / 1_000_000, 3),
+                    },
+                })
+            last_stats[path] = current
+        if not changed:
+            return None
+        shown = changed[:10]
+        message_parts = []
+        for item in shown:
+            if item["change"] == "disappeared":
+                message_parts.append(f"{item['path']}: disappeared (last size {item['previous']['size_bytes']} B)")
+            elif item["change"] == "appeared":
+                message_parts.append(f"{item['path']}: appeared (size {item['current']['size_bytes']} B)")
+            else:
+                message_parts.append(
+                    f"{item['path']}: size {item['previous']['size_bytes']}→{item['current']['size_bytes']} B "
+                    f"(Δ{item['delta']['size_bytes']:+} B), mtime Δ{item['delta']['mtime_ms']:+.3f} ms"
+                )
+        if len(changed) > len(shown):
+            message_parts.append(f"and {len(changed) - len(shown)} more path(s)")
+        event = _alert_event("Watched path changed: " + "; ".join(message_parts), severity="warning")
+        event["payload"]["signal"] = {"kind": "path_change", "paths": [item["path"] for item in shown]}
+        event["payload"]["diagnosis"] = {"paths": shown, "changed_count": len(changed)}
+        return event
 
     return Watcher(name="path_change", interval_s=interval_s, check=_check)

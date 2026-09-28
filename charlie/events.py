@@ -69,7 +69,6 @@ class EventType(StrEnum):
     MCP_STATUS_CHANGED = "mcp_status_changed"
     MEMORY_UPDATED = "memory_updated"
     VISION_OBSERVED = "vision_observed"
-    HUD_VISIBILITY = "hud_visibility"
     TERMINAL_COMMAND_RESULT = "terminal_command_result"
     TERMINAL_EXECUTE_REQUEST = "terminal_execute_request"
     MEDIA_OPERATION_RESULT = "media_operation_result"
@@ -77,11 +76,6 @@ class EventType(StrEnum):
     SETTINGS_OPERATION_RESULT = "settings_operation_result"
     SETTINGS_SNAPSHOT = "settings_snapshot"
     CHAT = "chat"
-    PRESENTATION_INTENT = "presentation_intent"
-    PRESENTATION_UPDATE = "presentation_update"
-    PRESENTATION_DISMISS = "presentation_dismiss"
-    PRESENTATION_COMMAND = "presentation_command"
-    SURFACE_ACTION = "surface_action"
     SELF_EXTENSION_REQUESTED = "self_extension_requested"
     SELF_EXTENSION_CLASSIFIED = "self_extension_classified"
     SELF_EXTENSION_PLANNED = "self_extension_planned"
@@ -106,7 +100,6 @@ class EventSource(StrEnum):
     BRAIN = "brain"
     TASK = "task"
     WATCHER = "watcher"
-    SURFACE = "surface"
     RUNTIME = "runtime"
 
 

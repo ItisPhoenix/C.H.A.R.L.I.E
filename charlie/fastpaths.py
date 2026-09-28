@@ -37,7 +37,7 @@ class FastPathMatch:
 
 
 class FastPathResult(str):
-    """Text result plus structured data for presentation consumers."""
+    """Text result plus structured data for runtime consumers."""
 
     data: Dict[str, Any]
 

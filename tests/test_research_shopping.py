@@ -1,8 +1,9 @@
 from types import SimpleNamespace
+
 import pytest
 
 from charlie.research.engine import ResearchEngine
-from charlie.research.models import ResearchMode, SearchResult, SourceDocument
+from charlie.research.models import SearchResult, SourceDocument
 from charlie.research.shopping import extract_products, is_shopping_query, parse_budget
 
 

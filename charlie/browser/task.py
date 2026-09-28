@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 
 from charlie import resource_locks
 from charlie.browser import agent, controller, intent, recipes, session, stealth
+from charlie.browser.errors import BrowserUnavailable
 from charlie.browser.recipes import BrowserResult
 from charlie.known_apps import APP_REGISTRY, resolve_website_url
 from charlie.router import extract_explicit_http_url
@@ -148,6 +149,7 @@ async def resolve(
     on_progress=None,
     owner_id: Optional[str] = None,
     user_supplied_url: bool = False,
+    user_visible: bool = False,
 ) -> BrowserResult:
     start_time = time.perf_counter()
     outcome = "success"
@@ -162,6 +164,7 @@ async def resolve(
             on_progress,
             owner_id,
             user_supplied_url,
+            user_visible,
         )
     except Exception as e:
         outcome = f"error: {type(e).__name__}"
@@ -181,10 +184,11 @@ async def _resolve_inner(
     on_progress=None,
     owner_id: Optional[str] = None,
     user_supplied_url: bool = False,
+    user_visible: bool = False,
 ) -> BrowserResult:
     """Run the tier cascade for `task`, falling through tier by tier, and cache the result."""
     freshness_sensitive = intent.is_freshness_sensitive(task)
-    if _cacheable(task, freshness_sensitive):
+    if not user_visible and _cacheable(task, freshness_sensitive):
         cached = session.cache_get(task)
         if cached is not None:
             return cached
@@ -198,12 +202,22 @@ async def _resolve_inner(
             verification="capability-busy",
         )
     controller_lease = False
+    visible_identity: dict = {}
     try:
         controller.acquire_task_lease()
         controller_lease = True
         # deadline_s is a total budget -- subtract lock-wait time already spent, or a slow lock can double it.
         remaining_deadline_s = max(0.0, deadline_s - (time.monotonic() - wait_start))
         loop = asyncio.get_running_loop()
+        if user_visible:
+            try:
+                visible_identity = await loop.run_in_executor(None, controller.prepare_user_visible)
+            except BrowserUnavailable as exc:
+                return BrowserResult(
+                    answer=str(exc),
+                    verification="interactive-browser-unavailable",
+                    evidence={"requested_visible": True, "browser_surface": "not_exposed"},
+                )
         result: Optional[BrowserResult] = None
         current_url = session.get_session().last_url or ""
         if result is None and current_url:
@@ -332,7 +346,13 @@ async def _resolve_inner(
                 retried = await loop.run_in_executor(None, stealth.retry_blocked, blocked_url) if blocked_url else None
                 result = retried or BrowserResult(answer="That site blocked me and I couldn't get through.")
 
-        if result is not None and result.success and _cacheable(task, freshness_sensitive):
+        if result is not None and user_visible:
+            result.evidence = {
+                **(result.evidence or {}),
+                **visible_identity,
+                "browser_surface": "playwright",
+            }
+        if result is not None and result.success and not user_visible and _cacheable(task, freshness_sensitive):
             session.cache_set(task, result)
         return result
     finally:

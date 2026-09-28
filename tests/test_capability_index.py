@@ -478,7 +478,7 @@ def test_tool_registry_compatibility_sync():
 
 
 def test_mcp_client_registration_in_capability_index():
-    client = MCPClient()
+    client = MCPClient(read_only_tools=["test_server:echo"])
     client._servers = ["test_server"]
     client._tools = {
         "test_server:echo": MCPTool(
@@ -496,6 +496,7 @@ def test_mcp_client_registration_in_capability_index():
     op = capability_index.get_operation("mcp_test_server_echo")
     assert op is not None
     assert op.name == "mcp_test_server_echo"
+    assert op.risk_class == "safe"
 
     cap = capability_index.get_capability("mcp")
     assert cap is not None

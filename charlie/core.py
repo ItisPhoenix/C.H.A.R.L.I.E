@@ -5,6 +5,7 @@ Tiered prompt assembly for API prompt caching: Stable > Context > Volatile.
 """
 
 import asyncio
+import html
 import inspect
 import json
 import logging
@@ -27,7 +28,7 @@ from charlie.budget import IterationBudget
 from charlie.capabilities import build_capability_roster, capability_index
 from charlie.events import EventMeta, EventSource
 from charlie.execution_context import ExecutionContext, activate_execution_context, reset_execution_context
-from charlie.presentation_registry import get_presentation_registry
+from charlie.log_redaction import redact_sensitive_text
 from charlie.research.citations import strip_invalid_citations
 from charlie.research.engine import ResearchEngine
 from charlie.research.models import ResearchProgress, ResearchReport, SearchResult, SourceDocument
@@ -43,7 +44,11 @@ from charlie.streaming import (
     stream_followup_content,
 )
 from charlie.subsystem_health import HealthStatus
-from charlie.tools import ToolExecutionResult, pop_pending_vision_image, set_pending_vision_image
+from charlie.tools import (
+    ToolExecutionResult,
+    pop_pending_vision_image,
+    set_pending_vision_image,
+)
 from charlie.tools import registry as tool_registry
 from charlie.turn_contracts import (
     ExecutionPolicy,
@@ -112,24 +117,51 @@ def _invoke_callback_with_identity(
     turn_id: Optional[str] = None,
     task_id: Optional[str] = None,
     session_id: Optional[str] = None,
-) -> None:
-    """Call legacy callbacks while forwarding identity to aware callbacks."""
+    operation_preview: Optional[str] = None,
+) -> Any:
+    """Call legacy callbacks while forwarding supported identity and preview fields."""
 
     if callback is None:
         return
     try:
         parameters = inspect.signature(callback).parameters
     except (TypeError, ValueError):
-        callback(*args)
-        return
+        return callback(*args)
     accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
-    identity = {"turn_id": turn_id, "task_id": task_id, "session_id": session_id}
+    identity = {
+        "turn_id": turn_id,
+        "task_id": task_id,
+        "session_id": session_id,
+    }
     kwargs = {
         name: value
         for name, value in identity.items()
         if accepts_kwargs or name in parameters
     }
-    callback(*args, **kwargs)
+    if operation_preview is not None and (accepts_kwargs or "operation_preview" in parameters):
+        kwargs["operation_preview"] = operation_preview
+    return callback(*args, **kwargs)
+
+
+_APPROVAL_SECRET_OPTION_RE = re.compile(
+    r"(?i)((?:^|\s)(?:--?|/)(?:password|passwd|pwd|token|api[-_]?key|access[-_]?token|"
+    r"refresh[-_]?token|secret|client[-_]?secret|auth[-_]?token|private[-_]?key)(?:\s*[:=]\s*|\s+))"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s;&|]+)"
+)
+
+
+def _approval_operation_preview(tool_name: str, arguments: Dict[str, Any]) -> Optional[str]:
+    """Return a redacted, single-line shell command for approval surfaces."""
+    command = arguments.get("command") if tool_name == "shell_execute" else None
+    if not isinstance(command, str):
+        return None
+    preview = re.sub(
+        r"[\x00-\x1f\x7f]",
+        lambda match: f"\\x{ord(match.group(0)):02x}",
+        command,
+    )
+    preview = redact_sensitive_text(preview)
+    return _APPROVAL_SECRET_OPTION_RE.sub(r"\1[REDACTED]", preview)
 
 
 def publish_turn_research_reports(
@@ -150,7 +182,7 @@ def publish_turn_research_reports(
     if not callback or not answer or not answer.strip():
         return
     # Tool results append in execution order. The final collected report owns
-    # the turn; publishing earlier reports creates competing workspace intents
+    # the turn; publishing earlier reports creates competing runtime intents
     # and lets stale evidence replace the authoritative result.
     report = next((item for item in reversed(reports) if item is not None), None)
     if report is None:
@@ -177,8 +209,7 @@ async def _record_llm_response(response: httpx.Response) -> None:
     telemetry.record_llm_call(success=response.status_code < 400)
 
 
-# --- LLM tuning ---
-_LLM_TEMPERATURE = 0.3
+# --- LLM transport ---
 _TOOL_TIMEOUT_SEC = 15.0
 _MIN_BROWSER_STEPS = 8
 _DESKTOP_CONTROL_TOOLS = frozenset(
@@ -211,6 +242,13 @@ _DESKTOP_PHYSICAL_INPUT_TOOLS = frozenset(
         "desktop_scroll",
     }
 )
+_RESEARCH_ACTION_CONTINUATION_RE = re.compile(
+    r"(?:[;,.]\s*|\band\s+|\bthen\s+)"
+    r"(?:open(?![\s-]*source\b)|download|save|write|remember|remind|set|create|update|cancel|"
+    r"send|post|click|type|navigate|visit|launch)\b",
+    re.IGNORECASE,
+)
+_NO_FETCHED_RESEARCH_EVIDENCE_STOPS = frozenset({"no-results", "insufficient-evidence", "search-snippets-only"})
 # Narrower sibling of router.SCREEN_QUERY_RE: phrasing that implies the user wants
 # graphical/visual understanding (an icon, photo, game frame) that OCR/UIA
 # marks can't describe. When this matches and a vision model is configured,
@@ -246,6 +284,7 @@ _ROUTER_CLASSIFIER_TIMEOUT_S = 0.6
 # as declined (matches charlie.recovery.request_recovery_approval's 30s, plus
 # headroom for the voice fallback's speak-prompt-then-listen round trip).
 _TOOL_APPROVAL_TIMEOUT_SEC = 45.0
+_TELEGRAM_TOOL_APPROVAL_TIMEOUT_SEC = 120.0
 _REPEATED_TOOL_RESULT = (
     "Repeated identical tool call suppressed. Choose another valid capability or finish the response."
 )
@@ -295,39 +334,53 @@ class _RepeatToolCallGuard:
         return self._suppressed >= self._escape_after
 
 
-# request_id -> Future[bool], resolved by main.py:consume_web_commands (web
-# "tool_approve"/"tool_reject" commands) or by the voice yes/no fallback in
-# main.py:_process. Mirrors charlie.recovery.pending_proposals.
+# request_id -> Future[bool], resolved by the active voice or owner-channel
+# callback in main.py. The tool loop never treats an absent channel as approval.
 pending_tool_approvals: Dict[str, "asyncio.Future[bool]"] = {}
-# request_id of the tool approval currently waiting on a spoken yes/no, or
-# None. Single-slot: the tool loop runs gated calls sequentially (see
-# is_interactive handling below), so at most one voice approval is ever
-# outstanding at a time.
-_active_voice_approval_id: Optional[str] = None
+# Single-slot: gated calls run sequentially, so at most one approval is outstanding.
+_active_tool_approval_id: Optional[str] = None
+_active_tool_approval_platform: Optional[str] = None
 
 
 def get_active_voice_approval() -> Optional[str]:
-    """The request_id currently waiting on a spoken yes/no, or None.
-
-    Checked by main.py's speech handler before routing a transcript to a
-    normal chat turn -- if set, the transcript is parsed as an approval
-    answer instead.
-    """
-    return _active_voice_approval_id
+    """Return the active request id only when voice may answer by speech."""
+    active = get_active_tool_approval()
+    return active[0] if active and active[1] == "voice" else None
 
 
-def resolve_tool_approval(request_id: str, approved: bool) -> bool:
+def get_active_tool_approval() -> Optional[Tuple[str, str]]:
+    """Return the active approval id and its required channel, if any."""
+    if _active_tool_approval_id is None or _active_tool_approval_platform is None:
+        return None
+    return _active_tool_approval_id, _active_tool_approval_platform
+
+
+def resolve_tool_approval(
+    request_id: str,
+    approved: bool,
+    *,
+    expected_platform: Optional[str] = None,
+) -> bool:
     """Resolve a pending tool approval. Returns True if a matching pending
     request was found and resolved, False otherwise (already resolved,
     timed out, or unknown id).
     """
-    global _active_voice_approval_id
+    global _active_tool_approval_id, _active_tool_approval_platform
     fut = pending_tool_approvals.get(request_id)
-    if fut is None or fut.done():
+    if (
+        fut is None
+        or fut.done()
+        or (
+            expected_platform is not None
+            and (_active_tool_approval_id, _active_tool_approval_platform)
+            != (request_id, expected_platform)
+        )
+    ):
         return False
     fut.set_result(approved)
-    if _active_voice_approval_id == request_id:
-        _active_voice_approval_id = None
+    if _active_tool_approval_id == request_id:
+        _active_tool_approval_id = None
+        _active_tool_approval_platform = None
     return True
 
 
@@ -445,8 +498,12 @@ _EXPLICIT_MEMORY_RE = re.compile(
     re.IGNORECASE,
 )
 _EXPLICIT_RECALL_RE = re.compile(
-    r"^\s*(?:please\s+)?(?:recall|what do you remember about|do you remember)"
-    r"\s*(.*?)[?!.]?\s*$",
+    r"^\s*(?:charlie[,:]?\s*)?(?:please\s+)?(?:"
+    r"recall\s*(?P<recall>.*?)"
+    r"|what do you remember about\s*(?P<about>.*?)"
+    r"|do you remember\s*(?P<do>.*?)"
+    r"|what\s+(?P<topic>.+?)\s+did\s+i\s+ask\s+you\s+to\s+remember(?:\s+for\b.*?)?"
+    r")\s*[?!.]?\s*$",
     re.IGNORECASE,
 )
 
@@ -472,7 +529,11 @@ def _detect_explicit_recall(query: str) -> Optional[str]:
     match = _EXPLICIT_RECALL_RE.match(query)
     if not match:
         return None
-    return match.group(1).strip() or query.strip()
+    for name in ("recall", "about", "do", "topic"):
+        value = match.group(name)
+        if value is not None:
+            return value.strip()
+    return query.strip()
 
 
 # --- Correction detection (auto-learn from user corrections) ---
@@ -560,9 +621,6 @@ def _apply_correction_to_memory(
         logger.info("Correction stored: %s", entry[:80])
         if world_model is not None:
             world_model.add_rule(f"Corrected: {query.strip()}", "correction")
-            from charlie.tools import emit_memory_updated
-
-            emit_memory_updated("world_model", f"Corrected: {query.strip()}")
         return entry
     except Exception as exc:
         logger.warning("Failed to store correction: %s", exc)
@@ -799,8 +857,6 @@ async def _generate_summary(messages: List[Dict[str, Any]], config: Any, max_cha
             "messages": [
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0.1,
-            "max_tokens": max_chars // 4,
             "stream": False,
         }
 
@@ -939,6 +995,7 @@ def _freshness_requirement(query: str) -> Optional[str]:
 _WORK_POLICY_TOOLS = frozenset({"start_background_task"})
 _AUTOMATION_POLICY_TOOLS = frozenset({
     "calendar_create", "calendar_update", "calendar_delete",
+    "automation_create", "automation_update", "automation_get", "automation_list", "automation_cancel",
 })
 _RESEARCH_POLICY_TOOLS = frozenset({"web_research"})
 _GROUNDED_POLICY_TOOLS = frozenset({"web_search", "browser_read"})
@@ -946,7 +1003,7 @@ _ACTION_POLICY_TOOLS = frozenset({
     "browser_task", "desktop_open_app", "desktop_close_app", "desktop_click",
     "desktop_click_at", "desktop_type", "desktop_invoke", "desktop_key",
     "desktop_move", "desktop_drag", "desktop_scroll", "desktop_focus",
-    "desktop_window", "desktop_move_window", "file_write", "shell_execute",
+    "desktop_window", "desktop_move_window", "file_write", "download_public_pdf", "shell_execute",
     "media_control", "open_windows_settings", "system_control",
 })
 
@@ -1019,8 +1076,211 @@ def _execution_policy_from_tool_calls(
     )
 
 
+_TOOL_SCOPE_ACTION_PATTERNS = {
+    "start_background_task": (
+        r"\b(?:background task|background job|run later|in the background|while i (?:keep|continue))\b"
+    ),
+    "browser_task": r"\b(?:open|visit|navigate|go to|browse|search|click|select|type|fill|download)\b",
+    "desktop_open_app": r"\b(?:open|launch|start)\b",
+    "desktop_close_app": r"\b(?:close|quit|exit)\b",
+    "desktop_click": r"\b(?:click|tap|select|press)\b",
+    "desktop_click_at": r"\b(?:click|tap)\b",
+    "desktop_type": r"\b(?:type|enter|fill|write)\b",
+    "desktop_invoke": r"\b(?:click|tap|activate|invoke|select)\b",
+    "desktop_key": r"\b(?:press|hit|shortcut|key)\b",
+    "desktop_move": r"\b(?:move|point)\b",
+    "desktop_drag": r"\bdrag\b",
+    "desktop_scroll": r"\bscroll\b",
+    "desktop_focus": r"\b(?:focus|select|switch to)\b",
+    "desktop_window": r"\b(?:open|close|move|minimize|maximize|restore|resize)\b",
+    "desktop_move_window": r"\bmove\b",
+    "file_write": r"\b(?:save|write|create|download|edit|update|replace|rename|export)\b",
+    "download_public_pdf": r"\b(?:download|save)\b",
+    "media_control": r"\b(?:play|pause|stop|skip|next|previous|seek|volume|mute|unmute)\b",
+    "open_windows_settings": r"\b(?:open|show|change|set)\b",
+    "system_control": r"\b(?:restart|shut down|power off|sign out|lock)\b",
+    "memory": r"\b(?:remember|store|save to memory|recall|retrieve|forget|remove from memory)\b",
+    "calendar_create": r"\b(?:create|schedule|add|book)\b",
+    "calendar_update": r"\b(?:update|change|reschedule|edit)\b",
+    "calendar_delete": r"\b(?:cancel|delete|remove)\b",
+    "automation_create": r"\b(?:remind|reminder|schedule|recurring|background task|background job)\b",
+    "automation_update": r"\b(?:update|change|reschedule|edit)\b",
+    "automation_get": r"\b(?:show|list|check|what|which)\b",
+    "automation_list": r"\b(?:show|list|check|what|which)\b",
+    "automation_cancel": r"\b(?:cancel|stop|remove)\b",
+    "propose_new_tool": r"\b(?:propose|create|stage)\b.*\b(?:tool|skill|capability)\b",
+}
+
+
+def _shell_command_is_requested(request: str, command: str) -> bool:
+    """Match a shell call to the fact or command the user actually requested."""
+    command = re.sub(r"\s+", " ", str(command or "").strip()).casefold()
+    request = str(request or "").casefold()
+    if command in {"python --version", "python -v", "python3 --version"}:
+        return bool(re.search(r"\bpython\b", request) and re.search(r"\bversion\b", request))
+    if command == "taskkill /?":
+        return bool(
+            re.search(r"\btaskkill\b", request)
+            and re.search(r"\b(?:help|heading|usage|description|first)\b", request)
+        )
+    if command == "where python":
+        return bool(
+            re.search(r"\bpython\b", request)
+            and re.search(
+                r"\b(?:where|which)\s+(?:is\s+)?(?:the\s+)?python\s+(?:installed|located|path|executable|interpreter|location)\b|"
+                r"\bpython\b.{0,32}\b(?:path|location|executable|interpreter)\b",
+                request,
+            )
+        )
+
+    quoted = re.search(rf"[`\"']{re.escape(command)}[`\"']", request) is not None
+    explicit = re.search(
+        rf"\b(?:run|execute)\s+(?:the\s+command\s+)?{re.escape(command)}(?:\s|$|[,.!?])",
+        request,
+    ) is not None
+    if re.search(r"\b(?:don't|do not|never|avoid)\s+(?:run|execute|use)\b", request):
+        return False
+    return quoted or explicit
+
+
+def _tool_target_has_provenance(
+    call: Dict[str, Any],
+    request: str,
+    verified_results: List[tuple[Dict[str, Any], ResultEnvelope]],
+) -> bool:
+    """Require navigation and file targets to come from the request or a verified result."""
+    arguments = call.get("arguments") or {}
+    request_evidence = str(request or "").casefold()
+    for _prior_call, envelope in verified_results:
+        if envelope.status != ResultStatus.COMPLETED.value:
+            continue
+        if envelope.verification_status == VerificationStatus.VERIFIED_SUCCESS.value:
+            request_evidence += "\n" + str(envelope.result or "").casefold()
+        report = envelope.data.get("research_report") or envelope.data.get("structured_data")
+        if isinstance(report, ResearchReport):
+            fetched_sources = [
+                source
+                for source in report.sources
+                if source.url.strip() and source.content.strip() and not source.error
+            ]
+            request_evidence += "\n" + "\n".join(
+                f"{source.url} {source.title} {source.content}" for source in fetched_sources
+            ).casefold()
+
+    for key in ("task", "description"):
+        value = arguments.get(key)
+        if isinstance(value, str):
+            for url in re.findall(r"https?://[^\s\"'<>]+", value, re.IGNORECASE):
+                match = re.search(r"https?://([^/:?#]+)", url, re.IGNORECASE)
+                host = match.group(1).removeprefix("www.").casefold() if match else url.casefold()
+                if host not in request_evidence:
+                    return False
+
+    for key in ("url", "uri", "source_url", "target_url", "path", "file_path", "download_path", "app"):
+        value = arguments.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        value = value.strip().strip("`\"'").casefold()
+        if key in {"url", "uri", "source_url", "target_url"}:
+            host_match = re.search(r"https?://([^/:?#]+)", value)
+            target = host_match.group(1).removeprefix("www.") if host_match else value
+        elif key in {"path", "file_path", "download_path"}:
+            path_parts = [part for part in re.split(r"[\\/]", value) if len(part) > 2]
+            target = next(
+                (part for part in reversed(path_parts) if part in {"downloads", "documents", "desktop", "artifacts"}),
+                path_parts[-1] if path_parts else value,
+            )
+        else:
+            target = value
+        if target and target not in request_evidence and not (
+            key in {"path", "file_path", "download_path"}
+            and any(part in request_evidence for part in path_parts)
+        ):
+            return False
+    return True
+
+
+def _tool_call_matches_request_scope(
+    request: str,
+    call: Dict[str, Any],
+    *,
+    direct_screen_query: bool = False,
+    verified_results: Optional[List[tuple[Dict[str, Any], ResultEnvelope]]] = None,
+) -> bool:
+    """Keep actions tied to explicit user intent and observed result provenance."""
+    name = str(call.get("name") or "")
+    if direct_screen_query and name == "desktop_screenshot":
+        return True
+    if name == "shell_execute":
+        return _shell_command_is_requested(request, (call.get("arguments") or {}).get("command", ""))
+
+    action_pattern = _TOOL_SCOPE_ACTION_PATTERNS.get(name)
+    if action_pattern and not _request_has_positive_action(request, action_pattern):
+        return False
+
+    if name in {"browser_task", "download_public_pdf", "file_write", "desktop_open_app", "desktop_close_app"}:
+        return _tool_target_has_provenance(call, request, verified_results or [])
+    return True
+
+
+def _request_has_positive_action(request: str, action_pattern: str) -> bool:
+    """Reject action verbs used only in a negation or an explanatory question."""
+    request = str(request or "")
+    for match in re.finditer(action_pattern, request, re.IGNORECASE):
+        prefix = request[max(0, match.start() - 48) : match.start()]
+        if re.search(r"\b(?:don't|do not|never|avoid)\b(?:\s+\w+){0,5}\s*$", prefix, re.IGNORECASE):
+            continue
+        if re.search(
+            r"\b(?:how do i|how can i|how to|tell me how|show me how|explain how)\b(?:\s+\w+){0,5}\s*$",
+            prefix,
+            re.IGNORECASE,
+        ):
+            continue
+        return True
+    return False
+
+
+def _filter_tool_calls_to_request_scope(
+    tool_calls: List[Dict[str, Any]],
+    request: str,
+    *,
+    direct_screen_query: bool = False,
+    verified_results: Optional[List[tuple[Dict[str, Any], ResultEnvelope]]] = None,
+) -> tuple[List[Dict[str, Any]], int]:
+    allowed = [
+        call
+        for call in tool_calls
+        if _tool_call_matches_request_scope(
+            request,
+            call,
+            direct_screen_query=direct_screen_query,
+            verified_results=verified_results,
+        )
+    ]
+    return allowed, len(tool_calls) - len(allowed)
+
+
+_DOTS_FUNCTION_CALL_RE = re.compile(
+    r"<dots_function_call\b[^>]*>(.*?)</dots_function_call\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_DOTS_INVOKE_RE = re.compile(
+    r"<invoke\b[^>]*\bname\s*=\s*(?:\"([^\"]+)\"|'([^']+)')[^>]*>(.*?)</invoke\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_DOTS_PARAMETER_RE = re.compile(
+    r"<parameter\b[^>]*\bname\s*=\s*(?:\"([^\"]+)\"|'([^']+)')[^>]*>(.*?)</parameter\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _strip_dots_function_call_markup(text: str) -> str:
+    cleaned = _DOTS_FUNCTION_CALL_RE.sub("", text or "")
+    return re.sub(r"<dots_function_call\b[^>]*>.*\Z", "", cleaned, flags=re.IGNORECASE | re.DOTALL).strip()
+
+
 def _tool_result_text(raw_result: Any) -> str:
-    """Return the existing textual adapter representation for model-facing paths."""
+    """Return the existing textual adapter form for model-facing paths."""
 
     if isinstance(raw_result, ToolExecutionResult):
         return str(raw_result.model_text)
@@ -1202,6 +1462,89 @@ def _result_envelope_to_model_text(envelope: ResultEnvelope) -> str:
         if message.casefold() not in result_text.casefold():
             return f"{result_text} {message}"
     return result_text
+
+
+def _verified_requested_shell_fact_reply(
+    request: str,
+    operation_results: List[tuple[Dict[str, Any], ResultEnvelope]],
+) -> str:
+    """Keep verified local facts when the model cannot produce its final wording."""
+    request_lower = request.casefold()
+    verified = [
+        (call, envelope)
+        for call, envelope in operation_results
+        if envelope.status == ResultStatus.COMPLETED.value
+        and envelope.verification_status == VerificationStatus.VERIFIED_SUCCESS.value
+        and call.get("name") == "shell_execute"
+    ]
+    facts: List[str] = []
+
+    if "python" in request_lower and "version" in request_lower:
+        for call, envelope in verified:
+            command = str((call.get("arguments") or {}).get("command") or "").strip()
+            if not re.fullmatch(r"(?:python\s+(?:--version|-V)|python3\s+--version)", command, re.I):
+                continue
+            match = re.search(r"\bPython\s+(\d+(?:\.\d+)+)", str(envelope.result or ""), re.I)
+            if match:
+                facts.append(f"Python version: {match.group(1)}.")
+                break
+
+    if "taskkill" in request_lower and re.search(r"\b(?:help|heading|first)\b", request_lower):
+        for call, envelope in verified:
+            command = str((call.get("arguments") or {}).get("command") or "").strip()
+            if command.casefold() != "taskkill /?":
+                continue
+            output = str(envelope.result or "")
+            match = re.search(r"(?im)^\s*(Description)\s*:", output)
+            if match:
+                facts.append(f"First heading in Windows taskkill help: {match.group(1)}.")
+                break
+
+    return " ".join(facts)
+
+
+def _verified_requested_shell_facts_complete(
+    request: str,
+    operation_results: List[tuple[Dict[str, Any], ResultEnvelope]],
+) -> bool:
+    """Stop the model loop only after every recognized requested shell fact is verified."""
+    lowered = request.casefold()
+    expected = int("python" in lowered and "version" in lowered)
+    expected += int("taskkill" in lowered and bool(re.search(r"\b(?:help|heading|first)\b", lowered)))
+    if expected == 0:
+        return False
+    reply = _verified_requested_shell_fact_reply(request, operation_results)
+    observed = reply.count("Python version:") + reply.count("First heading in Windows taskkill help:")
+    return observed == expected
+
+
+def _verified_partial_result_reply(
+    request: str,
+    operation_results: List[tuple[Dict[str, Any], ResultEnvelope]],
+    interruption: str,
+) -> str:
+    """Report verified work before explaining why the rest of the turn stopped."""
+    requested_facts = _verified_requested_shell_fact_reply(request, operation_results)
+    if requested_facts:
+        return f"{requested_facts}\n\nStatus: {interruption} I didn't attempt the remaining steps."
+
+    outputs: List[str] = []
+    for _call, envelope in operation_results:
+        if (
+            envelope.status != ResultStatus.COMPLETED.value
+            or envelope.verification_status != VerificationStatus.VERIFIED_SUCCESS.value
+        ):
+            continue
+        output = _result_envelope_to_model_text(envelope).strip()
+        if output:
+            outputs.append(output[:480].rstrip() + (" …" if len(output) > 480 else ""))
+    if outputs:
+        return (
+            "Verified so far: "
+            + "; ".join(outputs)
+            + f"\n\nStatus: {interruption} I didn't attempt the remaining steps."
+        )
+    return ""
 
 
 def _operation_succeeded(envelope: ResultEnvelope) -> bool:
@@ -1488,7 +1831,7 @@ class Brain:
         self._reflect_interval: int = 5  # reflect every N turns
         self._background_tasks: set[asyncio.Task] = set()
         self._memory_capacity_due = False
-        self._reflection_pending = False
+        self._graph_consolidation_pending = False
         self._recent_deterministic_apps: List[str] = []
 
         # --- Hybrid tool calling: detect native support ---
@@ -1503,19 +1846,15 @@ class Brain:
 
         # --- Frozen tiers (cached once at init for prompt cache stability) ---
         soul_text = config.soul or "You are Charlie. Be concise and warm."
-        presentation_block = get_presentation_registry().build_model_awareness_block()
         self._stable_tier: str = prompt_builder.build_stable_tier(
             soul_text,
             build_capability_roster(capability_index, config),
             self._use_native_tools,
-            presentation_block=presentation_block,
         )
 
         # --- Frozen context tier (read once, reloaded only on explicit request) ---
-        # Populated by add_installed_skill_block() when the web dashboard's
-        # Extensions flow installs a "skill" kind extension -- that flow lives
-        # entirely in the web-server subprocess, so main.py mirrors installs
-        # here over the EventBus (see main.py's "extension_installed" command).
+        # Populated by add_installed_skill_block() when the main-owned extension
+        # runtime activates a skill. The context tier remains Brain-owned.
         self._installed_skill_blocks: Dict[str, str] = {}
         max_chars = config.prompt_memory_max // 2
         memory_content = self._read_file_safe(config.memory_file, max_chars)
@@ -1593,16 +1932,13 @@ class Brain:
         )
 
     def rebuild_stable_tier(self) -> None:
-        """Rebuild the stable tier after a live config change (e.g. the
-        dashboard's system_restart reload flow) so capability claims reflect
-        the new config instead of what was true at process start."""
+        """Rebuild the stable tier after a live config change so capability
+        claims reflect the current runtime configuration."""
         soul_text = self.config.soul or "You are Charlie. Be concise and warm."
-        presentation_block = get_presentation_registry().build_model_awareness_block()
         self._stable_tier = prompt_builder.build_stable_tier(
             soul_text,
             build_capability_roster(capability_index, self.config),
             self._use_native_tools,
-            presentation_block=presentation_block,
         )
 
     def add_installed_skill_block(self, name: str, block: str) -> None:
@@ -1647,13 +1983,9 @@ class Brain:
         if self._memory_capacity_due:
             self._memory_capacity_due = False
             self.schedule_background_task(self._background_check_and_consolidate())
-        if self._reflection_pending:
-            self._reflection_pending = False
-            self.schedule_background_task(self._reflect_and_consolidate())
-
-    async def _background_save_to_memory(self, text: str, source: str) -> None:
-        await asyncio.sleep(0)
-        self._save_to_memory(text, source)
+        if self._graph_consolidation_pending:
+            self._graph_consolidation_pending = False
+            self.schedule_background_task(self._consolidate_memory_graph())
 
     async def _check_memory_capacity(self) -> None:
         """Review memory files and consolidate when near capacity."""
@@ -1744,8 +2076,7 @@ class Brain:
                 payload = {
                     "model": self.config.llm_model,
                     "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.1,
-                    "max_tokens": max_chars,
+                    "stream": False,
                 }
                 async with _httpx.AsyncClient(
                     base_url=self.config.llm_url,
@@ -1814,7 +2145,6 @@ class Brain:
         routing_source: str = "deterministic",
         confidence: Optional[float] = None,
         rationale: str = "",
-        presentation_expectation: Optional[str] = None,
         execution_policy: str | ExecutionPolicy = ExecutionPolicy.CONVERSATION,
         external_action_required: bool = False,
         durable_work_required: bool = False,
@@ -1829,7 +2159,6 @@ class Brain:
             routing_source=routing_source,
             confidence=confidence,
             rationale=rationale,
-            presentation_expectation=presentation_expectation,
             execution_policy=execution_policy,
             external_action_required=external_action_required,
             durable_work_required=durable_work_required,
@@ -1846,7 +2175,6 @@ class Brain:
         routing_source: str = "deterministic",
         confidence: Optional[float] = None,
         rationale: str = "",
-        presentation_expectation: Optional[str] = None,
         execution_policy: str | ExecutionPolicy = ExecutionPolicy.CONVERSATION,
         external_action_required: bool = False,
         durable_work_required: bool = False,
@@ -1863,7 +2191,6 @@ class Brain:
                 routing_source=routing_source,
                 confidence=confidence,
                 rationale=rationale,
-                presentation_expectation=presentation_expectation,
                 execution_policy=execution_policy,
                 external_action_required=external_action_required,
                 durable_work_required=durable_work_required,
@@ -1877,14 +2204,13 @@ class Brain:
             routing_source=routing_source,
             confidence=confidence,
             rationale=rationale,
-            presentation_expectation=presentation_expectation,
             execution_policy=execution_policy,
             external_action_required=external_action_required,
             durable_work_required=durable_work_required,
         )
         for field_name in (
             "intent", "capabilities", "freshness_requirement", "routing_source",
-            "confidence", "rationale", "presentation_expectation", "execution_policy",
+            "confidence", "rationale", "execution_policy",
             "external_action_required", "durable_work_required",
         ):
             object.__setattr__(existing, field_name, getattr(updated, field_name))
@@ -1906,8 +2232,11 @@ class Brain:
         self,
         arguments: Dict[str, Any],
         *,
+        platform: str = "voice",
         session_id: Optional[str] = None,
         turn_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        require_successful_operation: bool = False,
     ) -> str:
         """Kicks a task into charlie.tasks.TaskManager's queue via background_task.start() --
         needs Brain/event-bus access the plain registry stub doesn't have, same interception
@@ -1930,13 +2259,18 @@ class Brain:
             "on_tool_call": self.on_tool_call,
             "on_tool_result": self.on_tool_result,
             "on_operation_result": self.on_operation_result,
+            "on_tool_approval_request": getattr(self, "on_tool_approval_request", None),
             "on_thinking_update": self.on_thinking_update,
             "on_result_stored": self.on_result_stored,
+            "approval_platform": platform,
+            "require_successful_operation": require_successful_operation,
         }
         if session_id is not None:
             start_kwargs["session_id"] = session_id
         if turn_id is not None:
             start_kwargs["turn_id"] = turn_id
+        if task_id is not None:
+            start_kwargs["task_id"] = task_id
         if self.on_research_result is not None:
             start_kwargs["on_research_result"] = self.on_research_result
 
@@ -1961,14 +2295,15 @@ class Brain:
                     "content": [
                         {
                             "type": "text",
-                            "text": "Describe what's visible in this browser screenshot, "
-                            "focusing on clickable elements and their labels.",
+                            "text": "Describe the visual appearance and readable labels of "
+                            "elements in this screenshot. "
+                            "Screenshot appearance alone cannot confirm interactivity; DOM or accessibility evidence "
+                            "must confirm clickability. Do not infer clickability from styling, shape, or drawing.",
                         },
                         {"type": "image_url", "image_url": {"url": data_url}},
                     ],
                 }
             ],
-            "temperature": 0.0,
             "max_tokens": 300,
         }
         try:
@@ -2173,7 +2508,9 @@ class Brain:
         from charlie.browser.task import resolve as resolve_browser_task
 
         loop = asyncio.get_running_loop()
-        open_intent = browser_intent.has_open_intent(task) and not browser_intent.is_media_control(task)
+        open_intent = browser_intent.has_open_intent(task) or bool(
+            re.search(r"\bopen\b", task, re.IGNORECASE)
+        )
         lowered_task = task.lower()
         parsed_browser_intent = browser_intent.parse_browser_intent(
             task,
@@ -2194,6 +2531,7 @@ class Brain:
                 or page_question
             )
             and not any(verb in lowered_task.split() for verb in ("open", "search", "find", "click", "navigate", "go"))
+            and not open_intent
         )
 
         max_steps = max(_MIN_BROWSER_STEPS, self.config.browser_max_steps)
@@ -2314,6 +2652,7 @@ class Brain:
                 else (f"task:{task_id}" if task_id else None)
             ),
             user_supplied_url=user_supplied_url,
+            user_visible=open_intent,
         )
 
         browser_verification_status = (
@@ -2367,42 +2706,6 @@ class Brain:
                 ),
             )
 
-            from charlie.presentation import PresentationContext, default_presentation_resolver
-
-            presentation = default_presentation_resolver.resolve(
-                outcome,
-                PresentationContext(platform=platform),
-            )
-            await recovery._event_bus.emit(
-                "presentation_intent",
-                presentation.to_dict(),
-                meta=EventMeta(
-                    source=EventSource.TASK,
-                    task_id=task_id,
-                    session_id=session_id,
-                    turn_id=turn_id,
-                ),
-            )
-
-        if result.success and result.url and open_intent:
-            host_outcome = await self.execute_tool_operation(
-                "desktop_open_url",
-                {"url": result.url},
-                request=task,
-                task_id=task_id,
-                session_id=session_id,
-                turn_id=turn_id,
-                platform=platform,
-                execution_owner_id=execution_owner_id,
-            )
-            opened = _operation_succeeded(host_outcome)
-            outcome.data["host_effect"] = host_outcome.to_dict()
-            parts = ([result.answer] if result.answer else []) + [
-                f"Opened {result.url}." if opened else f"Found {result.url} but couldn't open your browser."
-            ]
-            response_text = " ".join(parts)
-            outcome.result = response_text
-            return outcome if return_envelope else response_text
         if result.answer:
             outcome.result = result.answer
             return outcome if return_envelope else result.answer
@@ -2414,11 +2717,8 @@ class Brain:
         return outcome if return_envelope else outcome.result
 
     async def _handle_propose_new_tool(self, arguments: Dict[str, Any]) -> str:
-        """Tier-3 self-extension: validate the authored code, then queue it on
-        the dashboard's pending-extensions state -- never runs it, never waits
-        for approval here (that's "queues by voice, approves by screen": the
-        actual install only happens via the existing /api/extensions/confirm
-        flow once a human has read the code).
+        """Tier-3 self-extension: validate authored code and queue a review
+        record. It never runs code or bypasses the normal owner approval gate.
         """
         from charlie import recovery
         from charlie.extensions import build_skill_card
@@ -2453,7 +2753,7 @@ class Brain:
                 )
         except Exception:
             logger.warning("Failed to broadcast extension_proposed event", exc_info=True)
-        return f"Drafted a new tool called '{name}' and sent it for your review on the dashboard."
+        return f"Drafted a new tool called '{name}' and queued it for owner review."
 
     async def request_tool_approval(
         self,
@@ -2493,21 +2793,19 @@ class Brain:
         session_id: Optional[str] = None,
     ) -> ApprovalDecision:
         """Ask the user to approve/decline a gated tool call and wait for the
-        answer. Web dashboard is primary: broadcasts a "tool_approval_request"
-        event and waits for a "tool_approve"/"tool_reject" WS command. If no
-        dashboard is connected, falls back to voice: speaks the prompt via
-        `on_thought_callback` and waits for main.py's speech handler to route
-        the next transcript here as a yes/no (see get_active_voice_approval).
+        answer through the active voice or owner-channel callback.
         Times out to declined (safe default) after self._approval_timeout seconds
         (matching charlie.recovery.request_recovery_approval's fail-safe stance),
-        or parks indefinitely if approval_timeout=None (background tasks). Background
-        Brains omit session_id from the broadcast -- the dashboard filters
-        tool_approval_request by "is this the session I'm currently viewing,"
-        and a background task has no chat session tab open at all, so tagging
-        it with the foreground's active session would get it silently dropped.
+        or parks indefinitely if approval_timeout=None (background tasks).
         """
-        global _active_voice_approval_id
-        from charlie import recovery
+        global _active_tool_approval_id, _active_tool_approval_platform
+
+        if _active_tool_approval_id is not None:
+            logger.warning(
+                "Tool approval %s is already pending; declining the concurrent request safely",
+                _active_tool_approval_id,
+            )
+            return ApprovalDecision.UNAVAILABLE
 
         request_id = f"tool_{make_id(6)}"
         prompt = f"Need your OK: {reason}. Yes or no?"
@@ -2515,58 +2813,60 @@ class Brain:
         loop = asyncio.get_running_loop()
         fut: "asyncio.Future[bool]" = loop.create_future()
         pending_tool_approvals[request_id] = fut
-
-        # Fires for every platform -- also drives the HUD modal, not just Telegram; callback checks `platform` itself.
-        _invoke_callback_with_identity(
-            self.on_tool_approval_request,
-            request_id,
-            tool_name,
-            reason,
-            platform,
-            risk_class,
-            turn_id=turn_id,
-            task_id=task_id,
-            session_id=session_id,
-        )
+        # Register before invoking the owner channel: Telegram can return a
+        # fast button callback while send_approval_request is still completing.
+        _active_tool_approval_id = request_id
+        _active_tool_approval_platform = platform
 
         try:
-            if recovery.get_active_ws_count() > 0 and recovery._event_bus:
-                approval_session_id = None if self._is_background else (session_id or recovery.get_active_session_id())
-                await recovery._event_bus.emit(
-                    "tool_approval_request",
-                    {
-                        "request_id": request_id,
-                        "tool_name": tool_name,
-                        "arguments": arguments,
-                        "reason": reason,
-                        "risk_class": risk_class,
-                        "session_id": approval_session_id,
-                    },
-                    meta=EventMeta(
-                        source=EventSource.BRAIN,
-                        task_id=task_id,
-                        session_id=approval_session_id,
-                        turn_id=turn_id,
-                        rationale=reason,
-                    ),
+            try:
+                channel_available = _invoke_callback_with_identity(
+                    self.on_tool_approval_request,
+                    request_id,
+                    tool_name,
+                    reason,
+                    platform,
+                    risk_class,
+                    turn_id=turn_id,
+                    task_id=task_id,
+                    session_id=session_id,
+                    operation_preview=_approval_operation_preview(tool_name, arguments),
                 )
-            elif self.on_thought_callback:
-                _active_voice_approval_id = request_id
-                self.on_thought_callback(prompt)
-            else:
+                if inspect.isawaitable(channel_available):
+                    channel_available = await channel_available
+            except Exception:
+                logger.warning("Tool approval channel failed before prompting; declining safely.", exc_info=True)
+                return ApprovalDecision.UNAVAILABLE
+
+            if platform == "telegram":
+                if channel_available is not True and not fut.done():
+                    logger.warning("Telegram approval channel unavailable -- declining safely.")
+                    return ApprovalDecision.UNAVAILABLE
+            elif not self.on_thought_callback:
                 logger.warning("Gated tool call with no approval channel available -- declining safely.")
                 return ApprovalDecision.UNAVAILABLE
 
+            if platform != "telegram":
+                self.on_thought_callback(prompt)
+
             try:
-                approved = await asyncio.wait_for(fut, timeout=self._approval_timeout)
+                timeout = self._approval_timeout
+                if (
+                    platform == "telegram"
+                    and not self._is_background
+                    and timeout == _TOOL_APPROVAL_TIMEOUT_SEC
+                ):
+                    timeout = _TELEGRAM_TOOL_APPROVAL_TIMEOUT_SEC
+                approved = await asyncio.wait_for(fut, timeout=timeout)
                 return ApprovalDecision.APPROVED if approved else ApprovalDecision.REJECTED
             except asyncio.TimeoutError:
                 logger.warning("Tool approval %s timed out, declining", request_id)
                 return ApprovalDecision.TIMED_OUT
         finally:
             pending_tool_approvals.pop(request_id, None)
-            if _active_voice_approval_id == request_id:
-                _active_voice_approval_id = None
+            if _active_tool_approval_id == request_id:
+                _active_tool_approval_id = None
+                _active_tool_approval_platform = None
 
     async def execute_tool_operation(
         self,
@@ -2577,7 +2877,7 @@ class Brain:
         task_id: Optional[str],
         session_id: Optional[str],
         turn_id: Optional[str] = None,
-        platform: str = "web",
+        platform: str = "voice",
         operation_override: Optional[str] = None,
         execution_owner_id: Optional[str] = None,
         execute_override: Optional[Callable[[], Any]] = None,
@@ -2670,7 +2970,7 @@ class Brain:
         task_id: Optional[str],
         session_id: Optional[str],
         turn_id: Optional[str] = None,
-        platform: str = "web",
+        platform: str = "voice",
         execution_owner_id: Optional[str] = None,
         approval_requester: Optional[Callable[..., Any]] = None,
         execute_override: Optional[Callable[[], Any]] = None,
@@ -2858,7 +3158,17 @@ class Brain:
                     "calendar_update",
                     "calendar_delete",
                     "calendar_get",
+                    "automation_create",
+                    "automation_update",
+                    "automation_get",
+                    "automation_list",
+                    "automation_cancel",
                     "system_control",
+                    "desktop_open_app",
+                    "desktop_close_app",
+                    "desktop_open_url",
+                    "shell_execute",
+                    "download_public_pdf",
                 }
                 else tool_registry.execute_tool
             )
@@ -3126,8 +3436,7 @@ class Brain:
         payload = {
             "model": self.config.llm_model,
             "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 1,
-            "temperature": 0.0,
+            "stream": False,
         }
         gen = self._allocate_primary_llm_generation()
         try:
@@ -3204,7 +3513,6 @@ class Brain:
         payload: Dict[str, Any] = {
             "model": self.config.llm_model,
             "messages": messages,
-            "temperature": _LLM_TEMPERATURE,
             "stream": True,
         }
         if self._use_native_tools and not skip_tools:
@@ -3215,8 +3523,6 @@ class Brain:
                 config=self.config,
             )
             payload["tool_choice"] = "auto"
-        if getattr(self.config, "llm_disable_reasoning", False):
-            payload["reasoning"] = {"effort": "none"}
         if self.config.vision_enabled and self._use_native_tools:
             image_url, self._pending_vision_image_url = self._pending_vision_image_url, None
             if image_url:
@@ -3546,8 +3852,7 @@ class Brain:
             payload = {
                 "model": self.config.llm_model,
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.0,
-                "max_tokens": 40,
+                "stream": False,
             }
             async with httpx.AsyncClient(
                 base_url=self.config.llm_url,
@@ -3635,7 +3940,6 @@ class Brain:
             routing_source: str = "deterministic",
             confidence: Optional[float] = None,
             rationale: str = "",
-            presentation_expectation: Optional[str] = None,
             execution_policy: str | ExecutionPolicy = ExecutionPolicy.CONVERSATION,
             external_action_required: bool = False,
             durable_work_required: bool = False,
@@ -3653,7 +3957,6 @@ class Brain:
                 routing_source=routing_source,
                 confidence=confidence,
                 rationale=rationale,
-                presentation_expectation=presentation_expectation,
                 execution_policy=execution_policy,
                 external_action_required=external_action_required,
                 durable_work_required=durable_work_required,
@@ -3671,7 +3974,7 @@ class Brain:
             return primary_decision
 
         # Load session-specific history from SQLite store at the start of the turn
-        if self.session_store:
+        if self.session_store and not self._is_background:
             try:
                 raw_messages = self.session_store.get_session_messages(session_id, limit=self._history_max_turns * 2)
                 self.history = []
@@ -3775,6 +4078,49 @@ class Brain:
             _publish_direct_operation_result(tool_name, args or {}, envelope)
             return envelope
 
+        if (
+            not skip_tools
+            and not self._is_background
+            and router.is_explicit_background_task_start(user_input)
+        ):
+            work_decision = {
+                "intent": "work",
+                "capabilities": ("task",),
+                "routing_source": "deterministic",
+                "confidence": 1.0,
+                "rationale": "explicit background-task request selected durable task dispatch",
+                "execution_policy": ExecutionPolicy.WORK,
+                "durable_work_required": True,
+            }
+            if primary_decision is None:
+                record_primary_decision(**work_decision)
+            elif turn_request is not None:
+                primary_decision = self.refine_intent_decision(turn_request, **work_decision)
+
+            async def start_requested_background_task() -> str:
+                return await self._handle_start_background_task(
+                    {"text": user_input},
+                    platform=platform,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    task_id=task_id,
+                )
+
+            outcome = await self.execute_tool_operation(
+                "start_background_task",
+                {"text": user_input},
+                request=original_user_input,
+                turn_id=turn_id,
+                task_id=task_id,
+                session_id=session_id,
+                platform=platform,
+                execution_owner_id=execution_owner_id,
+                execute_override=start_requested_background_task,
+            )
+            response = _result_envelope_to_model_text(outcome)
+            yield response
+            return
+
         async def _run_direct_browser(task_text: str, *, user_supplied_url: bool = False) -> str:
             outcome = await self._browser_task_bounded(
                 task_text,
@@ -3827,18 +4173,22 @@ class Brain:
                 confidence=1.0,
                 rationale="explicit memory recall request",
             )
+            if not explicit_recall:
+                yield "What saved memory should I look for?"
+                return
+            memory_args = {"action": "search", "target": "all", "query": explicit_recall}
             result = await asyncio.to_thread(
                 tool_registry.execute_tool,
-                "vector_memory",
-                {"action": "recall", "content": explicit_recall},
+                "memory",
+                memory_args,
             )
             logger.info("Explicit memory recall handled deterministically: %s", result)
             outcome = _direct_operation_result(
-                tool_name="vector_memory",
+                tool_name="memory",
                 capability="memory",
                 operation="memory.recall",
                 raw_result=result,
-                args={"action": "recall", "content": explicit_recall},
+                args=memory_args,
             )
             yield _result_envelope_to_model_text(outcome)
             return
@@ -3916,9 +4266,6 @@ class Brain:
                 rationale="standing-instruction matcher selected memory update",
             )
             self.world_model.add_rule(instruction, "teaching")
-            from charlie.tools import emit_memory_updated
-
-            emit_memory_updated("world_model", instruction)
             logger.info("Standing instruction learned: %s", instruction)
             outcome = _direct_operation_result(
                 tool_name="memory",
@@ -4169,7 +4516,7 @@ class Brain:
                 yield _result_envelope_to_model_text(outcome)
                 return
             if requirement == Requirement.APPROVE:
-                approved = await self.request_tool_approval(
+                decision = await self._request_tool_approval_decision(
                     fp_match.tool_name,
                     fp_match.arguments,
                     reason=requirement_reason or f"Fast-path action '{fp_match.intent}' requires confirmation",
@@ -4179,8 +4526,12 @@ class Brain:
                     task_id=task_id,
                     session_id=session_id,
                 )
-                if not approved:
-                    msg = f"Operation '{fp_match.intent}' was declined."
+                if decision is not ApprovalDecision.APPROVED:
+                    msg = {
+                        ApprovalDecision.REJECTED: f"Operation '{fp_match.intent}' was declined by the user.",
+                        ApprovalDecision.TIMED_OUT: f"Operation '{fp_match.intent}' approval timed out.",
+                        ApprovalDecision.UNAVAILABLE: f"Operation '{fp_match.intent}' approval channel unavailable.",
+                    }.get(decision, f"Operation '{fp_match.intent}' approval was not granted.")
                     outcome = _normalize_tool_result(
                         fp_match.tool_name,
                         msg,
@@ -4193,7 +4544,7 @@ class Brain:
                         source="deterministic_fastpath",
                         risk_class=getattr(risk_class, "value", risk_class),
                         requires_approval=True,
-                        data={"failure_kind": "approval_denied"},
+                        data={"failure_kind": "approval_denied", "approval_status": decision.value},
                     )
                     _publish_direct_operation_result(fp_match.tool_name, fp_match.arguments, outcome)
                     yield _result_envelope_to_model_text(outcome)
@@ -4252,11 +4603,6 @@ class Brain:
                 fastpath_reason = f"Tool '{fp_match.tool_name}' raised an exception."
                 fastpath_data = {"failure_kind": "exception", "exception_type": type(exc).__name__}
 
-            from charlie.presentation import (
-                PresentationContext,
-                default_presentation_resolver,
-            )
-
             v_dict = (
                 {
                     "verified": v_res.verified,
@@ -4298,26 +4644,7 @@ class Brain:
                 data=fastpath_result_data,
             )
             _publish_direct_operation_result(fp_match.tool_name, fp_match.arguments, outcome)
-            p_ctx = PresentationContext(platform=platform)
-            intent = default_presentation_resolver.resolve(outcome, p_ctx)
-            logger.info("Resolved presentation intent: %s (kind=%s)", intent.id, intent.kind)
-            self.world_model.record_event(f"presentation_{intent.kind}", intent.to_dict())
-            from charlie import recovery
-            event_bus = self.event_bus or recovery._event_bus
-
-            if event_bus:
-                await event_bus.emit(
-                    "presentation_intent",
-                    intent.to_dict(),
-                    meta=EventMeta(
-                        source=EventSource.BRAIN,
-                        task_id=task_id,
-                        session_id=session_id,
-                        turn_id=turn_id,
-                    ),
-                )
-
-            yield intent.spoken_text or _result_envelope_to_model_text(outcome)
+            yield _result_envelope_to_model_text(outcome)
             return
 
         # --- Fast-path: close app (matcher pure; execution stays canonical) ---
@@ -4557,6 +4884,7 @@ class Brain:
                     yield _result_envelope_to_model_text(outcome)
                     return
 
+        turn_operation_results: List[tuple[Dict[str, Any], ResultEnvelope]] = []
         direct_screen_query = router.is_direct_screen_perception_query(user_input, recent_screen_context)
         research_route = (
             route_research(user_input, getattr(self.config, "research_default_mode", "auto"))
@@ -4618,7 +4946,7 @@ class Brain:
             if research_report is not None:
                 turn_research_reports.append(research_report)
                 search_results = research_report.prompt_context()
-                if research_report.stop_reason == "insufficient-evidence":
+                if research_report.stop_reason in _NO_FETCHED_RESEARCH_EVIDENCE_STOPS:
                     search_results = (
                         "RESEARCH STATUS: insufficient evidence.\n"
                         "Do not answer this research question from model memory. "
@@ -4647,13 +4975,23 @@ class Brain:
             )
 
         def finalize_research_answer(answer: str) -> str:
-            if research_report is not None and research_report.stop_reason == "insufficient-evidence":
+            if research_report is not None and research_report.stop_reason in _NO_FETCHED_RESEARCH_EVIDENCE_STOPS:
                 answer = "I couldn't find sufficient reliable evidence to answer that research question."
             elif research_report is not None:
                 answer = strip_invalid_citations(answer, research_report.citations)
             if research_report is not None:
                 research_report.answer = answer
             return answer
+
+        pure_research_synthesis = bool(
+            research_report is not None
+            and research_route is not None
+            and research_route.should_research
+            and not research_route.interactive
+            and not router.is_explicit_app_action(original_user_input)
+            and not _RESEARCH_ACTION_CONTINUATION_RE.search(original_user_input)
+        )
+        effective_skip_tools = skip_tools or pure_research_synthesis
 
         # --- Force a fresh screen observation for screen-content questions ---
         # Injected the same way as web search results (below) so the model is
@@ -4787,7 +5125,7 @@ class Brain:
         # fast-path above rebound user_input to a compound instruction's leftover.
         self.history.append({"role": "user", "content": original_user_input})
 
-        payload = self._build_payload(messages, skip_tools=skip_tools)
+        payload = self._build_payload(messages, skip_tools=effective_skip_tools)
         if diagnostic_trace is None:
             accumulated, tool_calls = await self._stream_completion(payload, generation)
         else:
@@ -4798,16 +5136,30 @@ class Brain:
             )
 
         # Hybrid fallback: try text-based extraction if native returned nothing
-        if not tool_calls and accumulated and not skip_tools:
+        if not tool_calls and accumulated and not effective_skip_tools:
             tool_calls = self._extract_tool_calls(accumulated)
 
-        if skip_tools:
+        if effective_skip_tools:
             tool_calls = []
 
-        if direct_screen_query and not skip_tools:
+        if direct_screen_query and not effective_skip_tools:
             tool_calls = [call for call in tool_calls if call.get("name") == "desktop_screenshot"]
 
-        tool_calls = router.maybe_inject_visual_screenshot_call(tool_calls, queue_visual_screenshot and not skip_tools)
+        tool_calls = router.maybe_inject_visual_screenshot_call(
+            tool_calls, queue_visual_screenshot and not effective_skip_tools
+        )
+        tool_calls, scope_suppressed = _filter_tool_calls_to_request_scope(
+            tool_calls,
+            original_user_input,
+            direct_screen_query=direct_screen_query,
+            verified_results=turn_operation_results,
+        )
+        if scope_suppressed:
+            logger.warning(
+                "suppressed_out_of_scope_tool_calls | turn_id=%s | count=%s",
+                turn_id,
+                scope_suppressed,
+            )
         executed_action_results: List[ResultEnvelope] = []
 
         if primary_decision is None:
@@ -4854,13 +5206,33 @@ class Brain:
                     durable_work_required=tool_work_required,
                 )
 
+        if not tool_calls and scope_suppressed:
+            final_payload = self._build_payload(messages, skip_tools=True)
+            try:
+                if diagnostic_trace is None:
+                    accumulated, _ = await self._stream_completion(final_payload, generation)
+                else:
+                    accumulated, _ = await self._stream_completion(
+                        final_payload,
+                        generation,
+                        diagnostic_trace=diagnostic_trace,
+                    )
+            except Exception as exc:
+                logger.warning("No-tool final response failed: %s", type(exc).__name__)
+                accumulated = ""
+
         if not tool_calls:
             if accumulated:
                 stream_filter = TextStreamFilter()
                 filtered = stream_filter.push(accumulated) + stream_filter.flush()
+                filtered = _strip_dots_function_call_markup(filtered)
                 filtered = finalize_research_answer(filtered)
                 filtered = _ground_external_action_response(user_input, filtered, executed_action_results)
                 publish_research_reports(filtered)
+                if not filtered:
+                    filtered = _verified_requested_shell_fact_reply(original_user_input, turn_operation_results)
+                if not filtered:
+                    filtered = "I couldn't complete that request just now. Please ask me again."
                 # Save assistant response to history
                 self.history.append({"role": "assistant", "content": filtered})
                 # Trim history to max turns (keep pairs: user + assistant)
@@ -4870,7 +5242,6 @@ class Brain:
                 if filtered:
                     yield filtered
                 if platform != "voice":
-                    self.schedule_background_task(self._background_save_to_memory(filtered, "assistant"))
                     self.schedule_background_task(
                         self._extract_thread_update(original_user_input, filtered, session_id)
                     )
@@ -4920,7 +5291,7 @@ class Brain:
                             "result_length": len(model_text),
                         },
                     )
-                if tool_name in _DESKTOP_CONTROL_TOOLS:
+                if tool_name in _DESKTOP_CONTROL_TOOLS or tool_name == "shell_execute":
                     executed_action_results.append(local_envelope)
                 if tool_name == "memory" and _operation_succeeded(local_envelope):
                     self.reload_context()
@@ -5017,6 +5388,7 @@ class Brain:
                 async def execute_override():
                     return await self._handle_start_background_task(
                         call["arguments"],
+                        platform=platform,
                         session_id=session_id,
                         turn_id=turn_id,
                     )
@@ -5106,6 +5478,7 @@ class Brain:
 
             def _turn_local_finalize(local_envelope: ResultEnvelope) -> None:
                 model_text = _result_envelope_to_model_text(local_envelope)
+                turn_operation_results.append((dict(call), local_envelope))
                 if diagnostic_trace is not None:
                     diagnostic_trace.mark(
                         "tool_complete",
@@ -5115,7 +5488,7 @@ class Brain:
                             "result_length": len(model_text),
                         },
                     )
-                if tool_name in _DESKTOP_CONTROL_TOOLS:
+                if tool_name in _DESKTOP_CONTROL_TOOLS or tool_name == "shell_execute":
                     executed_action_results.append(local_envelope)
                 if tool_name == "memory" and _operation_succeeded(local_envelope):
                     self.reload_context()
@@ -5197,7 +5570,11 @@ class Brain:
             # Enforce iteration budget -- spend what fits, drop only the calls that don't, never abort the whole batch.
             allowed_calls = [call for call in tool_calls if budget.try_spend(call["name"])]
             if not allowed_calls:
-                yield "I've reached my tool limit for this turn. Let me know if you want me to continue."
+                yield _verified_partial_result_reply(
+                    original_user_input,
+                    turn_operation_results,
+                    "I reached this turn's tool limit before finishing.",
+                ) or "I reached this turn's tool limit before finishing. Let me know if you want me to continue."
                 return
 
             tool_calls = allowed_calls
@@ -5209,9 +5586,30 @@ class Brain:
                     results_map[i] = r
 
             # Interactive tools run sequentially after read-only tools complete.
+            approval_denied = any(
+                (result.data or {}).get("failure_kind") == "approval_denied"
+                for result in results_map.values()
+            )
             for idx, call in enumerate(tool_calls):
+                if approval_denied:
+                    break
                 if tool_registry.is_interactive(call["name"]):
-                    results_map[idx] = await _exec_one(call)
+                    result = await _exec_one(call)
+                    results_map[idx] = result
+                    approval_denied = (result.data or {}).get("failure_kind") == "approval_denied"
+
+            if approval_denied:
+                response = _verified_partial_result_reply(
+                    original_user_input,
+                    turn_operation_results,
+                    "I stopped because the requested approval was not given (declined or expired).",
+                ) or "I stopped because the requested approval was not given. I didn't attempt the remaining steps."
+                self.history.append({"role": "assistant", "content": response})
+                max_messages = self._history_max_turns * 2
+                if len(self.history) > max_messages:
+                    self.history = self.history[-max_messages:]
+                yield response
+                return
 
             operation_results: List[ResultEnvelope] = [results_map[i] for i in range(len(tool_calls))]
             if _repeat_guard.should_escape:
@@ -5242,7 +5640,9 @@ class Brain:
             # Format results based on native vs text-based calling
             is_text_based = any(c.get("id") is None for c in tool_calls)
             if is_text_based:
-                messages.append({"role": "assistant", "content": accumulated})
+                messages.append(
+                    {"role": "assistant", "content": _strip_dots_function_call_markup(accumulated)}
+                )
                 tool_summary = _format_text_tool_summary(tool_calls, exec_results)
                 messages.append({"role": "tool", "content": tool_summary})
             else:
@@ -5332,11 +5732,14 @@ class Brain:
                     logger.warning("Optional follow-up failed; returning the last valid local vision result.")
                     yield last_vision_answer
                     return
-                if not state.accumulated:
-                    yield (
-                        "I ran into a problem getting a response back just now "
-                        "(the follow-up model call failed) -- try asking again."
-                    )
+                yield _verified_partial_result_reply(
+                    original_user_input,
+                    turn_operation_results,
+                    "I couldn't finish because the follow-up model call failed.",
+                ) or (
+                    "I ran into a problem getting a response back just now "
+                    "(the follow-up model call failed) -- try asking again."
+                )
                 break
 
             if state.cancelled:
@@ -5353,10 +5756,71 @@ class Brain:
                     yield "Local vision model returned no usable description."
                     return
             tool_calls = collect_tool_calls(state.tc_by_index)
+            if not tool_calls and accumulated:
+                tool_calls = self._extract_tool_calls(accumulated)
+            if tool_calls and _verified_requested_shell_facts_complete(
+                original_user_input,
+                turn_operation_results,
+            ):
+                accumulated = _verified_requested_shell_fact_reply(
+                    original_user_input,
+                    turn_operation_results,
+                )
+                tool_calls = []
+            if tool_calls:
+                tool_calls, scope_suppressed = _filter_tool_calls_to_request_scope(
+                    tool_calls,
+                    original_user_input,
+                    direct_screen_query=direct_screen_query,
+                    verified_results=turn_operation_results,
+                )
+                if scope_suppressed:
+                    logger.warning(
+                        "suppressed_out_of_scope_tool_calls | turn_id=%s | count=%s",
+                        turn_id,
+                        scope_suppressed,
+                    )
+                    if not tool_calls:
+                        accumulated = _verified_requested_shell_fact_reply(
+                            original_user_input,
+                            turn_operation_results,
+                        )
+                        if not accumulated:
+                            final_payload = self._build_payload(messages, skip_tools=True)
+                            try:
+                                if diagnostic_trace is None:
+                                    accumulated, _ = await self._stream_completion(final_payload, generation)
+                                else:
+                                    accumulated, _ = await self._stream_completion(
+                                        final_payload,
+                                        generation,
+                                        diagnostic_trace=diagnostic_trace,
+                                    )
+                            except Exception as exc:
+                                logger.warning("No-tool final response failed: %s", type(exc).__name__)
+                                accumulated = ""
+            if not accumulated.strip() and not tool_calls:
+                verified_summary = _verified_partial_result_reply(
+                    original_user_input,
+                    turn_operation_results,
+                    "I couldn't produce a final response after the tool call.",
+                )
+                yield verified_summary or (
+                    "I couldn't get a final response after the tool call, so I can't confirm the requested result."
+                )
+                return
             # Save final follow-up response to history (after tool loop)
             if accumulated:
                 hist_filter = TextStreamFilter()
                 clean_accumulated = hist_filter.push(accumulated) + hist_filter.flush()
+                clean_accumulated = _strip_dots_function_call_markup(clean_accumulated)
+                if not tool_calls and not clean_accumulated:
+                    clean_accumulated = _verified_requested_shell_fact_reply(
+                        original_user_input,
+                        turn_operation_results,
+                    )
+                if not tool_calls and not clean_accumulated:
+                    clean_accumulated = "I couldn't complete that request just now. Please ask me again."
                 if not tool_calls and clean_accumulated:
                     clean_accumulated = finalize_research_answer(clean_accumulated)
                     clean_accumulated = _ground_external_action_response(
@@ -5368,7 +5832,6 @@ class Brain:
                     yield clean_accumulated
                 self.history.append({"role": "assistant", "content": clean_accumulated})
                 if platform != "voice":
-                    self.schedule_background_task(self._background_save_to_memory(clean_accumulated, "assistant"))
                     self.schedule_background_task(
                         self._extract_thread_update(original_user_input, clean_accumulated, session_id)
                     )
@@ -5379,9 +5842,9 @@ class Brain:
             self._reflect_turn_counter += 1
             if self._reflect_turn_counter % self._reflect_interval == 0:
                 if platform == "voice":
-                    self._reflection_pending = True
+                    self._graph_consolidation_pending = True
                 else:
-                    self.schedule_background_task(self._reflect_and_consolidate())
+                    self.schedule_background_task(self._consolidate_memory_graph())
                 self._check_outcome_feedback()
                 self._check_observed_patterns()
                 self.world_model.decay_stale_rules()
@@ -5466,8 +5929,7 @@ class Brain:
             payload = {
                 "model": self.config.llm_model,
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.0,
-                "max_tokens": 256,
+                "stream": False,
             }
             async with httpx.AsyncClient(
                 base_url=self.config.llm_url,
@@ -5512,9 +5974,6 @@ class Brain:
                 "double-check its result or prefer an alternative when one exists."
             )
             self.world_model.add_rule(rule_text, "outcome")
-            from charlie.tools import emit_memory_updated
-
-            emit_memory_updated("world_model", rule_text)
 
     def _check_observed_patterns(self) -> None:
         """Observed-pattern learning signal: an app-open sequence repeated
@@ -5535,93 +5994,22 @@ class Brain:
             "pattern",
         )
 
-    def _save_to_memory(self, text: str, source: str) -> None:
-        """Fire-and-forget: extract and store facts from assistant response."""
+    async def _consolidate_memory_graph(self) -> None:
+        """Periodically consolidate graph records without exporting chat history."""
         try:
-            if not self.memory_service or not self.memory_service.semantic_available():
+            if self._reflect_turn_counter % (self._reflect_interval * 3) != 0:
                 return
-            if len(text) < 30:
+            if not self.memory_service:
                 return
-            loop = asyncio.get_running_loop()
-            loop.run_in_executor(
+            removed = await asyncio.get_running_loop().run_in_executor(
                 None,
-                self.memory_service.remember_semantic,
-                text,
-                source,
-                "auto",
+                self.memory_service.consolidate_graph,
             )
-        except Exception as e:
-            logger.debug("Memory save skipped: %s", e)
-
-    async def _reflect_and_consolidate(self) -> None:
-        """Periodically reflect on recent conversation and consolidate the knowledge graph."""
-        try:
-            # Get recent conversation context
-            recent = self.history[-6:] if len(self.history) >= 6 else self.history
-            if len(recent) < 2:
-                return
-
-            conversation_text = "\n".join(f"{m['role']}: {m['content'][:200]}" for m in recent)
-
-            client = self.client
-            model = self.config.llm_model
-
-            prompt = (
-                "Review this recent conversation and extract key facts. "
-                "For each fact, output a line in the format:\n"
-                "SUBJECT | PREDICATE | OBJECT\n\n"
-                "Focus on: user preferences, environment facts, corrections, goals.\n"
-                "Skip trivial/chit-chat. Max 10 facts.\n\n"
-                f"Conversation:\n{conversation_text}\n\n"
-                "Facts (one per line, format: S | P | O):"
-            )
-
-            response = await client.post(
-                "chat/completions",
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 500,
-                    "temperature": 0.3,
-                },
-            )
-            if response.status_code != 200:
-                logger.debug("Reflection LLM call failed: %s", response.status_code)
-                return
-
-            content = response.json()["choices"][0]["message"].get("content")
-            if not isinstance(content, str) or not content.strip():
-                logger.info("Reflection returned empty content; graph unchanged")
-                return
-
-            # Parse facts and add to graph
-            added = 0
-            for line in content.splitlines():
-                line = line.strip()
-                if "|" in line and not line.startswith("#"):
-                    parts = [p.strip() for p in line.split("|")]
-                    if len(parts) == 3 and all(parts):
-                        try:
-                            edge_id = self.memory_service.add_fact(parts[0], parts[1], parts[2])
-                            if edge_id is not None:
-                                from charlie.tools import emit_memory_updated
-
-                                emit_memory_updated("memory_graph", f"{parts[0]} -> {parts[1]} -> {parts[2]}")
-                                added += 1
-                        except Exception:
-                            logger.debug("Failed to add fact: %s", line)
-
-            if added > 0:
-                logger.info("Reflection: added %d facts to knowledge graph", added)
-
-            # Periodically consolidate
-            if self._reflect_turn_counter % (self._reflect_interval * 3) == 0:
-                removed = self.memory_service.consolidate_graph()
-                if removed:
-                    logger.info("Reflection: consolidated graph, removed %d stale facts", removed)
+            if removed:
+                logger.info("Memory graph: consolidated, removed %d stale facts", removed)
 
         except Exception as e:
-            logger.debug("Reflection failed: %s", e, exc_info=True)
+            logger.debug("Memory graph consolidation skipped: %s", e, exc_info=True)
 
     @staticmethod
     def _resolve_tool_arguments(tool_name: str, raw_args: str) -> Dict[str, Any]:
@@ -5649,7 +6037,7 @@ class Brain:
         return {params_list[0]: raw_args}
 
     def _extract_tool_calls(self, text: str) -> List[Dict[str, Any]]:
-        """Extract tool calls from both JSON and text-based TOOL: format."""
+        """Extract tool calls from OpenAI JSON, Dots tags, and TOOL: text."""
         calls = []
         if not text:
             return calls
@@ -5676,6 +6064,25 @@ class Brain:
                     return calls
             except json.JSONDecodeError:
                 pass
+
+        known_tools = set(tool_registry.get_tool_names())
+        for block in _DOTS_FUNCTION_CALL_RE.finditer(text):
+            for invoke in _DOTS_INVOKE_RE.finditer(block.group(1)):
+                tool_name = invoke.group(1) or invoke.group(2) or ""
+                if tool_name not in known_tools:
+                    continue
+                arguments: Dict[str, Any] = {}
+                for parameter in _DOTS_PARAMETER_RE.finditer(invoke.group(3)):
+                    parameter_name = parameter.group(1) or parameter.group(2)
+                    raw_value = html.unescape(parameter.group(3)).strip()
+                    try:
+                        value = json.loads(raw_value)
+                    except json.JSONDecodeError:
+                        value = raw_value
+                    arguments[parameter_name] = value
+                calls.append({"id": None, "name": tool_name, "arguments": arguments})
+        if calls:
+            return calls
 
         # Match TOOL: prefix format (explicit)
         tool_pattern = re.compile(r"TOOL:\s*(\w+)\(([^)]*)\)")

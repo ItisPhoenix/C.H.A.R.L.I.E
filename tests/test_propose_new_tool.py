@@ -1,6 +1,6 @@
 """Tests for the tier-3 self-extension chat trigger: Brain._handle_propose_new_tool
 and its _exec_one interception (charlie/core.py), plus the web-server staging
-side (charlie/web_server.py:_stage_proposed_extension).
+side (the main runtime extension authority).
 """
 
 import json

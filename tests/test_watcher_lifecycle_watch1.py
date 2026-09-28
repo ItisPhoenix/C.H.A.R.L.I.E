@@ -1,10 +1,7 @@
 import asyncio
 import threading
 
-import pytest
-
 import main
-from charlie.attention import AttentionLevel
 from charlie.subsystem_health import HealthRegistry, HealthStatus
 from charlie.watchers import WatcherRegistry, start_watcher_thread
 
@@ -97,10 +94,13 @@ def _health() -> HealthRegistry:
             "llm",
             "plugins",
             "mcp",
-            "web",
+            "memory",
             "voice",
+            "voice_capture",
+            "asr",
             "watchers",
-            "companion",
+            "background_tasks",
+            "browser",
             "telegram",
         )
     )
@@ -136,76 +136,6 @@ def test_watcher_stop_helper_is_idempotent_and_bounded_for_stuck_thread():
     assert main._stop_watcher_thread(stop_event, thread, timeout=0.02) is False
     assert stop_event.is_set()
     assert join_timeouts == [0.01, 0.02]
-
-
-@pytest.mark.asyncio
-async def test_main_stops_watcher_before_voice_and_eventbus_teardown_and_rejects_late_callback(monkeypatch):
-    order = []
-    captured = {}
-    voice = _Voice(order)
-    bus = _Bus(order)
-    watcher_thread = _WatcherThread(order)
-
-    monkeypatch.setattr(main, "_runtime_health", _health())
-    monkeypatch.setattr(main, "SessionStore", lambda _path: _Store())
-    monkeypatch.setattr("charlie.audit_store.AuditStore", lambda _path: _Store())
-    monkeypatch.setattr(main, "_compose_memory_dependencies", lambda _config: (_Store(), None, object()))
-    monkeypatch.setattr(main, "Brain", lambda *args, **kwargs: _Brain())
-    monkeypatch.setattr(main, "_wire_memory_service", lambda _service: None)
-    monkeypatch.setattr("charlie.plugins.PluginManager", lambda: object())
-    monkeypatch.setattr("charlie.tools.register_plugin_tools", lambda _config: None)
-    monkeypatch.setattr(main.config, "mcp_enabled", False)
-    monkeypatch.setattr(main.config, "pet_enabled", False)
-    monkeypatch.setattr(main, "_start_web_subprocess", lambda *args, **kwargs: None)
-    monkeypatch.setattr(main, "_start_voice_or_degrade", lambda *args, **kwargs: voice)
-    monkeypatch.setattr(main, "EventBus", lambda *args, **kwargs: bus)
-    monkeypatch.setattr(main, "_log_port_release", lambda *args: None)
-
-    def fake_start(_registry, callback, *, stop_event=None, **_kwargs):
-        captured["callback"] = callback
-        captured["stop_event"] = stop_event
-        captured["thread"] = watcher_thread
-        return watcher_thread
-
-    monkeypatch.setattr(main, "start_watcher_thread", fake_start)
-
-    async def drain(*_args, **_kwargs):
-        order.append("eventbus_drain")
-
-    monkeypatch.setattr(main, "_drain_event_bus_submissions", drain)
-    original_gather = main.asyncio.gather
-
-    async def fast_gather(*args, **kwargs):
-        if kwargs.get("return_exceptions"):
-            return await original_gather(*args, **kwargs)
-        for arg in args:
-            if asyncio.iscoroutine(arg):
-                arg.close()
-            elif isinstance(arg, asyncio.Task) and not arg.done():
-                arg.cancel()
-        return []
-
-    monkeypatch.setattr(main.asyncio, "gather", fast_gather)
-    monkeypatch.setattr(main, "_voice_loop_idle", lambda *_args, **_kwargs: asyncio.sleep(0))
-
-    assert await main.main() == 0
-    assert captured["stop_event"] is not None
-    assert captured["stop_event"].is_set()
-    assert captured["thread"] is watcher_thread
-    assert not watcher_thread.is_alive()
-    assert order.index("watcher_join") < order.index("voice_stop")
-    assert order.index("watcher_join") < order.index("eventbus_drain")
-    assert main._runtime_health.snapshot()["watchers"]["status"] == HealthStatus.STOPPED.value
-
-    voice.spoken.clear()
-    bus.events.clear()
-    captured["callback"](
-        {"type": "alert", "payload": {"message": "late watcher signal"}},
-        AttentionLevel.ATTENTION,
-        "late watcher signal",
-    )
-    assert voice.spoken == []
-    assert bus.events == []
 
 
 def test_startup_failure_health_stays_degraded_when_no_thread_started():

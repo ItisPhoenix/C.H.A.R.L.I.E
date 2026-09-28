@@ -1,382 +1,55 @@
-# Charlie
+# C.H.A.R.L.I.E.
 
-A low-latency, voice-first AI assistant that runs entirely on your local machine.
+C.H.A.R.L.I.E. is a local, backend-first assistant runtime. The canonical
+process owns conversation turns, voice input/output, tool execution, browser
+and desktop control, research, memory, background tasks, MCP, plugins,
+Telegram, watchers, leases, verification, cancellation, and shutdown.
 
-**C**ompletely **H**elpful **A**nd **R**ather **L**ocal **I**ntelligent **E**ngine.
+## Run
 
-[![CI](https://github.com/ItisPhoenix/C.H.A.R.L.I.E/actions/workflows/ci.yml/badge.svg)](https://github.com/ItisPhoenix/C.H.A.R.L.I.E/actions/workflows/ci.yml)
-[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
-[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
-[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg?logo=windows&logoColor=white)](#requirements)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+Install the project and the extras required by the capabilities you use, then
+start the canonical runtime:
 
-```
-Voice in  -> VAD -> Whisper ASR -> LLM (streaming) -> Kokoro TTS -> Voice out
-~1.2s       ~80ms   ~410ms        ~200ms              ~50ms         ~50ms
-```
-
-## Table of Contents
-
-- [Features](#features)
-- [Tools](#tools)
-- [Requirements](#requirements)
-- [Quick Start](#quick-start)
-- [Configuration](#configuration)
-- [Architecture](#architecture)
-- [Voice Commands](#voice-commands)
-- [Search Providers](#search-providers)
-- [Testing](#testing)
-- [Troubleshooting](#troubleshooting)
-- [License](#license)
-
----
-
-## Features
-
-### 🎙️ Voice & Conversation
-| | |
-|---|---|
-| **Voice-first** | Continuous listening, speaks responses aloud -- no keyboard needed. |
-| **Streaming TTS** | Speaks as the LLM generates -- no waiting for full replies. |
-| **Barge-in** | Interrupt Charlie mid-sentence. Say "stop", "wait", or just start talking. |
-| **Mood-aware voice** | Sounding annoyed, excited, or depressed changes Charlie's speech energy and pacing. |
-| **Hallucination-resistant ASR** | Whisper's own confidence signals plus a known-phrase denylist filter out "Thank you."/"Bye." style hallucinations Whisper produces on silence or room noise -- without dropping genuine short replies. |
-| **Click-resistant VAD** | Speech onset requires two consecutive loud audio frames (~128ms), so an isolated keyboard click can't trigger a false listen while real speech still registers instantly. |
-
-### 🖥️ Desktop & Automation
-| | |
-|---|---|
-| **Deterministic app & website control** | Fast-paths that bypass the LLM for opening/closing local apps, popular sites, or arbitrary domains. |
-| **Focus, don't relaunch** | Asking to open an app that's already running focuses its window instead of spawning a duplicate instance -- true for both the deterministic fast-path and any shell command the model reaches for on its own (`start`, `cmd /c start`, `powershell Start-Process`, etc. all resolve to the same running-process check). |
-| **Agentic desktop control** *(Windows, opt-in)* | Sees and operates your desktop -- click, type, key chords via native UI Automation, with OCR and a local vision model as fallback tiers. Off by default; needs `DESKTOP_CONTROL_ENABLED=true`, a global panic hotkey, and auto-halts on repeated failures. |
-| **Helm operator persona** | Address desktop control by name ("Helm, open my email") for a narrated, step-by-step operator voice -- same panic hotkey, just a distinct identity for the task. |
-| **Vision-first screen queries** | "What's on my screen?"-style questions route to the configured vision model with a freshly captured screenshot, not a stale OCR/UIA text summary -- covers both narrow ("what am I looking at") and broad ("what's on my screen") phrasings. |
-
-### 🧠 Memory & Intelligence
-| | |
-|---|---|
-| **Persistent memory** | Remembers facts across sessions via `MEMORY.md` and `USER.md`. |
-| **Episodic + semantic memory** | Session history, a ChromaDB vector store, and a SQLite knowledge graph of facts. |
-| **Reflection engine** | Periodic self-reflection (every ~5 turns) consolidates memory and updates the knowledge graph. |
-| **Single-LLM architecture** | One text model handles everything (no fast/small vs. big/slow split) plus a separate, opt-in vision model for screen/image understanding. |
-
-### 🌐 Web/API bridge
-| | |
-|---|---|
-| **Local FastAPI API** | Session, task, health, capability, memory, terminal, and control endpoints remain available to local clients. |
-| **WebSocket event bridge** | Correlated runtime events and commands remain available to future clients without a bundled UI. |
-
-### 🔌 Extensibility & Reliability
-| | |
-|---|---|
-| **Local-first** | All speech processing runs locally -- only the LLM call goes to the network. |
-| **Web research engine** | Structured SearXNG search, HTTPX fetching, Trafilatura extraction, bounded evidence/citations, and optional Crawl4AI escalation. |
-| **Model Context Protocol (MCP)** | Register tools from external MCP servers at runtime, callable alongside the built-ins. |
-| **Plugin system** | A hybrid plugin loader adds external integration tools (filesystem, browser fetch, calendar, sandboxed Python) when `PLUGINS_ENABLED=true`. |
-| **Extension install gate** | Content-hash + prompt-injection heuristic scan gates any new extension (OpenAPI import, `SKILL.md`) before it's registered. |
-| **Autonomous by design** | As of the current build, the only remaining approval gate is a shell-command keyword list (hard-blocked vs. approve/decline); background tasks and desktop control run without a standing wait state. The panic hotkey and per-turn auto-halt are what stop things instead. |
-
----
-
-## Tools
-
-Every tool the Brain can call lives in `charlie/tools.py`, grouped by area:
-
-**Web & knowledge**
-- `web_search` -- compatibility wrapper for quick structured research
-- `web_research` -- bounded QUICK/STANDARD/DEEP research with source IDs, citations, products, and media results
-- `session_search` -- full-text (FTS5) search over past conversation history
-- `memory` -- add/replace/remove/consolidate entries in `MEMORY.md`/`USER.md`/`OPINIONS.md`
-- `vector_memory` -- semantic remember/recall across sessions (ChromaDB)
-- `graph_add_fact` / `graph_query` / `graph_consolidate` -- knowledge-graph triples
-
-**System & shell**
-- `shell_execute` -- runs a command; voice mode restricts to an allowlist, risky keywords/metacharacters are always blocked, gated keywords need approval, and a bare launch of an already-running known app focuses it instead of relaunching
-- `system_diagnostics` -- fixed, safe read-only checks (disk/memory/cpu/processes/network)
-- `system_control` -- volume/media keys
-- `file_read` / `file_write` -- read or write a file's text content
-
-**Desktop perception** *(needs `DESKTOP_CONTROL_ENABLED=true`)*
-- `desktop_observe` / `desktop_read_screen` / `desktop_screenshot` / `desktop_windows`
-
-**Desktop action** *(same flag; all require explicit approval on gated keywords)*
-- `desktop_click` / `desktop_invoke` / `desktop_type` / `desktop_key`
-- `desktop_click_at` / `desktop_move` / `desktop_drag` / `desktop_scroll`
-- `desktop_focus` / `desktop_window` / `desktop_move_window`
-
-**Dynamic, config-gated** -- not fixed code, vary by setup:
-- `plugin_*` tools (filesystem, browser fetch/screenshot, calendar, sandboxed Python) when `PLUGINS_ENABLED=true`
-- MCP server tools when `MCP_ENABLED=true`
-- Extension tools installed through the extension API
-
-Every call is capped by `IterationBudget` (12/turn interactive, higher for background tasks).
-
----
-
-## Requirements
-
-- **OS**: Windows 11 (PowerShell for system commands; desktop control is Windows-only)
-- **Python**: 3.12+
-- **GPU**: NVIDIA GPU with CUDA recommended (for Whisper ASR and Kokoro TTS; CPU fallback works but is slower)
-- **LLM**: Any OpenAI-compatible API endpoint
-- **Package manager**: [`uv`](https://docs.astral.sh/uv/) for Python
-
----
-
-## Quick Start
-
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/ItisPhoenix/C.H.A.R.L.I.E.git
-cd C.H.A.R.L.I.E
+```powershell
+uv sync --extra desktop --extra browser
+uv run python run.py
 ```
 
-### 2. Install dependencies
-
-```bash
-uv sync --locked
-```
-
-For agentic desktop control (optional, Windows only):
-
-```bash
-uv sync --locked --extra desktop
-```
-
-For optional JavaScript-heavy research escalation:
-
-```bash
-uv sync --extra research --extra browser
-playwright install chromium
-```
-
-Install [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) too if you want the OCR fallback tier
-(`DESKTOP_OCR_ENABLED=true`).
-
-### 3. Configure
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` with your settings:
-
-```env
-# Required: Your LLM endpoint
-LLM_URL=https://your-api-endpoint/v1
-LLM_API_KEY=your-key-here
-LLM_MODEL=your-model-id
-
-# Optional: Self-hosted SearXNG for private web search
-SEARXNG_URL=http://localhost:8080
-
-# Optional: Hardware overrides
-MIC_INDEX=-1          # -1 = system default, >=0 = specific device
-GPU_DEVICE=cuda
-```
-
-See [Configuration](#configuration) below and `.env.example` for the full list of ~50 tunable
-settings (VAD/ASR tuning, wake word, memory, MCP/plugins, desktop control, vision).
-
-### 4. Run
-
-```bash
-python run.py              # full mode: voice engine + web/API bridge + LLM Brain
-```
-
-Charlie will initialize the voice engine, download models on first run (Whisper, Kokoro), and start
-listening. The local web/API server uses http://localhost:8000 by default. `CHARLIE_PORT` is
-configurable; `CHARLIE_HOST` must remain a loopback address because the local API has no remote
-authentication.
-
-> **Web-only mode:** the `--web-only` flag starts the FastAPI/WebSocket server without the voice
-> pipeline or main Brain process. Use it for API and transport checks.
-
-```bash
-python run.py --web-only   # API/WebSocket server only
-```
-
----
+`run.py` has one runtime path. It does not select alternate modes or start a
+second process.
 
 ## Configuration
 
-All settings are via environment variables (`.env` file, loaded through `charlie/config.py`).
-See `.env.example` for the complete, commented list. The most commonly tuned ones:
+Copy `.env.example` to `.env` and set the model, voice, memory, browser,
+desktop, MCP, plugin, research, and Telegram settings appropriate for the
+machine. Keep credentials outside source control.
 
-| Variable | Default | Description |
-|---|---|---|
-| `LLM_URL` | (required) | OpenAI-compatible API base URL |
-| `LLM_API_KEY` | (required) | API key for the LLM |
-| `LLM_MODEL` | (required) | Model ID to use |
-| `SEARXNG_URL` | (empty) | Self-hosted SearXNG URL for private search |
-| `WHISPER_MODEL` | `large-v3` | Whisper model for ASR |
-| `KOKORO_VOICE` | `af_heart` | Kokoro TTS voice |
-| `VAD_THRESHOLD` | `0.25` | Voice activity detection sensitivity (RMS) |
-| `VAD_SILENCE_TIMEOUT` | `1.5` | Seconds of silence before processing |
-| `ENABLE_BARGE_IN` | `true` | Allow interrupting Charlie mid-response |
-| `LLM_DISABLE_REASONING` | `true` | Disable chain-of-thought for lower latency |
-| `NATIVE_TOOL_CALLING` | `true` | JSON tool calling (OpenAI/Anthropic-class); `false` for local models needing text-based `TOOL:` parsing |
-| `WAKE_WORD_ENABLED` | `false` | Hands-free wake-word activation |
-| `MCP_ENABLED` | `false` | Register tools from external MCP servers |
-| `PLUGINS_ENABLED` | `false` | Enable the hybrid plugin loader |
-| `DESKTOP_CONTROL_ENABLED` | `false` | Enable native click/type/invoke/key desktop control |
-| `DESKTOP_OCR_ENABLED` | `true` | OCR fallback tier (needs Tesseract installed) |
-| `VISION_ENABLED` | `false` | Local vision model tier for icon/canvas/screen targets |
-| `VISION_LLM_URL` | (empty) | Vision model endpoint (separate from the text LLM) |
+## Runtime boundaries
 
----
+- `main.py` is the process lifecycle and aggregate event authority.
+- `charlie/core.py` owns Brain routing, tool execution, approvals, results,
+  cancellation, and turn attribution.
+- `charlie/browser/` owns Playwright sessions, browser identity, leases, and
+  browser verification.
+- `charlie/desktop/` owns Windows observation, targeting, control, and
+  post-action verification.
+- `charlie/research/` is the separate public-source acquisition and evidence
+  pipeline; it does not replace interactive browser control.
+- `charlie/task_journal.py`, `charlie/session_store.py`, and the memory
+  services persist authoritative task, turn, session, and memory state.
 
-## Architecture
+Dangerous operations require an active owner approval channel. Voice and the
+configured Telegram owner channel are supported; if neither is available,
+the operation fails closed.
 
-### Directory structure
+## Verification
 
-```
-├── charlie/
-│   ├── core.py              # Brain class -- LLM streaming, tool loop, system prompt, fast-paths
-│   ├── voice.py              # VoiceEngine -- audio capture, VAD, ASR dispatch, TTS, humanization
-│   ├── asr_worker.py         # Whisper subprocess -- the only file importing faster_whisper
-│   ├── tools.py               # ToolRegistry + all built-in tools (web, shell, file, desktop, memory)
-│   ├── known_apps.py          # Single source of truth for known local apps/websites
-│   ├── config.py              # Config dataclass -- the only place that reads os.getenv
-│   ├── personality.py         # Emotion classification + voice command parsing
-│   ├── session_store.py       # SQLite + FTS5 session history
-│   ├── memory_store.py        # ChromaDB vector memory
-│   ├── memory_graph.py        # SQLite knowledge graph
-│   ├── ipc.py                  # ZeroMQ EventBus bridging the voice process and web process
-│   ├── mcp_client.py          # MCP client (external tool servers)
-│   ├── plugins.py             # Hybrid plugin system (filesystem/browser/calendar/code-exec)
-│   ├── extensions/            # Extension-install safety gate + adapters
-│   ├── recovery.py            # Shell-command recovery pipeline (auto-fix + approval)
-│   ├── budget.py               # IterationBudget -- caps tool-loop rounds per turn
-│   ├── web_server.py           # FastAPI app + WebSocket/API handlers
-│   ├── web_server_entry.py    # Subprocess entry point for the web server
-│   └── desktop/                # UIA tree, OCR, vision grounding, window management, actions
-├── tests/                      # pytest suite (40 files) -- ruff + pytest must pass before commit
-├── run.py                      # Unified entry point (full mode / --web-only)
-└── main.py                     # Voice loop orchestration, spawns the web server subprocess
+Run the focused backend tests with the repository environment:
+
+```powershell
+.venv\\Scripts\\python.exe -m pytest -q
+.venv\\Scripts\\python.exe -m ruff check .
 ```
 
-### Data flow
-
-```
-Mic audio -> VoiceEngine (VAD) -> ASR worker subprocess (Whisper) -> Brain.chat_stream()
-                                                                          |
-                              tool loop (shell/file/desktop/memory/search/MCP/plugins)
-                                                                          |
-                                                LLM (streaming) -> TextStreamFilter
-                                                                          |
-                                           Kokoro TTS (speak) <-> WebSocket/API clients
-```
-
-The voice process and the web/API process are separate (`main.py` spawns
-`web_server_entry.py` as a subprocess), bridged over ZeroMQ PUB/SUB + PUSH/PULL
-(`charlie/ipc.py`, ports 5555/5556 by default). Local clients talk to the web process over
-HTTP/WebSocket; voice input and desktop-control results flow through the same `Brain` instance.
-
-### Key design decisions
-
-- **One text LLM, one optional vision LLM.** No fast/slow model split -- `LLM_URL`/`LLM_KEY`/`LLM_MODEL`
-  handle every text turn; `VISION_LLM_*` is a separate, opt-in endpoint only used for screen/image
-  understanding follow-ups.
-- **Deterministic fast-paths beat prompted tool calls.** Opening/closing known apps, background-task
-  status queries, and screen-content forcing all bypass the LLM entirely where possible -- faster,
-  and immune to a model ignoring its own tool instructions.
-- **Streaming-first.** Every data path is a generator; time-to-first-audio is prioritized over
-  waiting for a complete reply.
-- **Session isolation via `launch_id`.** Each `main.py` run gets a UUID passed to the web subprocess
-  via environment variable; clients can request the appropriate session projection.
-
----
-
-## Voice Commands
-
-Say these while Charlie is speaking to control behavior:
-
-| Command | Effect |
-|---|---|
-| "stop" / "wait" / "cancel" | Interrupt and stop speaking |
-| "be energetic" / "speak faster" | Increase speech energy and speed |
-| "calm down" / "speak slower" | Slow down and speak calmly |
-| "stop controlling my desktop" | Revoke desktop-control approval for the rest of the session |
-
-Charlie also understands a couple of typed directives:
-
-| Command | Effect |
-|---|---|
-| `!search <query>` | Search your past conversations (full-text) and read back the matches |
-| `/memory-review` (or `!memory-review`) | Print a summary of the knowledge graph Charlie has built from memory |
-
----
-
-## Web Research
-
-Fresh, news, trend, shopping, media, and broad research requests are routed through the
-`ResearchEngine`. Stable explanatory questions stay on the normal LLM path. The engine uses
-bounded asynchronous work and these modes:
-
-- `quick`: SearXNG snippets only; never starts the interactive browser.
-- `standard`: fetches and extracts selected public pages, then may escalate to Crawl4AI and finally
-  the existing Playwright Browser Executor when HTTP extraction is insufficient.
-- `deep`: standard research plus one bounded evidence-thin follow-up iteration.
-
-SearXNG is the default provider. Exa and Tavily are optional fallbacks when their keys are configured;
-DuckDuckGo is used only as a graceful free fallback and can be disabled with
-`RESEARCH_DDG_ENABLED=false`. Set `SEARXNG_URL` in `.env` for the best experience. Public URLs are
-validated against local/private network targets before fetching, and fetched pages are treated as
-untrusted evidence rather than instructions. `RESEARCH_JINA_ENABLED` remains disabled and is not part
-of the required path.
-
----
-
-## Testing
-
-Backend:
-
-```bash
-uv run ruff check .
-uv run pytest -v
-```
-
-The backend checks run in CI (`.github/workflows/ci.yml`) on every push/PR to `main`.
-
----
-
-## Troubleshooting
-
-**"Command not on the allowed list for voice mode"**
-Voice-mode `shell_execute` restricts to a safe prefix allowlist (`start`, `notepad`, `calc`,
-`explorer`, `code`, `dir`, `cmd`, `taskkill`, `move`, `copy`). Anything else needs the web UI
-(text chat isn't voice-restricted) or should go through a dedicated tool (`desktop_*`, `file_write`).
-
-**Notepad (or another app) keeps reopening instead of coming to the front**
-Should no longer happen -- both the deterministic app-opener and any `shell_execute` launch
-attempt check for an already-running process first and focus it instead. If you still see it,
-the app's process name may not be in `charlie/known_apps.py`'s `APP_REGISTRY` yet.
-
-**Charlie mishears keyboard typing as speech**
-Onset detection requires two consecutive loud audio frames (~128ms) before it registers as
-speech, which filters out isolated click transients. If your mic gain is very hot and typing is
-still triggering it, raise `VAD_THRESHOLD` in `.env` (default `0.25`) -- but note this also
-raises the bar for real speech, so tune gradually.
-
-**Vision model never gets used for screen questions**
-Requires both `VISION_ENABLED=true` and `DESKTOP_CONTROL_ENABLED=true`, with `VISION_LLM_URL`/
-`VISION_LLM_KEY`/`VISION_LLM_MODEL` pointing at a real endpoint. Without a vision model
-configured, screen questions fall back to OCR/UIA text description.
-
-**`uvicorn`/pyzmq `RuntimeError` on startup (Windows)**
-Known Windows-specific issue: uvicorn's `loop="asyncio"` hardcodes `ProactorEventLoop`, which
-pyzmq's asyncio integration can't use. Already fixed via `loop="none"` in both `run.py` and
-`charlie/web_server.py` -- if you see this, check nothing reintroduced `loop="asyncio"`.
-
-**Fresh model downloads take a long time on first run**
-Expected -- Whisper (`large-v3` by default) and Kokoro TTS models are pulled on first use. Set
-a smaller `WHISPER_MODEL` (e.g. `medium` or `small`) in `.env` if startup latency matters more
-than transcription accuracy.
-
----
-
-## License
-
-MIT
+Tests establish runtime contracts. Native Windows process, audio, browser,
+and desktop acceptance still requires evidence from the user's real host.

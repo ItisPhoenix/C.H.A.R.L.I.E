@@ -176,3 +176,109 @@ def test_path_change_watcher_detects_mtime_change(tmp_path):
     os.utime(f, (time.time() + 5, time.time() + 5))
     event = watcher.check()
     assert str(f) in event["payload"]["message"]
+
+
+def test_path_change_watcher_reports_metadata_without_contents_and_dedupes(tmp_path):
+    f = tmp_path / "watched.txt"
+    f.write_text("private first contents")
+    watcher = path_change_watcher([str(f)])
+    assert watcher.check() is None
+
+    f.write_text("different private contents")
+    import os
+    import time
+    os.utime(f, (time.time() + 5, time.time() + 5))
+    event = watcher.check()
+
+    payload = event["payload"]
+    assert payload["signal"] == {"kind": "path_change", "paths": [str(f)]}
+    diagnosis = payload["diagnosis"]
+    assert diagnosis["changed_count"] == 1
+    assert diagnosis["paths"][0]["previous"]["size_bytes"] == len("private first contents")
+    assert diagnosis["paths"][0]["current"]["size_bytes"] == len("different private contents")
+    assert diagnosis["paths"][0]["delta"]["size_bytes"] > 0
+    assert "private first contents" not in repr(event)
+    assert "different private contents" not in repr(event)
+    assert watcher.check() is None
+
+
+def test_path_change_watcher_reports_disappearance_once_without_contents(tmp_path):
+    f = tmp_path / "watched.txt"
+    f.write_text("private contents")
+    watcher = path_change_watcher([str(f)])
+    assert watcher.check() is None
+
+    f.unlink()
+    event = watcher.check()
+    payload = event["payload"]
+    assert payload["signal"] == {"kind": "path_change", "paths": [str(f)]}
+    diagnosis = payload["diagnosis"]["paths"][0]
+    assert diagnosis["previous"]["size_bytes"] == len("private contents")
+    assert diagnosis["current"] is None
+    assert diagnosis["delta"] == {"exists": False}
+    assert "disappeared" in payload["message"]
+    assert "private contents" not in repr(event)
+    assert watcher.check() is None
+
+
+def test_path_change_watcher_reports_reappearance_once(tmp_path):
+    f = tmp_path / "watched.txt"
+    f.write_text("first")
+    initially_missing = tmp_path / "created-later.txt"
+    watcher = path_change_watcher([str(f), str(initially_missing)])
+    assert watcher.check() is None
+
+    f.unlink()
+    disappeared = watcher.check()
+    assert disappeared["payload"]["diagnosis"]["paths"][0]["change"] == "disappeared"
+    assert watcher.check() is None
+
+    f.write_text("recreated")
+    initially_missing.write_text("new file")
+    appeared = watcher.check()
+    diagnoses = appeared["payload"]["diagnosis"]["paths"]
+    assert [item["change"] for item in diagnoses] == ["appeared", "appeared"]
+    assert diagnoses[0]["previous"] is None
+    assert diagnoses[1]["previous"] is None
+    assert watcher.check() is None
+
+
+def test_stalled_task_watcher_uses_canonical_diagnosis_and_dedupes(tmp_path):
+    from charlie.task_journal import TaskJournal, TaskOrigin, TaskStatus
+
+    journal = TaskJournal(tmp_path / "task-journal.json")
+    task = journal.create_task(
+        "Investigate report",
+        task_id="task-42",
+        origin=TaskOrigin.BACKGROUND,
+        status=TaskStatus.RUNNING,
+        total_steps=4,
+    )
+    journal.update_progress(
+        task.id,
+        progress=0.5,
+        current_step=2,
+        total_steps=4,
+        current_action="Inspect source metadata",
+        waiting_reason="waiting for a read-only check",
+    )
+    before = journal.get(task.id).to_dict()
+    watcher = stalled_task_watcher(lambda: journal.list(include_terminal=False), sustained_polls=2)
+
+    assert watcher.check() is None
+    event = watcher.check()
+    assert event["payload"]["signal"] == {"kind": "stalled_task", "task_id": "task-42"}
+    diagnosis = event["payload"]["diagnosis"]
+    assert diagnosis == {
+        "task_id": "task-42",
+        "status": "running",
+        "current_step": 2,
+        "total_steps": 4,
+        "progress": 0.5,
+        "current_action": "Inspect source metadata",
+        "waiting_reason": "waiting for a read-only check",
+        "updated_at": before["updated_at"],
+    }
+    assert "50% complete" in event["payload"]["message"]
+    assert watcher.check() is None
+    assert journal.get(task.id).to_dict() == before

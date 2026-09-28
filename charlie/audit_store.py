@@ -29,11 +29,20 @@ class AuditStore:
         with self._lock:
             if self._closed:
                 raise RuntimeError("AuditStore is closed")
+            safe_arguments = dict(arguments)
+            text_fields = {
+                "memory": ("content", "old_text", "query", "subject", "predicate", "object"),
+                "vector_memory": ("content",),
+                "graph_add_fact": ("subject", "predicate", "object"),
+            }.get(tool_name, ())
+            for field in text_fields:
+                if field in safe_arguments:
+                    safe_arguments[field] = "[OMITTED]"
             entry = {
                 "id": uuid.uuid4().hex,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "tool_name": tool_name,
-                "arguments": redact_sensitive_text(json.dumps(arguments, sort_keys=True)),
+                "arguments": redact_sensitive_text(json.dumps(safe_arguments, sort_keys=True)),
                 "outcome": redact_sensitive_text(outcome),
             }
             self._connection.execute(

@@ -6,7 +6,7 @@ with a uniform interface for tool registration, configuration, and lifecycle.
 
 Built-in plugins:
 1. FilesystemPlugin -- safe local file operations
-2. BrowserPlugin -- web browsing via headless browser
+2. BrowserPlugin -- controlled browser interaction
 3. CalendarPlugin -- local calendar access
 4. CodeExecPlugin -- sandboxed code execution
 """
@@ -51,7 +51,7 @@ class Plugin(abc.ABC):
         """Execute a tool by name with the given arguments."""
 
     def get_status(self) -> Dict[str, Any]:
-        """Return plugin status for the web UI."""
+        """Return plugin status for runtime introspection."""
         return {"name": self.name, "active": True}
 
     def cleanup(self) -> None:
@@ -197,10 +197,10 @@ class PluginManager:
 # ---------------------------------------------------------------------------
 
 class FilesystemPlugin(Plugin):
-    """Safe local file operations within allowed directories.
+    """Local directory listing and filename search within allowed directories.
 
-    Provides read, write, list, and search for files within configured
-    allowed directories. Enforces path safety to prevent traversal.
+    Native file tools own content reads and writes. This plugin retains its
+    distinct listing and search actions for configured directories.
 
     PLUGIN_ALLOW_DIRS="*" (user opt-in, e.g. "search my whole PC") lifts the
     sandbox entirely instead of resolving "*" as a literal directory name.
@@ -220,7 +220,7 @@ class FilesystemPlugin(Plugin):
 
     @property
     def description(self) -> str:
-        return "Safe local file operations (read, write, list, search)"
+        return "Local directory listing and filename search"
 
     def get_tools(self) -> List[Dict[str, Any]]:
         return [
@@ -233,30 +233,6 @@ class FilesystemPlugin(Plugin):
                         "path": {"type": "string", "description": "Directory path to list"},
                     },
                     "required": ["path"],
-                },
-            },
-            {
-                "name": "fs_read_file",
-                "description": "Read the contents of a text file",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "File path to read"},
-                        "max_lines": {"type": "integer", "description": "Max lines to read", "default": 200},
-                    },
-                    "required": ["path"],
-                },
-            },
-            {
-                "name": "fs_write_file",
-                "description": "Write content to a file (creates or overwrites)",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "File path to write"},
-                        "content": {"type": "string", "description": "Content to write"},
-                    },
-                    "required": ["path", "content"],
                 },
             },
             {
@@ -287,6 +263,11 @@ class FilesystemPlugin(Plugin):
     def _check_path(self, path_str: str) -> Path:
         """Resolve and validate path is within allowed directories."""
         resolved = Path(path_str).resolve()
+        from charlie.tools import get_path_gate_reason
+
+        sensitive_reason = get_path_gate_reason(str(resolved))
+        if sensitive_reason:
+            raise PermissionError(sensitive_reason)
         if self._full_disk_access:
             return resolved
         for allowed in self._allowed_dirs:
@@ -357,11 +338,7 @@ class FilesystemPlugin(Plugin):
 # ---------------------------------------------------------------------------
 
 class BrowserPlugin(Plugin):
-    """Web browsing via a headless browser.
-
-    Provides URL fetching, content extraction, and screenshot capabilities
-    using subprocess calls to a headless browser tool (if available).
-    """
+    """Legacy browser adapters; runtime tool publication belongs to native browser."""
 
     @property
     def name(self) -> str:
@@ -369,34 +346,10 @@ class BrowserPlugin(Plugin):
 
     @property
     def description(self) -> str:
-        return "Web browsing and content extraction"
+        return "Native browser capability owns browsing and screenshots"
 
     def get_tools(self) -> List[Dict[str, Any]]:
-        return [
-            {
-                "name": "browser_fetch",
-                "description": "Fetch and extract text content from a URL",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "URL to fetch"},
-                    },
-                    "required": ["url"],
-                },
-            },
-            {
-                "name": "browser_screenshot",
-                "description": "Take a screenshot of a web page",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "URL to screenshot"},
-                        "output_path": {"type": "string", "description": "Path to save screenshot"},
-                    },
-                    "required": ["url"],
-                },
-            },
-        ]
+        return []
 
     def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
         if tool_name == "browser_fetch":
@@ -443,7 +396,7 @@ class BrowserPlugin(Plugin):
 # ---------------------------------------------------------------------------
 
 class CalendarPlugin(Plugin):
-    """Local calendar access (reads .ics files)."""
+    """Legacy ICS adapter; runtime tool publication belongs to native calendar."""
 
     def __init__(self, calendar_dir: Optional[str] = None) -> None:
         self._calendar_dir = calendar_dir or os.path.join(os.getcwd(), "calendars")
@@ -454,22 +407,10 @@ class CalendarPlugin(Plugin):
 
     @property
     def description(self) -> str:
-        return "Local calendar access (ICS files)"
+        return "Native calendar authority owns event listing"
 
     def get_tools(self) -> List[Dict[str, Any]]:
-        return [
-            {
-                "name": "cal_list_events",
-                "description": "List calendar events from ICS files in the calendar directory",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "date_from": {"type": "string", "description": "Start date (YYYY-MM-DD)"},
-                        "date_to": {"type": "string", "description": "End date (YYYY-MM-DD)"},
-                    },
-                },
-            },
-        ]
+        return []
 
     def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
         if tool_name == "cal_list_events":

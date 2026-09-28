@@ -8,8 +8,10 @@ from dotenv import load_dotenv
 # Tests must never inherit or overwrite production configuration from the
 # repository .env. The pytest conftest sets this process-local guard before
 # importing Charlie modules; normal `uv run python run.py` keeps existing behavior.
+_REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
+
 if os.getenv("CHARLIE_TEST_MODE", "").lower() != "true":
-    load_dotenv(override=True)
+    load_dotenv(dotenv_path=_REPOSITORY_ROOT / ".env", override=True)
 
 # Restart tiers for editable-field metadata (see FieldMeta below):
 #   None      -- read fresh on every use; applying an update is instant, no reload.
@@ -29,7 +31,7 @@ def _meta(
     """Build the dataclasses.field metadata for one user-editable .env-backed setting.
 
     This is the single place that declares which Config fields are exposed to the
-    settings UI (charlie/web_server.py:/api/config) and how each one applies --
+    runtime settings and how each one applies --
     editable_field_specs()/apply_env_updates() below read it back out. Fields with
     no _meta() (system_root, charlie_launch_id, soul, ...) are OS-derived or
     file-loaded, not user-editable .env values, and are simply skipped.
@@ -54,6 +56,10 @@ class Config:
     mic_index: int = field(
         default=int(os.getenv("MIC_INDEX", "-1")),
         metadata=_meta("MIC_INDEX", "Voice & Speech", restart="voice"),
+    )
+    voice_enabled: bool = field(
+        default=os.getenv("VOICE_ENABLED", "true").lower() == "true",
+        metadata=_meta("VOICE_ENABLED", "Voice & Speech", restart="process"),
     )
 
     # Speech / ASR / TTS
@@ -140,10 +146,6 @@ class Config:
         metadata=_meta("ENABLE_BARGE_IN", "Chat Behavior"),
     )
 
-    llm_disable_reasoning: bool = field(
-        default=os.getenv("LLM_DISABLE_REASONING", "true").lower() == "true",
-        metadata=_meta("LLM_DISABLE_REASONING", "Chat Behavior"),
-    )
     # Enable native JSON tool calling for compatible remote APIs (OpenAI, Anthropic).
     # When False, falls back to text-based TOOL: parsing for local models.
     native_tool_calling: bool = field(
@@ -362,6 +364,15 @@ class Config:
         default=os.getenv("MCP_CONFIG_PATH", "mcp_config.json"),
         metadata=_meta("MCP_CONFIG_PATH", "Agentic OS", restart="mcp"),
     )
+    # Exact server:tool IDs allowed to be exposed as read-only operations.
+    mcp_read_only_tools: List[str] = field(
+        default_factory=lambda: [
+            tool.strip()
+            for tool in os.getenv("MCP_READ_ONLY_TOOLS", "").split(",")
+            if tool.strip()
+        ],
+        metadata=_meta("MCP_READ_ONLY_TOOLS", "Agentic OS", restart="mcp"),
+    )
     # --- Desktop control (UI Automation) ---
     desktop_control_enabled: bool = field(
         default=os.getenv("DESKTOP_CONTROL_ENABLED", "false").lower() == "true",
@@ -398,11 +409,6 @@ class Config:
     background_max_parallel_tasks: int = field(
         default=int(os.getenv("BACKGROUND_MAX_PARALLEL_TASKS", "2")),
         metadata=_meta("BACKGROUND_MAX_PARALLEL_TASKS", "Desktop Control"),
-    )
-    # Read once into the pet's pynput GlobalHotKeys listener; needs a full restart to re-arm.
-    hud_invoke_hotkey: str = field(
-        default=os.getenv("HUD_INVOKE_HOTKEY", "ctrl+shift+space"),
-        metadata=_meta("HUD_INVOKE_HOTKEY", "Surfaces", restart="process"),
     )
     # Headless browser (Playwright + Chrome), optional -- off by default, needs the browser extra.
     browser_enabled: bool = field(
@@ -496,41 +502,6 @@ class Config:
         metadata=_meta("WATCH_PATHS", "Monitoring"),
     )
 
-    # --- Desktop companion (pet_window.py) ---
-    pet_enabled: bool = field(
-        default=os.getenv("PET_ENABLED", "true").lower() == "true",
-        metadata=_meta("PET_ENABLED", "Companion", restart="process"),
-    )
-    pet_position_path: str = field(
-        default=os.getenv("PET_POSITION_PATH", "pet_position.json"),
-        metadata=_meta("PET_POSITION_PATH", "Companion", restart="process"),
-    )
-    # Startup default only -- the live value is set via the pet's right-click Resize mode and persisted per-session.
-    pet_scale: float = field(
-        default=float(os.getenv("PET_SCALE", "1.0")),
-        metadata=_meta("PET_SCALE", "Companion", restart="process"),
-    )
-    pet_captions: bool = field(
-        default=os.getenv("PET_CAPTIONS", "true").lower() == "true",
-        metadata=_meta("PET_CAPTIONS", "Companion", restart="process"),
-    )
-    pet_cursor_tracking: bool = field(
-        default=os.getenv("PET_CURSOR_TRACKING", "true").lower() == "true",
-        metadata=_meta("PET_CURSOR_TRACKING", "Companion", restart="process"),
-    )
-    pet_edge_snap: bool = field(
-        default=os.getenv("PET_EDGE_SNAP", "true").lower() == "true",
-        metadata=_meta("PET_EDGE_SNAP", "Companion", restart="process"),
-    )
-
-    charlie_host: str = field(
-        default=os.getenv("CHARLIE_HOST", "127.0.0.1"),
-        metadata=_meta("CHARLIE_HOST", "Server", restart="process"),
-    )
-    charlie_port: int = field(
-        default=int(os.getenv("CHARLIE_PORT", "8000")),
-        metadata=_meta("CHARLIE_PORT", "Server", restart="process"),
-    )
     # Developer & Privacy controls
     developer_mode_enabled: bool = field(
         default=os.getenv("DEVELOPER_MODE_ENABLED", "false").lower() == "true",
@@ -566,11 +537,11 @@ class Config:
 
     @classmethod
     def editable_field_specs(cls) -> List[Dict[str, Any]]:
-        """Describe every .env-backed field for the settings UI (charlie/web_server.py).
+        """Describe every .env-backed runtime field.
 
         Derived entirely from the metadata declared above -- adding a new Config
-        field with a _meta(...) call is enough for it to show up in /api/config
-        and the settings page with no other file needing to know its name.
+        field with a _meta(...) call is enough for runtime settings inspection
+        and application with no other file needing to know its name.
         """
         specs = []
         for f in fields(cls):

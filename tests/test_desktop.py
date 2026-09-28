@@ -84,6 +84,26 @@ def test_desktop_tools_disabled_by_default():
 def test_actions_halt_toggle():
     desktop_actions.clear_halt()
     assert desktop_actions.is_halted() is False
+
+
+def test_key_press_rejects_invalid_chord_before_sending_keys(monkeypatch):
+    sent = []
+
+    class FakePyAutoGUI:
+        KEYBOARD_KEYS = ["ctrl", "shift", "space", "enter"]
+
+        @staticmethod
+        def hotkey(*keys):
+            sent.append(keys)
+
+    desktop_actions.clear_halt()
+    monkeypatch.setattr(desktop_actions, "_HAS_PYAUTOGUI", True)
+    monkeypatch.setattr(desktop_actions, "pyautogui", FakePyAutoGUI, raising=False)
+
+    assert "unsupported" in desktop_actions.key_press("taskkill /?").casefold()
+    assert sent == []
+    assert desktop_actions.key_press("ctrl+shift+space").startswith("Sent key chord")
+    assert sent == [("ctrl", "shift", "space")]
     desktop_actions.halt()
     assert desktop_actions.is_halted() is True
     desktop_actions.clear_halt()
@@ -339,10 +359,96 @@ def test_desktop_operations_use_canonical_com_dispatch_metadata():
 
 
 def test_uia_executor_matches_desktop_availability():
-    # Executor is lazy so web-only processes do not create a UIA worker at import.
+    # Executor is lazy so importing the runtime does not create a UIA worker.
     assert UIA_EXECUTOR is None or DESKTOP_AVAILABLE
     if UIA_EXECUTOR is not None:
         assert UIA_EXECUTOR._max_workers == 1
+
+
+def test_app_launch_uses_shell_and_requires_visible_window(monkeypatch):
+    from charlie.desktop import apps
+
+    ticks = iter(range(10))
+    activated = []
+    monkeypatch.setattr(apps.sys, "platform", "win32")
+    monkeypatch.setattr(apps.os, "startfile", activated.append, raising=False)
+    monkeypatch.setattr(apps.time, "monotonic", lambda: next(ticks) / 10)
+    monkeypatch.setattr(apps.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        apps,
+        "resolve_local_app",
+        lambda name: apps.AppResolution(name=name, process_name="Notepad.exe", source="running-process"),
+    )
+
+    assert not apps.launch_and_verify(
+        apps.AppResolution(name="notepad", launch_target="notepad.exe"), timeout_s=0.5
+    )
+    assert activated == ["notepad.exe"]
+
+
+def test_app_launch_succeeds_after_visible_window_appears(monkeypatch):
+    from charlie.desktop import apps
+
+    ticks = iter(range(10))
+    activated = []
+    monkeypatch.setattr(apps.sys, "platform", "win32")
+    monkeypatch.setattr(apps.os, "startfile", activated.append, raising=False)
+    monkeypatch.setattr(apps.time, "monotonic", lambda: next(ticks) / 10)
+    monkeypatch.setattr(apps.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        apps,
+        "resolve_local_app",
+        lambda name: apps.AppResolution(name=name, window_title="Notepad", source="visible-window"),
+    )
+
+    assert apps.launch_and_verify(
+        apps.AppResolution(name="notepad", launch_target="notepad.exe"), timeout_s=0.5
+    )
+    assert activated == ["notepad.exe"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("structured_data", "expected_status", "expected_verification"),
+    [
+        ({"ok": False, "verified": False}, "failed", "executed_unverified"),
+        ({"ok": True, "verified": True}, "completed", "verified_success"),
+    ],
+)
+async def test_desktop_app_operation_preserves_structured_result(
+    monkeypatch, brain_config, structured_data, expected_status, expected_verification
+):
+    import charlie.core as core
+    from charlie.tools import ToolExecutionResult
+
+    brain = Brain(brain_config)
+    observed = []
+
+    def execute_structured(name, arguments):
+        observed.append((name, arguments))
+        text = "I opened Notepad." if structured_data["ok"] else "I could not open MissingApp."
+        return ToolExecutionResult(text, structured_data, "desktop_app_open")
+
+    monkeypatch.setattr(core, "_get_uia_executor", lambda: None)
+    monkeypatch.setattr(core.tool_registry, "execute_tool", lambda *_args: "legacy adapter text")
+    monkeypatch.setattr(core.tool_registry, "execute_tool_structured", execute_structured)
+    try:
+        result = await brain.execute_tool_operation(
+            "desktop_open_app",
+            {"apps": ["MissingApp"]},
+            request="open MissingApp",
+            task_id="task-desktop-structured",
+            session_id="session-desktop-structured",
+            turn_id="turn-desktop-structured",
+            platform="text",
+            execution_owner_id="turn:turn-desktop-structured",
+        )
+    finally:
+        await brain.close()
+
+    assert result.status == expected_status
+    assert result.verification_status == expected_verification
+    assert observed == [("desktop_open_app", {"apps": ["MissingApp"]})]
 
 
 def test_vision_annotate_unavailable_without_pillow():

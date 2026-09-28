@@ -43,11 +43,10 @@ _VALID_PROVENANCES = frozenset({
 })
 
 _OWNER_LABELS: Dict[str, str] = {
-    "presentation": "Presentation",
     "tools": "General tools",
     "memory": "Memory",
     "desktop": "Desktop control",
-    "browser": "Headless browsing",
+    "browser": "Controlled browser",
     "extensions": "Extensions",
     "mcp": "MCP servers",
     "system": "System control & diagnostics",
@@ -61,12 +60,11 @@ _OWNER_LABELS: Dict[str, str] = {
 }
 
 _DEFAULT_DOMAIN_OWNERS: Dict[str, str] = {
-    "presentation": "charlie.presentation",
     "system": "charlie.tools",
     "desktop": "charlie.desktop",
     "browser": "charlie.browser",
     "research": "charlie.research",
-    "terminal": "charlie.terminal_service",
+    "terminal": "charlie.tools",
     "file": "charlie.tools",
     "media": "main.media_authority",
     "calendar": "main.calendar_authority",
@@ -79,7 +77,6 @@ _DEFAULT_DOMAIN_OWNERS: Dict[str, str] = {
 }
 
 _DOMAIN_NAMES: Dict[str, str] = {
-    "presentation": "PresentationCapability",
     "system": "SystemCapability",
     "desktop": "DesktopCapability",
     "browser": "BrowserCapability",
@@ -97,15 +94,14 @@ _DOMAIN_NAMES: Dict[str, str] = {
 }
 
 _DOMAIN_DESCRIPTIONS: Dict[str, str] = {
-    "presentation": "Semantic HUD presentation control",
     "system": "System diagnostics, telemetry, app lifecycle, and OS controls",
     "desktop": "Desktop Windows UI Automation and mouse/keyboard effectors",
-    "browser": "Headless browser navigation, page inspection, and web automation",
+    "browser": "Controlled browser navigation, page inspection, and web automation",
     "research": "Multi-tier web search and deep research synthesis",
     "terminal": "Windows shell and command execution service",
     "file": "Local filesystem reading, writing, and workspace inspection",
     "media": "Volume and audio playback adapters",
-    "calendar": "Calendar events and reminder scheduling",
+    "calendar": "Calendar events and durable automation schedules",
     "vision": "Screen capture, visual perception, and OCR grounding",
     "memory": "Persistent conversation memory, vector store, and knowledge graph",
     "task": "Task lifecycle, background tasks, and capability lease coordination",
@@ -128,14 +124,6 @@ _ROSTER_HEADER = (
 )
 
 BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
-    # Presentation
-    "presentation_request": {
-        "id": "presentation.presentation_request",
-        "domain": "presentation",
-        "tool_registry_owner": "presentation",
-        "risk_class": "safe",
-        "timeout_sec": 15.0,
-    },
     # System
     "system_diagnostics": {
         "id": "system.metrics.read",
@@ -223,6 +211,46 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "domain": "calendar",
         "tool_registry_owner": "calendar",
         "risk_class": "safe",
+        "required_leases": ("calendar",),
+        "timeout_sec": 15.0,
+    },
+    "automation_create": {
+        "id": "automation.schedule.create",
+        "domain": "calendar",
+        "tool_registry_owner": "calendar",
+        "risk_class": "reversible",
+        "required_leases": ("calendar",),
+        "timeout_sec": 15.0,
+    },
+    "automation_update": {
+        "id": "automation.schedule.update",
+        "domain": "calendar",
+        "tool_registry_owner": "calendar",
+        "risk_class": "reversible",
+        "required_leases": ("calendar",),
+        "timeout_sec": 15.0,
+    },
+    "automation_get": {
+        "id": "automation.schedule.get",
+        "domain": "calendar",
+        "tool_registry_owner": "calendar",
+        "risk_class": "safe",
+        "required_leases": ("calendar",),
+        "timeout_sec": 15.0,
+    },
+    "automation_list": {
+        "id": "automation.schedule.list",
+        "domain": "calendar",
+        "tool_registry_owner": "calendar",
+        "risk_class": "safe",
+        "required_leases": ("calendar",),
+        "timeout_sec": 15.0,
+    },
+    "automation_cancel": {
+        "id": "automation.schedule.cancel",
+        "domain": "calendar",
+        "tool_registry_owner": "calendar",
+        "risk_class": "reversible",
         "required_leases": ("calendar",),
         "timeout_sec": 15.0,
     },
@@ -448,6 +476,14 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "tool_registry_owner": "tools",
         "risk_class": "reversible",
         "timeout_sec": 10.0,
+    },
+    "download_public_pdf": {
+        "id": "file.public_pdf.download",
+        "domain": "file",
+        "tool_registry_owner": "tools",
+        "risk_class": "reversible",
+        "required_leases": ("file",),
+        "timeout_sec": 120.0,
     },
     # Memory
     "memory": {

@@ -1,7 +1,7 @@
 """MCP Client for Charlie -- local Model Context Protocol integration.
 
 Provides a lightweight MCP client that can:
-1. Connect to MCP servers via stdio transport (subprocess)
+1. Connect to MCP servers via stdio or Streamable HTTP
 2. List available tools from a server
 3. Call tools on a server
 4. Manage multiple server connections
@@ -21,6 +21,9 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
+
+import httpx
 
 logger = logging.getLogger("charlie.mcp_client")
 
@@ -67,10 +70,22 @@ class MCPTool:
 class MCPServerConfig:
     """Configuration for an MCP server."""
     name: str
-    command: str  # e.g. "npx" or "python"
+    command: str = ""  # e.g. "docker" or "python"
     args: List[str] = field(default_factory=list)  # e.g. ["-m", "my_mcp_server"]
     env: Dict[str, str] = field(default_factory=dict)
-    timeout: float = 30.0
+    timeout: float = 30.0  # Internal timeout unit is seconds.
+    url: Optional[str] = None
+    headers: Dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.url:
+            parsed = urlsplit(self.url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError(f"MCP server '{self.name}' has an invalid HTTP URL")
+            if self.command:
+                raise ValueError(f"MCP server '{self.name}' cannot configure both command and url")
+        elif not self.command:
+            raise ValueError(f"MCP server '{self.name}' requires command or url")
 
 
 def parse_server_spec(spec: str) -> MCPServerConfig:
@@ -89,38 +104,150 @@ def parse_server_spec(spec: str) -> MCPServerConfig:
     return MCPServerConfig(name=name, command=command, args=args)
 
 
-def load_config_file(path: str) -> List[MCPServerConfig]:
-    """Load MCP server definitions from a standard "mcpServers" JSON config file
-    (the same map format used by Claude Desktop / Cursor / VS Code):
-    {"mcpServers": {"name": {"command": "...", "args": [...], "env": {...}}}}.
+def load_mcp_config(path: str) -> tuple[List[MCPServerConfig], Dict[str, str]]:
+    """Load Charlie ``mcpServers`` and OpenCode ``mcp`` config entries.
 
-    Missing file returns an empty list (not an error) -- this is an optional,
-    equally-valid alternative to the MCP_SERVERS env var, not a replacement for it.
+    Charlie-native ``timeout`` values are seconds. OpenCode local/remote
+    ``timeout`` and all ``timeout_ms`` values are milliseconds.
+    Charlie's local ``mcpToolPolicies`` map is intentionally separate from server
+    annotations, which are untrusted metadata.
     """
     if not path or not os.path.isfile(path):
-        return []
+        return [], {}
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("Failed to read MCP config file '%s': %s", path, exc)
-        return []
+        return [], {}
+
+    if not isinstance(data, dict):
+        logger.warning("Failed to read MCP config file '%s': root must be an object", path)
+        return [], {}
+
+    raw_opencode = data.get("mcp", {})
+    if not isinstance(raw_opencode, dict):
+        logger.warning("Skipping OpenCode MCP entries in '%s': mcp must be an object", path)
+        raw_opencode = {}
+    if isinstance(raw_opencode.get("servers"), dict):
+        raw_opencode = raw_opencode["servers"]
+
+    raw_native = data.get("mcpServers", {})
+    if not isinstance(raw_native, dict):
+        logger.warning("Skipping MCP servers in '%s': mcpServers must be an object", path)
+        raw_native = {}
+    entries = dict(raw_opencode)
+    entries.update(raw_native)  # Standard mcpServers entries win duplicate names.
+
+    def timeout_seconds(entry: Dict[str, Any], *, opencode: bool) -> float:
+        if entry.get("timeout_ms") is not None:
+            timeout = float(entry["timeout_ms"]) / 1000
+        elif entry.get("timeout") is not None:
+            timeout = float(entry["timeout"])
+            if opencode:
+                timeout /= 1000
+        else:
+            timeout = 5.0 if opencode else 30.0
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
+        return timeout
 
     configs: List[MCPServerConfig] = []
-    for name, entry in data.get("mcpServers", {}).items():
-        command = entry.get("command", "")
-        if not name or not command:
-            logger.warning("Skipping MCP config entry '%s': missing command", name)
+    for name, entry in entries.items():
+        if not isinstance(name, str) or not name.strip() or not isinstance(entry, dict):
+            logger.warning("Skipping invalid MCP config entry '%s'", name)
             continue
-        configs.append(
-            MCPServerConfig(
-                name=name,
-                command=command,
-                args=list(entry.get("args", [])),
-                env=dict(entry.get("env", {})),
-            )
-        )
-    return configs
+        if entry.get("enabled") is False or entry.get("disabled") is True:
+            continue
+        try:
+            url = entry.get("url")
+            command = entry.get("command", "")
+            transport = str(entry.get("type", entry.get("transport", ""))).casefold().replace("_", "-")
+            opencode = transport in {"local", "remote"}
+            timeout = timeout_seconds(entry, opencode=opencode)
+            if transport == "local":
+                if not isinstance(command, list) or not command or not all(
+                    isinstance(arg, str) and arg for arg in command
+                ):
+                    raise ValueError("OpenCode local command must be a non-empty string array")
+                extra_args = entry.get("args", [])
+                if not isinstance(extra_args, list):
+                    raise ValueError("args must be an array")
+                env = entry.get("environment", entry.get("env", {}))
+                config = MCPServerConfig(
+                    name=name,
+                    command=command[0],
+                    args=[*command[1:], *(str(arg) for arg in extra_args)],
+                    env={str(k): str(v) for k, v in env.items()},
+                    timeout=timeout,
+                )
+            elif transport == "remote":
+                if not url:
+                    raise ValueError("OpenCode remote entry requires url")
+                config = MCPServerConfig(
+                    name=name,
+                    url=str(url),
+                    headers={str(k): str(v) for k, v in entry.get("headers", {}).items()},
+                    timeout=timeout,
+                )
+            elif url:
+                if command:
+                    raise ValueError("entry cannot configure both command and url")
+                if transport and transport not in {"http", "streamable-http"}:
+                    raise ValueError(f"unsupported HTTP transport '{transport}'")
+                config = MCPServerConfig(
+                    name=name,
+                    url=str(url),
+                    headers={str(k): str(v) for k, v in entry.get("headers", {}).items()},
+                    timeout=timeout,
+                )
+            else:
+                if transport and transport != "stdio":
+                    raise ValueError(f"unsupported stdio transport '{transport}'")
+                if not isinstance(command, str):
+                    raise ValueError("command must be a string")
+                config = MCPServerConfig(
+                    name=name,
+                    command=command,
+                    args=[str(arg) for arg in entry.get("args", [])],
+                    env={str(k): str(v) for k, v in entry.get("env", entry.get("environment", {})).items()},
+                    timeout=timeout,
+                )
+            configs.append(config)
+        except (AttributeError, TypeError, ValueError) as exc:
+            logger.warning("Skipping MCP config entry '%s': %s", name, exc)
+
+    raw_policies = data.get("mcpToolPolicies", {})
+    policies: Dict[str, str] = {}
+    if isinstance(raw_policies, dict):
+        for tool_id, policy in raw_policies.items():
+            if (
+                isinstance(tool_id, str)
+                and ":" in tool_id
+                and all(part.strip() for part in tool_id.split(":", 1))
+                and isinstance(policy, str)
+                and policy.casefold() in {"allow", "ask", "deny"}
+            ):
+                policies[tool_id] = policy.casefold()
+            else:
+                logger.warning("Ignoring invalid MCP tool policy for %r; unknown tools require approval", tool_id)
+    elif raw_policies:
+        logger.warning("Ignoring invalid mcpToolPolicies in '%s'", path)
+    return configs, policies
+
+
+def load_config_file(path: str) -> List[MCPServerConfig]:
+    """Backward-compatible server-only view of ``load_mcp_config``."""
+    return load_mcp_config(path)[0]
+
+
+def _safe_error(exc: Exception) -> str:
+    """Keep transport diagnostics useful without echoing credential-bearing URLs."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"MCP HTTP request returned status {exc.response.status_code}"
+    if isinstance(exc, httpx.RequestError):
+        return f"MCP HTTP transport failed ({type(exc).__name__})"
+    return str(exc)[:500]
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +259,7 @@ class MCPClient:
 
     Usage::
 
-        client = MCPClient()
+        client = MCPClient(tool_policies={"filesystem:list_directory": "allow"})
         client.add_server(MCPServerConfig(
             name="filesystem",
             command="npx",
@@ -144,9 +271,24 @@ class MCPClient:
         client.stop()
     """
 
-    def __init__(self) -> None:
-        self._servers: Dict[str, _ManagedServer] = {}
+    def __init__(
+        self,
+        read_only_tools: Optional[List[str]] = None,
+        *,
+        tool_policies: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """Manage MCP tools under Charlie's local per-tool policy."""
+        self._servers: Dict[str, Any] = {}
         self._tools: Dict[str, MCPTool] = {}  # "server_name:tool_name" -> tool
+        self._read_only_tools = {name.strip() for name in (read_only_tools or []) if name.strip()}
+        self._tool_policies: Dict[str, str] = {}
+        for tool_id, policy in (tool_policies or {}).items():
+            normalized = str(policy).casefold()
+            if isinstance(tool_id, str) and ":" in tool_id and normalized in {"allow", "ask", "deny"}:
+                self._tool_policies[tool_id] = normalized
+            else:
+                logger.warning("Ignoring invalid MCP tool policy for %r; defaulting to approval", tool_id)
+        self._server_errors: Dict[str, str] = {}
         self._tool_call_log: List[Dict[str, Any]] = []
         self._max_log: int = 100
         # server_name -> full registered tool names, so a server's tools can
@@ -158,7 +300,7 @@ class MCPClient:
         if config.name in self._servers:
             logger.warning("Server '%s' already registered, skipping", config.name)
             return
-        self._servers[config.name] = _ManagedServer(config)
+        self._servers[config.name] = _ManagedHTTPServer(config) if config.url else _ManagedServer(config)
         logger.info("Registered MCP server: %s", config.name)
 
     def start(self) -> None:
@@ -177,11 +319,18 @@ class MCPClient:
                     len(tools),
                 )
                 _emit_mcp_status(name, "connected", len(tools))
-            except Exception:
+            except Exception as exc:
+                self._server_errors[name] = _safe_error(exc)
+                try:
+                    server.stop()
+                except Exception:
+                    logger.debug("Error cleaning up failed MCP server '%s'", name, exc_info=True)
                 logger.warning(
-                    "Failed to start MCP server '%s'", name, exc_info=True
+                    "Failed to start MCP server '%s': %s", name, self._server_errors[name]
                 )
                 _emit_mcp_status(name, "failed")
+            else:
+                self._server_errors.pop(name, None)
 
     def stop(self) -> None:
         """Stop all servers and clean up."""
@@ -189,6 +338,7 @@ class MCPClient:
             try:
                 server.stop()
                 _emit_mcp_status(name, "stopped")
+                self._server_errors.pop(name, None)
             except Exception:
                 logger.debug("Error stopping server '%s'", name, exc_info=True)
         self._tools.clear()
@@ -198,8 +348,19 @@ class MCPClient:
         return {name: server.is_running() for name, server in self._servers.items()}
 
     def list_tools(self) -> List[MCPTool]:
-        """Return all discovered tools across all servers."""
-        return list(self._tools.values())
+        """Return tools not denied by Charlie's local policy."""
+        return [
+            tool for key, tool in self._tools.items()
+            if self.tool_policy(key) != "deny"
+        ]
+
+    def tool_policy(self, tool_id: str) -> str:
+        """Resolve local policy; unlisted tools ask unless legacy allowlist is set."""
+        if tool_id in self._tool_policies:
+            return self._tool_policies[tool_id]
+        if self._read_only_tools:
+            return "allow" if tool_id in self._read_only_tools else "deny"
+        return "ask"
 
     def get_tools_for_prompt(self) -> str:
         """Format discovered tools as a system prompt snippet.
@@ -236,6 +397,8 @@ class MCPClient:
         tool = self._tools.get(key)
         if not tool:
             return {"success": False, "error": f"Tool '{tool_name}' not found on server '{server_name}'"}
+        if self.tool_policy(key) == "deny":
+            return {"success": False, "error": f"MCP tool '{key}' is denied by local policy"}
 
         server = self._servers.get(server_name)
         if not server or not server.is_running():
@@ -250,6 +413,7 @@ class MCPClient:
         except Exception as exc:
             elapsed_ms = round((time.monotonic() - start) * 1000)
             self._log_call(server_name, tool_name, arguments, False, elapsed_ms, str(exc))
+            self._server_errors[server_name] = _safe_error(exc)
             return {"success": False, "error": str(exc), "elapsed_ms": elapsed_ms}
 
     def get_call_log(self) -> List[Dict[str, Any]]:
@@ -297,23 +461,25 @@ class MCPClient:
         colliding with built-ins."""
         registered: List[str] = []
         for tool in self._tools.values():
-            if tool.server_name != server_name:
+            tool_id = f"{tool.server_name}:{tool.name}"
+            policy = self.tool_policy(tool_id)
+            if tool.server_name != server_name or policy == "deny":
                 continue
             full_name = f"{prefix}{tool.server_name}_{tool.name}"
             tool_name = tool.name
 
-            def _invoke(server_name=server_name, tool_name=tool_name, **kwargs: Any) -> str:
+            def _invoke(server_name=server_name, tool_name=tool_name, **kwargs: Any) -> Any:
                 result = self.call_tool(server_name, tool_name, kwargs)
                 if result.get("success"):
                     return str(result.get("result", ""))
-                return f"MCP tool error: {result.get('error', 'unknown error')}"
+                raise RuntimeError(f"MCP tool error: {result.get('error', 'unknown error')}")
 
             registry.register_tool(
                 name=full_name,
                 description=f"[{tool.server_name}] {tool.description}",
                 schema=tool.input_schema or {"type": "object", "properties": {}},
                 owner="mcp",
-                risk_class="reversible",
+                risk_class="safe" if policy == "allow" else "security_sensitive",
             )(_invoke)
             registered.append(full_name)
         self._registered_tools.setdefault(server_name, []).extend(registered)
@@ -340,6 +506,7 @@ class MCPClient:
             server.stop()
         except Exception:
             logger.debug("Error stopping server '%s'", name, exc_info=True)
+        self._server_errors.pop(name, None)
         return True
 
     def enable_server(self, registry: Any, name: str) -> List[str]:
@@ -350,12 +517,22 @@ class MCPClient:
         server = self._servers.get(name)
         if server is None:
             raise KeyError(f"No MCP server registered under '{name}'")
-        if not server.is_running():
-            server.start()
-        for tool in server.list_tools():
-            tool.server_name = name
-            self._tools[f"{name}:{tool.name}"] = tool
-        return self._register_server_tools(registry, name)
+        try:
+            if not server.is_running():
+                server.start()
+            for tool in server.list_tools():
+                tool.server_name = name
+                self._tools[f"{name}:{tool.name}"] = tool
+            registered = self._register_server_tools(registry, name)
+        except Exception as exc:
+            self._server_errors[name] = _safe_error(exc)
+            try:
+                server.stop()
+            except Exception:
+                logger.debug("Error cleaning up failed MCP server '%s'", name, exc_info=True)
+            raise
+        self._server_errors.pop(name, None)
+        return registered
 
     def remove_server(self, registry: Any, name: str) -> bool:
         """Unregister a server's tools, stop its subprocess, and drop its
@@ -369,6 +546,7 @@ class MCPClient:
             server.stop()
         except Exception:
             logger.debug("Error stopping server '%s' during removal", name, exc_info=True)
+        self._server_errors.pop(name, None)
         return True
 
     def list_servers_detailed(self) -> List[Dict[str, Any]]:
@@ -384,13 +562,17 @@ class MCPClient:
                 }
                 for t in self._tools.values()
                 if getattr(t, "server_name", "") == name
+                and self.tool_policy(f"{name}:{t.name}") != "deny"
             ]
+            error = self._server_errors.get(name)
             out.append({
                 "name": name,
                 "command": server.config.command,
                 "args": server.config.args,
                 "running": running,
-                "status": "connected" if running else "disconnected",
+                "status": "connected" if running else ("failed" if error else "disconnected"),
+                "error": error,
+                "transport": "streamable-http" if server.config.url else "stdio",
                 "tools_count": len(server_tools),
                 "tools": server_tools,
             })
@@ -417,6 +599,7 @@ class _ManagedServer:
         self._process: Optional[subprocess.Popen] = None  # type: ignore[type-arg]
         self._lock = threading.Lock()
         self._request_id = 0
+        self._ready = False
         self._reader_thread: Optional[threading.Thread] = None
         # Pending requests awaiting a response, keyed by request id. The
         # reader thread (the only code that reads stdout) delivers the
@@ -425,6 +608,7 @@ class _ManagedServer:
 
     def start(self) -> None:
         """Launch the server subprocess."""
+        self._ready = False
         env = {**dict(__import__("os").environ), **self.config.env}
         self._process = subprocess.Popen(
             [self.config.command] + self.config.args,
@@ -447,16 +631,17 @@ class _ManagedServer:
             "capabilities": {},
             "clientInfo": {"name": "charlie", "version": "0.1.0"},
         })
-        if resp and "error" not in resp:
-            # Send initialized notification
-            self._send_notification("notifications/initialized", {})
-            logger.debug("MCP server '%s' initialized", self.config.name)
-        else:
-            logger.warning("MCP server '%s' init failed: %s", self.config.name, resp)
-            self._log_stderr()
+        if not resp or "error" in resp:
+            error = resp.get("error") if resp else "initialize timed out"
+            self.stop()
+            raise RuntimeError(f"MCP server '{self.config.name}' initialize failed: {error}")
+        self._send_notification("notifications/initialized", {})
+        self._ready = True
+        logger.debug("MCP server '%s' initialized", self.config.name)
 
     def stop(self) -> None:
         """Stop the server subprocess."""
+        self._ready = False
         if self._process and self._process.poll() is None:
             self._process.terminate()
             try:
@@ -490,20 +675,31 @@ class _ManagedServer:
             logger.warning("MCP server '%s' stderr:\n%s", self.config.name, err.strip())
 
     def is_running(self) -> bool:
-        return self._process is not None and self._process.poll() is None
+        return self._ready and self._process is not None and self._process.poll() is None
 
     def list_tools(self) -> List[MCPTool]:
         """Discover tools from the server."""
-        resp = self._send_request("tools/list", {})
-        if not resp or "error" in resp:
-            return []
         tools = []
-        for t in resp.get("result", {}).get("tools", []):
-            tools.append(MCPTool(
-                name=t.get("name", ""),
-                description=t.get("description", ""),
-                input_schema=t.get("inputSchema", {}),
-            ))
+        params: Dict[str, Any] = {}
+        seen_cursors = set()
+        while True:
+            resp = self._send_request("tools/list", params)
+            if not resp or "error" in resp:
+                raise RuntimeError(f"MCP server '{self.config.name}' tools/list failed: {resp or 'timed out'}")
+            result = resp.get("result", {})
+            for item in result.get("tools", []):
+                tools.append(MCPTool(
+                    name=item.get("name", ""),
+                    description=item.get("description", ""),
+                    input_schema=item.get("inputSchema", {}),
+                ))
+            cursor = result.get("nextCursor")
+            if not cursor:
+                break
+            if cursor in seen_cursors:
+                raise RuntimeError(f"MCP server '{self.config.name}' repeated a tools/list cursor")
+            seen_cursors.add(cursor)
+            params = {"cursor": cursor}
         return tools
 
     def call_tool(self, name: str, arguments: Dict[str, Any]) -> Any:
@@ -517,6 +713,11 @@ class _ManagedServer:
         if "error" in resp:
             raise RuntimeError(f"Tool error: {resp['error']}")
         result = resp.get("result", {})
+        if result.get("isError") is True:
+            content = result.get("content", [])
+            texts = [item.get("text", "") for item in content if isinstance(item, dict)]
+            message = "\n".join(text for text in texts if text).strip()
+            raise RuntimeError(message or f"MCP tool '{name}' returned isError=true")
         # MCP tool results can be text or structured
         content = result.get("content", [])
         if content and isinstance(content, list):
@@ -617,6 +818,169 @@ class _ManagedServer:
                 self._log_stderr()
 
 
+class _ManagedHTTPServer:
+    """Streamable HTTP MCP connection backed by Charlie's existing httpx dependency."""
+
+    _PROTOCOL_VERSION = "2025-03-26"
+
+    def __init__(self, config: MCPServerConfig) -> None:
+        self.config = config
+        self._client: Optional[httpx.Client] = None
+        self._session_id: Optional[str] = None
+        self._protocol_version = self._PROTOCOL_VERSION
+        self._request_id = 0
+        self._ready = False
+        self._lock = threading.RLock()
+
+    def start(self) -> None:
+        if not self.config.url:
+            raise ValueError("Streamable HTTP MCP server requires url")
+        self._client = httpx.Client(timeout=self.config.timeout, headers=self.config.headers)
+        self._ready = False
+        response = self._exchange("initialize", {
+            "protocolVersion": self._PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "charlie", "version": "0.1.0"},
+        })
+        if not response or "error" in response or not isinstance(response.get("result"), dict):
+            raise RuntimeError(f"MCP server '{self.config.name}' initialize failed: {response or 'no response'}")
+        self._protocol_version = str(response["result"].get("protocolVersion") or self._PROTOCOL_VERSION)
+        self._exchange("notifications/initialized", {})
+        self._ready = True
+
+    def stop(self) -> None:
+        self._ready = False
+        client, self._client = self._client, None
+        if client is None:
+            return
+        if self._session_id:
+            try:
+                client.delete(
+                    self.config.url,
+                    headers={"Mcp-Session-Id": self._session_id},
+                    timeout=self.config.timeout,
+                )
+            except httpx.HTTPError:
+                logger.debug("MCP session close failed for '%s'", self.config.name, exc_info=True)
+        client.close()
+        self._session_id = None
+
+    def is_running(self) -> bool:
+        return self._ready and self._client is not None
+
+    def _exchange(self, method: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if self._client is None or not self.config.url:
+            raise RuntimeError(f"MCP HTTP server '{self.config.name}' is not started")
+        with self._lock:
+            request_id: Optional[int] = None
+            message: Dict[str, Any] = {"jsonrpc": "2.0", "method": method, "params": params}
+            if method != "notifications/initialized":
+                self._request_id += 1
+                request_id = self._request_id
+                message["id"] = request_id
+            headers = {"Accept": "application/json, text/event-stream"}
+            if self._session_id:
+                headers["Mcp-Session-Id"] = self._session_id
+            if method != "initialize":
+                headers["MCP-Protocol-Version"] = self._protocol_version
+            try:
+                response = self._client.post(self.config.url, json=message, headers=headers)
+            except httpx.RequestError as exc:
+                raise RuntimeError(_safe_error(exc)) from exc
+            self._session_id = response.headers.get("Mcp-Session-Id", self._session_id)
+            if response.status_code == 202 and request_id is None:
+                return None
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise RuntimeError(_safe_error(exc)) from exc
+            if not response.content:
+                if request_id is None:
+                    return None
+                raise RuntimeError("MCP HTTP server accepted request without a response")
+            content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().casefold()
+            try:
+                if content_type == "application/json":
+                    payload = response.json()
+                elif content_type == "text/event-stream":
+                    payload = self._sse_response(response.text, request_id)
+                else:
+                    raise RuntimeError(f"MCP HTTP server returned unsupported content type '{content_type}'")
+            except (ValueError, json.JSONDecodeError) as exc:
+                raise RuntimeError("MCP HTTP server returned invalid JSON") from exc
+            if request_id is None:
+                return None
+            if not isinstance(payload, dict) or payload.get("id") != request_id:
+                raise RuntimeError("MCP HTTP server response did not match the request ID")
+            return payload
+
+    @staticmethod
+    def _sse_response(body: str, request_id: Optional[int]) -> Dict[str, Any]:
+        data_lines: List[str] = []
+        for line in [*body.splitlines(), ""]:
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
+            elif not line and data_lines:
+                try:
+                    message = json.loads("\n".join(data_lines))
+                except json.JSONDecodeError:
+                    data_lines = []
+                    continue
+                data_lines = []
+                if isinstance(message, dict) and message.get("id") == request_id:
+                    return message
+        raise RuntimeError("MCP HTTP event stream contained no matching response")
+
+    def list_tools(self) -> List[MCPTool]:
+        tools: List[MCPTool] = []
+        params: Dict[str, Any] = {}
+        seen_cursors = set()
+        while True:
+            response = self._exchange("tools/list", params)
+            if not response or "error" in response:
+                raise RuntimeError(f"MCP server '{self.config.name}' tools/list failed: {response or 'timed out'}")
+            result = response.get("result", {})
+            if not isinstance(result, dict):
+                raise RuntimeError(f"MCP server '{self.config.name}' returned invalid tools/list result")
+            for item in result.get("tools", []):
+                if isinstance(item, dict) and item.get("name"):
+                    # Server annotations are untrusted hints; only schema and descriptive fields cross this boundary.
+                    tools.append(MCPTool(
+                        name=str(item["name"]),
+                        description=str(item.get("description", "")),
+                        input_schema=(
+                            item.get("inputSchema", {})
+                            if isinstance(item.get("inputSchema", {}), dict)
+                            else {}
+                        ),
+                    ))
+            cursor = result.get("nextCursor")
+            if not cursor:
+                return tools
+            if cursor in seen_cursors:
+                raise RuntimeError(f"MCP server '{self.config.name}' repeated a tools/list cursor")
+            seen_cursors.add(cursor)
+            params = {"cursor": cursor}
+
+    def call_tool(self, name: str, arguments: Dict[str, Any]) -> Any:
+        response = self._exchange("tools/call", {"name": name, "arguments": arguments})
+        if not response:
+            raise RuntimeError(f"No response from MCP server for tool '{name}'")
+        if "error" in response:
+            raise RuntimeError(f"Tool error: {response['error']}")
+        result = response.get("result", {})
+        if result.get("isError") is True:
+            content = result.get("content", [])
+            texts = [item.get("text", "") for item in content if isinstance(item, dict)]
+            message = "\n".join(text for text in texts if text).strip()
+            raise RuntimeError(message or f"MCP tool '{name}' returned isError=true")
+        content = result.get("content", [])
+        if isinstance(content, list) and content:
+            texts = [item.get("text", str(item)) for item in content if isinstance(item, dict)]
+            return "\n".join(texts) if texts else result
+        return result
+
+
 def start_mcp(config: Any) -> Optional["MCPClient"]:
     """Build, start, and register MCP servers from config.
 
@@ -632,9 +996,9 @@ def start_mcp(config: Any) -> Optional["MCPClient"]:
 
     # Two equally-valid, mergeable sources: the JSON config file (standard
     # "mcpServers" format, easiest for hand-editing) and the MCP_SERVERS env
-    # var (pipe-spec, easiest for the web dashboard to write). Same-name
+    # var (pipe-spec, easiest for environment configuration). Same-name
     # entries: file wins, since add_server() skips a name it's already seen.
-    server_configs: List[MCPServerConfig] = load_config_file(config.mcp_config_path)
+    server_configs, tool_policies = load_mcp_config(config.mcp_config_path)
     for spec in config.mcp_servers:
         try:
             server_configs.append(parse_server_spec(spec))
@@ -648,7 +1012,10 @@ def start_mcp(config: Any) -> Optional["MCPClient"]:
         )
         return None
 
-    client = MCPClient()
+    client = MCPClient(
+        read_only_tools=getattr(config, "mcp_read_only_tools", []),
+        tool_policies=tool_policies,
+    )
     for server_config in server_configs:
         client.add_server(server_config)
     client.start()

@@ -1,7 +1,7 @@
 """Unified live runtime introspection layer for Charlie V1.
 
 Queries authoritative state across process, models, capabilities, task journal,
-capability leases, subsystem health, MCP servers, memory systems, and terminal/desktop/browser
+ capability leases, subsystem health, MCP servers, memory systems, and desktop/browser
 subsystems with strict secret masking.
 """
 
@@ -12,7 +12,7 @@ import os
 import platform
 import sys
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -35,7 +35,6 @@ class RuntimeSnapshot:
     mcp: Dict[str, Any]
     memory: Dict[str, Any]
     subsystems: Dict[str, Any]
-    presentation: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -53,8 +52,6 @@ class RuntimeIntrospector:
         lease_manager: Optional[Any] = None,
         mcp_client: Optional[Any] = None,
         memory_service: Optional[Any] = None,
-        terminal_manager: Optional[Any] = None,
-        presentation_registry: Optional[Any] = None,
     ) -> None:
         self._config = config
         if capability_index is None:
@@ -67,8 +64,6 @@ class RuntimeIntrospector:
         self._lease_manager = lease_manager
         self._mcp_client = mcp_client
         self._memory_service = memory_service
-        self._terminal_manager = terminal_manager
-        self._presentation_registry = presentation_registry
 
     # -------------------------------------------------------------------------
     # Lazy Singletons
@@ -129,17 +124,6 @@ class RuntimeIntrospector:
             from charlie.memory_service import get_memory_service
             return get_memory_service()
         except Exception:
-            return None
-
-    def _get_presentation_registry(self) -> Any:
-        if self._presentation_registry is not None:
-            return self._presentation_registry
-        try:
-            from charlie.presentation_registry import get_presentation_registry
-
-            return get_presentation_registry()
-        except Exception as exc:
-            logger.warning("Failed to import or load PresentationRegistry: %s", exc)
             return None
 
     # -------------------------------------------------------------------------
@@ -482,7 +466,7 @@ class RuntimeIntrospector:
         return safe
 
     def get_subsystem_info(self) -> Dict[str, Any]:
-        """Inspect Desktop, Browser, Terminal, Voice, and Telemetry availability."""
+        """Inspect Desktop, Browser, Voice, and Telemetry availability."""
         # 1. Desktop
         desktop_avail = False
         try:
@@ -498,15 +482,6 @@ class RuntimeIntrospector:
             browser_avail = bool(BROWSER_AVAILABLE)
         except Exception:
             pass
-
-        # 3. Terminal
-        terminal_avail = False
-        try:
-            from charlie.terminal_service import _HAS_CONPTY
-            terminal_avail = True
-            conpty = bool(_HAS_CONPTY)
-        except Exception:
-            conpty = False
 
         # 4. Voice / Wake word
         wake_word_model = "charlie.onnx"
@@ -530,96 +505,12 @@ class RuntimeIntrospector:
                 "available": browser_avail,
                 "playwright_supported": browser_avail,
             },
-            "terminal": {
-                "available": terminal_avail,
-                "has_conpty": conpty,
-            },
             "voice": {
                 "wake_word_model_present": wake_word_present,
                 "wake_word_model": wake_word_model,
             },
             "telemetry": telemetry_stats,
         }
-
-    def get_presentation_info(self) -> Dict[str, Any]:
-        """Return authoritative, secret-safe metadata describing what Charlie can present."""
-        try:
-            registry = self._get_presentation_registry()
-            if registry is None:
-                return {
-                    "status": "error",
-                    "error_type": "presentation_registry_unavailable",
-                    "message": "PresentationRegistry could not be loaded",
-                }
-
-            # Inspect runtime config/flags if present
-            cfg = self._get_config()
-            hud_enabled: Any = getattr(cfg, "hud_enabled", "unknown") if cfg else "unknown"
-            hud_active: Any = "unknown"  # No live browser client connection tracked in Python runtime
-
-            widget_defs: Dict[str, Any] = {}
-            for w in registry.list_widgets():
-                desc = registry.get_widget(w)
-                if desc:
-                    widget_defs[w] = asdict(desc)
-
-            workspace_defs: Dict[str, Any] = {}
-            for ws in registry.list_workspaces():
-                desc = registry.get_workspace(ws)
-                if desc:
-                    workspace_defs[ws] = asdict(desc)
-
-            overlay_defs: Dict[str, Any] = {}
-            for o in registry.list_overlays():
-                desc = registry.get_overlay(o)
-                if desc:
-                    overlay_defs[o] = asdict(desc)
-
-            return {
-                "status": "available",
-                "contract": {
-                    "contract_version": registry.contract_version,
-                    "surface_schema_version": registry.surface_schema_version,
-                },
-                "runtime": {
-                    "hud_enabled": hud_enabled,
-                    "hud_runtime_active": hud_active,
-                },
-                "core": {
-                    "states": registry.get_core_states(),
-                    "positions": registry.get_core_positions(),
-                    "rules": registry.get_core_rules(),
-                },
-                "widgets": {
-                    "count": len(registry.list_widgets()),
-                    "canonical": registry.list_widgets(),
-                    "definitions": widget_defs,
-                },
-                "workspaces": {
-                    "count": len(registry.list_workspaces()),
-                    "canonical": registry.list_workspaces(),
-                    "definitions": workspace_defs,
-                },
-                "overlays": {
-                    "count": len(registry.list_overlays()),
-                    "canonical": registry.list_overlays(),
-                    "definitions": overlay_defs,
-                },
-                "surface_primitives": registry.list_surface_primitives(),
-                "layout_types": registry.list_layout_types(),
-                "presentation_kinds": registry.list_presentation_kinds(),
-                "dismiss_policies": registry.list_dismiss_policies(),
-                "preferred_zones": registry.list_preferred_zones(),
-                "anchors": registry.list_anchors(),
-                "actions": registry.list_actions(),
-            }
-        except Exception as exc:
-            logger.warning("Failed to query presentation registry: %s", exc)
-            return {
-                "status": "error",
-                "error_type": type(exc).__name__,
-                "message": str(exc),
-            }
 
     # -------------------------------------------------------------------------
     # Snapshot & Aggregation
@@ -639,5 +530,4 @@ class RuntimeIntrospector:
             "mcp": self.get_mcp_info(),
             "memory": self.get_memory_info(),
             "subsystems": self.get_subsystem_info(),
-            "presentation": self.get_presentation_info(),
         }

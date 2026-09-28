@@ -25,6 +25,11 @@ _CONFIG_PATTERNS = [
 
 # 2. Skill Patterns
 _SKILL_PATTERNS = [
+    re.compile(r"\b(?:stage|draft|propose)\b.*\bskill\b", re.IGNORECASE),
+    re.compile(
+        r"\b(add|create|install)\s+(?:(?:a|an|safe|reusable|inactive|instructions?[- ]only)[,\s]+)*skill\b",
+        re.IGNORECASE,
+    ),
     re.compile(
         r"\b(remember|learn|teach yourself|store)\s+(this\s+)?(reusable\s+)?"
         r"(procedure|process|workflow|playbook|steps?|routine)\b",

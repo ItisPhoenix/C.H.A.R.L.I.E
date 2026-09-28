@@ -1,8 +1,7 @@
 """Platform-specific runtime fixes.
 
 Centralizes Windows event-loop policy and warning suppression that
-every entry point (main.py, run.py, web_server.py) needs before
-importing asyncio-heavy libraries (pyzmq, tornado, etc.).
+the runtime entry points need before importing asyncio-heavy libraries.
 
 Call ``configure()`` as the very first thing in each entry point,
 before any other asyncio or zmq import.

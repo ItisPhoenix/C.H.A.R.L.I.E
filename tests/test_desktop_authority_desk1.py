@@ -430,35 +430,24 @@ async def test_physical_input_session_ends_after_cancellation(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "host_status, expected_phrase",
-    [(ResultStatus.COMPLETED.value, "Opened"), (ResultStatus.FAILED.value, "couldn't open")],
-)
-async def test_browser_host_open_is_separate_desktop_operation(monkeypatch, host_status, expected_phrase):
+async def test_browser_interactive_flow_stays_on_charlie_browser(monkeypatch):
     brain = _brain()
-    calls = []
+    browser_calls = []
+    host_calls = []
 
-    async def resolve(*_args, **_kwargs):
+    async def resolve(*_args, **kwargs):
+        browser_calls.append(kwargs)
         return BrowserResult(
             url="https://example.test/result",
             answer="Verified browser result.",
             success=True,
             verification="result-opened",
+            evidence={"browser_surface": "playwright", "target_id": "target-desk-1"},
         )
 
     async def execute(name, arguments, **kwargs):
-        calls.append((name, arguments, kwargs))
-        return _envelope(
-            request="Show it to me.",
-            tool_name=name,
-            operation="desktop.browser.open_url",
-            result=(
-                "Opened host browser."
-                if host_status == ResultStatus.COMPLETED.value
-                else "Error: host browser unavailable."
-            ),
-            status=host_status,
-        )
+        host_calls.append((name, arguments, kwargs))
+        raise AssertionError("interactive browser tasks must not hand off to desktop_open_url")
 
     monkeypatch.setattr(browser_task_module, "resolve", resolve)
     monkeypatch.setattr(brain, "execute_tool_operation", execute)
@@ -476,14 +465,12 @@ async def test_browser_host_open_is_separate_desktop_operation(monkeypatch, host
     finally:
         await brain.close()
 
-    assert calls and calls[0][0] == "desktop_open_url"
-    assert calls[0][1] == {"url": "https://example.test/result"}
-    assert calls[0][2]["execution_owner_id"] == "turn:turn-desk-1"
+    assert browser_calls and browser_calls[0]["user_visible"] is True
+    assert host_calls == []
     assert outcome.capability == "browser"
-    assert outcome.data["host_effect"]["capability"] == "desktop"
-    assert expected_phrase in outcome.result
-    if host_status == ResultStatus.FAILED.value:
-        assert "Opened https://example.test/result." not in outcome.result
+    assert outcome.data["browser_evidence"]["browser_surface"] == "playwright"
+    assert outcome.data["browser_evidence"]["target_id"] == "target-desk-1"
+    assert outcome.result == "Verified browser result."
 
 
 def test_takeover_revokes_only_canonical_desktop_ownership(monkeypatch):

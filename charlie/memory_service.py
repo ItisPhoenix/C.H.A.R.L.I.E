@@ -12,12 +12,28 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from charlie.memory_graph import MemoryGraph
 from charlie.utils import make_id, utc_now_iso
 
 logger = logging.getLogger("charlie.memory_service")
+
+_SEARCH_STOP_WORDS = frozenset({
+    "a", "about", "am", "an", "and", "are", "as", "at", "be", "but", "by", "can",
+    "did", "do", "does", "for", "from", "had", "has", "have", "i", "in", "is", "it",
+    "me", "my", "of", "on", "or", "please", "remember", "the", "this", "to", "was",
+    "what", "when", "where", "which", "who", "why", "you", "your",
+})
+
+
+def _search_terms(value: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", value.casefold())
+        if len(token) > 2 and token not in _SEARCH_STOP_WORDS
+    }
 
 
 def fact_compatibility_id(subject: str, predicate: str, obj: str) -> str:
@@ -76,13 +92,17 @@ class MemoryService:
         text: str,
         source: str,
         session_id: str,
-        auto_extract: bool = True,
+        auto_extract: bool = False,
     ) -> int:
-        """Explicitly ingest semantic memory using the MemoryStore contract.
+        """Store explicit user-provided semantic memory without extraction.
 
-        Zero is the neutral result when semantic storage is not configured or
-        unavailable, matching ``MemoryStore.add_memory``.
+        Automatic transcript and assistant-output ingestion is intentionally
+        rejected at this boundary. Zero is the neutral result when the write
+        is not explicit or semantic storage is unavailable.
         """
+        if source != "user" or auto_extract:
+            logger.info("Semantic memory write skipped without explicit user content")
+            return 0
         if not self._semantic_available():
             return 0
         return self._memory_store.add_memory(
@@ -287,8 +307,16 @@ class MemoryService:
         predicate: str = "",
         obj: str = "",
         metadata: Optional[Dict[str, Any]] = None,
+        *,
+        provenance: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Add a managed graph item without implicit semantic ingestion."""
+        if not isinstance(provenance, str) or not provenance.strip():
+            raise ValueError("provenance must be a non-empty string")
+        item_metadata = dict(metadata or {})
+        item_metadata.pop("provenance", None)
+        item_metadata.pop("history", None)
+        item_metadata["provenance"] = provenance.strip()
         graph = self._get_graph()
         requested_id = f"mem_{make_id(8)}"
         node_type = (
@@ -309,7 +337,7 @@ class MemoryService:
                     "subject": subject,
                     "predicate": predicate,
                     "object": obj,
-                    **(metadata or {}),
+                    **item_metadata,
                 }
                 persisted_id = graph.add_node(
                     node_type=node_type,
@@ -323,7 +351,7 @@ class MemoryService:
                     node_type=node_type,
                     content=content,
                     node_id=requested_id,
-                    metadata=metadata,
+                    metadata=item_metadata,
                 )
 
         if graph is not None and persisted_id is not None:
@@ -336,7 +364,7 @@ class MemoryService:
                     fallback_subject=subject,
                     fallback_predicate=predicate,
                     fallback_object=obj,
-                    fallback_metadata=metadata,
+                    fallback_metadata=item_metadata,
                 )
 
         logger.warning("Could not persist managed memory item")
@@ -348,7 +376,7 @@ class MemoryService:
             "predicate": predicate,
             "object": obj,
             "created_at": utc_now_iso(),
-            "metadata": metadata or {},
+            "metadata": item_metadata,
         }
 
     def list_items(self, category: Optional[str] = None, limit: int = 300) -> List[Dict[str, Any]]:
@@ -415,29 +443,75 @@ class MemoryService:
         return items[:limit]
 
     def search_items(self, query: str, category: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
-        """Search managed graph items by keyword and category."""
-        all_items = self.list_items(category=category, limit=500)
+        """Search managed graph items by matching query terms and category."""
         q_lower = query.lower().strip()
-        if not q_lower:
-            return all_items[:limit]
+        terms = _search_terms(q_lower)
+        if not terms:
+            return []
 
-        matched = [
-            item for item in all_items
-            if q_lower in item["content"].lower()
-            or q_lower in item.get("subject", "").lower()
-            or q_lower in item.get("predicate", "").lower()
-            or q_lower in item.get("object", "").lower()
-        ]
-        return matched[:limit]
+        all_items = self.list_items(category=category, limit=500)
+        ranked = []
+        for position, item in enumerate(all_items):
+            searchable = " ".join(
+                str(item.get(key) or "")
+                for key in ("content", "subject", "predicate", "object")
+            ).casefold()
+            item_terms = _search_terms(searchable)
+            overlap = len(terms & item_terms)
+            if not overlap:
+                continue
+            score = overlap + (len(terms) + 1 if q_lower in searchable else 0)
+            ranked.append((score, position, item))
+
+        ranked.sort(key=lambda row: (-row[0], row[1]))
+        return [item for _score, _position, item in ranked[:limit]]
+
+    def recall(self, query: str, n_results: int = 5) -> Optional[List[Dict[str, Any]]]:
+        """Recall matching managed facts first, then semantic memories."""
+        if not _search_terms(query):
+            return []
+
+        structured = self.search_items(query, limit=n_results)
+        if structured:
+            return [{**item, "source": "structured"} for item in structured]
+
+        semantic = self.search_semantic(query, n_results=n_results)
+        if semantic is None:
+            return None
+
+        results = []
+        seen = set()
+        for item in semantic or []:
+            text = str(item.get("text") or "").strip()
+            if not text or text.casefold() in seen:
+                continue
+            results.append({**item, "content": text, "source": "semantic"})
+            seen.add(text.casefold())
+        return results[:n_results]
+
+    @staticmethod
+    def _fact_from_metadata(metadata: Dict[str, Any]) -> Optional[Tuple[str, str, str]]:
+        values = tuple(metadata.get(key) for key in ("subject", "predicate", "object"))
+        if not any(values):
+            return None
+        if not all(isinstance(value, str) and value.strip() for value in values):
+            raise ValueError("Managed graph facts require a complete subject, predicate, and object.")
+        return values  # type: ignore[return-value]
 
     def update_item(
         self,
         item_id: str,
-        content: str = "",
+        content: Optional[str] = None,
         category: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        provenance: Optional[str] = None,
+        subject: Optional[str] = None,
+        predicate: Optional[str] = None,
+        obj: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Update content and properties of an existing managed graph item."""
+        """Update a managed item, retaining a provenance-tagged reversible history."""
+        if not isinstance(provenance, str) or not provenance.strip():
+            raise ValueError("provenance must be a non-empty string")
         graph = self._get_graph()
         if not graph:
             return None
@@ -453,28 +527,148 @@ class MemoryService:
             else "fact"
         )
 
-        existing_meta = node.get("metadata") or {}
-        if not isinstance(existing_meta, dict):
-            existing_meta = {}
-        if metadata:
-            existing_meta.update(metadata)
+        old_meta = node.get("metadata") or {}
+        if not isinstance(old_meta, dict):
+            old_meta = {}
+        old_meta = dict(old_meta)
+        raw_history = old_meta.get("history", [])
+        history = [entry for entry in raw_history if isinstance(entry, dict)] if isinstance(raw_history, list) else []
+        old_meta.pop("history", None)
+        old_fact = self._fact_from_metadata(old_meta)
+        replacement_values = (subject, predicate, obj)
+        has_replacement = any(value is not None for value in replacement_values)
+        if old_fact and not has_replacement:
+            raise ValueError("Triple-backed facts require subject, predicate, and object for correction.")
+        if has_replacement and not all(isinstance(value, str) and value.strip() for value in replacement_values):
+            raise ValueError("Triple-backed facts require subject, predicate, and object for correction.")
+        new_fact = tuple(replacement_values) if has_replacement else None
 
-        persisted_node = graph.update_node(
-            node_id=item_id,
-            node_type=node_type,
-            content=content,
-            metadata=existing_meta,
+        existing_meta = dict(old_meta)
+        if metadata:
+            incoming_meta = dict(metadata)
+            for key in ("history", "provenance", "subject", "predicate", "object"):
+                incoming_meta.pop(key, None)
+            existing_meta.update(incoming_meta)
+        if new_fact:
+            existing_meta.update(dict(zip(("subject", "predicate", "object"), new_fact)))
+
+        updated_content = node.get("content", "") if content is None else content
+        existing_meta["provenance"] = provenance.strip()
+        changed = (
+            updated_content != node.get("content", "")
+            or node_type != node.get("node_type", "fact")
+            or existing_meta != old_meta
         )
+        if changed:
+            history.append({
+                "id": make_id(8),
+                "operation": "update",
+                "status": "applied",
+                "at": utc_now_iso(),
+                "provenance": provenance.strip(),
+                "before": {
+                    "content": node.get("content", ""),
+                    "category": node.get("node_type", "fact"),
+                    "metadata": old_meta,
+                },
+            })
+        if history:
+            existing_meta["history"] = history
+
+        if old_fact is not None or new_fact is not None:
+            persisted_node = graph.update_managed_fact(
+                item_id,
+                old_fact=old_fact,
+                new_fact=new_fact or old_fact,
+                node_type=node_type,
+                content=updated_content,
+                metadata=existing_meta,
+            )
+        else:
+            persisted_node = graph.update_node(
+                node_id=item_id,
+                node_type=node_type,
+                content=updated_content,
+                metadata=existing_meta,
+            )
         if persisted_node is not None:
             return self._item_from_node(
                 persisted_node,
                 fallback_category=node_type,
-                fallback_content=content,
+                fallback_content=updated_content,
                 fallback_metadata=existing_meta,
             )
 
         logger.warning("Could not update managed memory item %s", item_id)
         return None
+
+    def undo_item_update(self, item_id: str, provenance: str = "owner_undo") -> Optional[Dict[str, Any]]:
+        """Restore the prior state of the latest applied update, retaining an audit trail."""
+        if not isinstance(provenance, str) or not provenance.strip():
+            raise ValueError("provenance must be a non-empty string")
+        graph = self._get_graph()
+        node = graph.get_node(item_id) if graph else None
+        if node is None:
+            return None
+        current_meta = node.get("metadata") or {}
+        if not isinstance(current_meta, dict):
+            current_meta = {}
+        raw_history = current_meta.get("history", [])
+        history = [entry for entry in raw_history if isinstance(entry, dict)] if isinstance(raw_history, list) else []
+        target = next(
+            (entry for entry in reversed(history)
+             if entry.get("operation") == "update" and entry.get("status") == "applied"),
+            None,
+        )
+        if target is None:
+            return None
+
+        before = target.get("before") or {}
+        if not isinstance(before.get("metadata"), dict):
+            return None
+        target["status"] = "undone"
+        restored_meta = dict(before["metadata"])
+        current_base_meta = {key: value for key, value in current_meta.items() if key != "history"}
+        current_fact = self._fact_from_metadata(current_base_meta)
+        before_fact = self._fact_from_metadata(restored_meta)
+        restored_meta["history"] = history
+        history.append({
+            "id": make_id(8),
+            "operation": "undo",
+            "status": "applied",
+            "at": utc_now_iso(),
+            "provenance": provenance.strip(),
+            "before": {
+                "content": node.get("content", ""),
+                "category": node.get("node_type", "fact"),
+                "metadata": {key: value for key, value in current_meta.items() if key != "history"},
+            },
+        })
+        restored_meta["history"] = history
+        if current_fact is not None or before_fact is not None:
+            restored = graph.update_managed_fact(
+                item_id,
+                old_fact=current_fact,
+                new_fact=before_fact,
+                node_type=before.get("category", "fact"),
+                content=before.get("content", ""),
+                metadata=restored_meta,
+            )
+        else:
+            restored = graph.update_node(
+                node_id=item_id,
+                node_type=before.get("category", "fact"),
+                content=before.get("content", ""),
+                metadata=restored_meta,
+            )
+        if restored is None:
+            return None
+        return self._item_from_node(
+            restored,
+            fallback_category=before.get("category", "fact"),
+            fallback_content=before.get("content", ""),
+            fallback_metadata=restored_meta,
+        )
 
     def delete_item(self, item_id: str) -> bool:
         """Delete a managed graph item or its associated graph fact."""

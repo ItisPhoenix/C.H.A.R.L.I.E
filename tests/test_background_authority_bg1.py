@@ -102,7 +102,6 @@ async def test_background_start_propagates_identity_callbacks_without_outer_desk
     assert execution[2] is None
     assert task.brain.on_tool_call is callbacks[0]
     assert task.brain.on_tool_result is callbacks[1]
-    assert task.brain.on_operation_result is callbacks[2]
     assert task.brain.on_thinking_update is callbacks[3]
     assert resource_locks.current_owner("desktop") is None
 

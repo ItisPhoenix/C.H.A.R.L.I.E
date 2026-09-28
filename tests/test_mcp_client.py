@@ -1,9 +1,11 @@
 """Tests for charlie.mcp_client -- MCP Client module."""
 
+import json
 import logging
 import sys
 from typing import Any, Callable, Dict, List
 from unittest.mock import MagicMock, patch
+
 import pytest
 
 from charlie.mcp_client import (
@@ -11,6 +13,7 @@ from charlie.mcp_client import (
     MCPServerConfig,
     MCPTool,
     _ManagedServer,
+    load_mcp_config,
     parse_server_spec,
     start_mcp,
 )
@@ -96,7 +99,7 @@ class TestMCPClient:
         ]
         MockServer.return_value = mock_instance
 
-        client = MCPClient()
+        client = MCPClient(read_only_tools=["s1:tool1", "s1:tool2"])
         client.add_server(MCPServerConfig(name="s1", command="echo"))
         client.start()
 
@@ -120,7 +123,7 @@ class TestMCPClient:
         assert len(client.get_call_log()) == 5
 
     def test_get_tools_for_prompt_with_tools(self):
-        client = MCPClient()
+        client = MCPClient(read_only_tools=["my_server:my_tool"])
         tool = MCPTool(
             name="my_tool",
             description="Does something",
@@ -139,13 +142,14 @@ class _FakeRegistry:
     def __init__(self) -> None:
         self._tools: Dict[str, Dict[str, Any]] = {}
 
-    def register_tool(self, name: str, description: str, schema: Dict[str, Any], **_: Any) -> Callable:
+    def register_tool(self, name: str, description: str, schema: Dict[str, Any], **kwargs: Any) -> Callable:
         def decorator(func: Callable) -> Callable:
             self._tools[name] = {
                 "name": name,
                 "description": description,
                 "schema": schema,
                 "func": func,
+                "risk_class": kwargs.get("risk_class"),
             }
             return func
 
@@ -163,6 +167,7 @@ class _FakeServer:
         # Matches real _ManagedServer.__init__: no process until start() runs.
         self._process = None
         self._tools: List[MCPTool] = []
+        self.calls: List[tuple[str, Dict[str, Any]]] = []
 
     def start(self) -> None:
         self._process = MagicMock()
@@ -178,6 +183,10 @@ class _FakeServer:
     def list_tools(self) -> List[MCPTool]:
         return self._tools
 
+    def call_tool(self, name: str, arguments: Dict[str, Any]) -> str:
+        self.calls.append((name, arguments))
+        return f"{name} result"
+
     def stop(self) -> None:
         self._process = None
 
@@ -189,18 +198,26 @@ class TestMCPRuntimeControl:
         import charlie.mcp_client as mcp_mod
 
         monkeypatch.setattr(mcp_mod, "_ManagedServer", _FakeServer)
-        client = MCPClient()
+        client = MCPClient(read_only_tools=[f"{name}:read"])
         client.add_server(MCPServerConfig(name=name, command="echo"))
         return client
 
-    def test_enable_server_starts_and_registers_tools(self, monkeypatch):
+    def test_enable_server_exposes_only_allowlisted_read_tool(self, monkeypatch):
         client = self._client_with_server(monkeypatch)
         registry = _FakeRegistry()
 
         registered = client.enable_server(registry, "s1")
 
-        assert set(registered) == {"mcp_s1_read", "mcp_s1_write"}
+        assert registered == ["mcp_s1_read"]
+        assert [tool.name for tool in client.list_tools()] == ["read"]
         assert "mcp_s1_read" in registry._tools
+        assert "mcp_s1_write" not in registry._tools
+        assert registry._tools["mcp_s1_read"]["risk_class"] == "safe"
+        assert client.call_tool("s1", "read")["success"] is True
+        denied = client.call_tool("s1", "write")
+        assert denied["success"] is False
+        assert "denied by local policy" in denied["error"]
+        assert client._servers["s1"].calls == [("read", {})]
         assert client._servers["s1"].is_running()
 
     def test_enable_server_unknown_raises(self, monkeypatch):
@@ -245,7 +262,7 @@ class TestMCPRuntimeControl:
 
         registered = client.enable_server(registry, "s1")
 
-        assert set(registered) == {"mcp_s1_read", "mcp_s1_write"}
+        assert registered == ["mcp_s1_read"]
         assert client._servers["s1"].is_running()
 
     def test_unregister_server_tools_without_stopping(self, monkeypatch):
@@ -255,7 +272,7 @@ class TestMCPRuntimeControl:
 
         removed = client.unregister_server_tools(registry, "s1")
 
-        assert set(removed) == {"mcp_s1_read", "mcp_s1_write"}
+        assert removed == ["mcp_s1_read"]
         assert registry._tools == {}
         assert client._servers["s1"].is_running()  # unaffected by this call
 
@@ -275,6 +292,138 @@ def test_parse_server_spec_requires_name_and_command():
         parse_server_spec("|command")
     with _pytest.raises(ValueError):
         parse_server_spec("name|")
+
+
+def test_load_mcp_config_normalizes_charlie_and_opencode_entries(tmp_path):
+    path = tmp_path / "mcp.json"
+    path.write_text(json.dumps({
+        "mcp": {
+            "ai_coding": {
+                "type": "local",
+                "command": ["docker", "mcp", "gateway", "run", "--profile", "ai_coding"],
+                "environment": {"MODE": "local"},
+                "enabled": True,
+                "timeout": 9000000,
+            },
+            "remote": {
+                "type": "remote",
+                "url": "https://remote.test/mcp",
+                "headers": {"Authorization": "Bearer local"},
+                "enabled": True,
+                "timeout_ms": 12000,
+            },
+            "disabled": {"type": "local", "command": ["should", "not", "run"], "enabled": False},
+        },
+        "mcpServers": {
+            "stdio": {"type": "stdio", "command": "python", "args": ["-m", "server"], "timeout": 8},
+            "http": {"type": "streamable-http", "url": "https://native.test/mcp", "timeout": 2.5},
+        },
+        "mcpToolPolicies": {"stdio:read": "ALLOW", "remote:write": "deny"},
+    }), encoding="utf-8")
+
+    servers, policies = load_mcp_config(str(path))
+    by_name = {server.name: server for server in servers}
+
+    assert set(by_name) == {"ai_coding", "remote", "stdio", "http"}
+    assert (by_name["ai_coding"].command, by_name["ai_coding"].args) == (
+        "docker", ["mcp", "gateway", "run", "--profile", "ai_coding"],
+    )
+    assert by_name["ai_coding"].timeout == 9000
+    assert by_name["ai_coding"].env == {"MODE": "local"}
+    assert by_name["remote"].url == "https://remote.test/mcp"
+    assert by_name["remote"].headers == {"Authorization": "Bearer local"}
+    assert by_name["remote"].timeout == 12
+    assert by_name["stdio"].timeout == 8
+    assert by_name["http"].timeout == 2.5
+    assert policies == {"stdio:read": "allow", "remote:write": "deny"}
+
+
+def test_streamable_http_uses_session_and_local_policy(monkeypatch):
+    import httpx
+
+    import charlie.mcp_client as mcp_mod
+
+    requests = []
+    tools = [
+        {"name": "read", "description": "Read", "inputSchema": {"type": "object"},
+         "annotations": {"readOnlyHint": False, "destructiveHint": True}},
+        {"name": "review", "description": "Review", "inputSchema": {"type": "object"},
+         "annotations": {"readOnlyHint": True, "destructiveHint": False}},
+        {"name": "write", "description": "Write", "inputSchema": {"type": "object"},
+         "annotations": {"readOnlyHint": True}},
+    ]
+
+    def handle(request):
+        message = json.loads(request.content) if request.method == "POST" else {}
+        requests.append((request.method, message, request.headers))
+        method = message.get("method")
+        if request.url.path == "/unavailable":
+            return httpx.Response(503)
+        if request.method == "DELETE":
+            return httpx.Response(200)
+        if method == "initialize":
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json", "Mcp-Session-Id": "local-session"},
+                json={"jsonrpc": "2.0", "id": message["id"], "result": {"protocolVersion": "2025-03-26"}},
+            )
+        if method == "notifications/initialized":
+            return httpx.Response(202)
+        if method == "tools/list":
+            payload = {"jsonrpc": "2.0", "id": message["id"], "result": {"tools": tools}}
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                text=f"event: message\ndata: {json.dumps(payload)}\n\n",
+            )
+        if method == "tools/call":
+            payload = {"jsonrpc": "2.0", "id": message["id"], "result": {
+                "content": [{"type": "text", "text": f"{message['params']['name']} result"}],
+            }}
+            return httpx.Response(200, json=payload)
+        return httpx.Response(400)
+
+    real_client = httpx.Client
+
+    def mock_client(**kwargs):
+        return real_client(transport=httpx.MockTransport(handle), **kwargs)
+
+    monkeypatch.setattr(mcp_mod.httpx, "Client", mock_client)
+    client = MCPClient(tool_policies={"demo:read": "allow", "demo:write": "deny"})
+    registry = _FakeRegistry()
+    client.add_server(MCPServerConfig(name="demo", url="https://example.test/mcp"))
+    try:
+        client.start()
+        assert client.health_check() == {"demo": True}
+        assert {tool.name for tool in client.list_tools()} == {"read", "review"}
+        assert client.register_tools_into(registry) == ["mcp_demo_read", "mcp_demo_review"]
+        assert registry._tools["mcp_demo_read"]["risk_class"] == "safe"
+        assert registry._tools["mcp_demo_review"]["risk_class"] == "security_sensitive"
+        read_result = client.call_tool("demo", "read")
+        assert read_result.get("success") is True, read_result
+        assert read_result["result"] == "read result"
+        assert client.call_tool("demo", "review")["success"] is True
+        assert client.call_tool("demo", "write")["success"] is False
+
+        methods = [message.get("method") for method, message, _ in requests if method == "POST"]
+        assert methods == ["initialize", "notifications/initialized", "tools/list", "tools/call", "tools/call"]
+        for method, _, headers in requests[1:]:
+            if method == "POST":
+                assert headers.get("mcp-session-id") == "local-session"
+                assert headers.get("mcp-protocol-version") == "2025-03-26"
+        assert requests[0][2].get("accept") == "application/json, text/event-stream"
+    finally:
+        client.stop()
+    assert requests[-1][0] == "DELETE"
+
+    failed_client = MCPClient()
+    failed_client.add_server(MCPServerConfig(name="offline", url="https://example.test/unavailable"))
+    failed_client.start()
+    details = failed_client.list_servers_detailed()[0]
+    assert failed_client.health_check() == {"offline": False}
+    assert details["status"] == "failed"
+    assert "status 503" in details["error"]
+    failed_client.stop()
 
 
 def test_start_mcp_disabled_registers_nothing():
@@ -303,14 +452,27 @@ def test_start_mcp_registers_into_registry(monkeypatch):
 
     monkeypatch.setattr(mcp_mod.MCPClient, "register_tools_into", _fake_register)
 
-    cfg = SimpleNamespace(mcp_enabled=True, mcp_servers=["files|python -m server"], mcp_config_path="")
+    cfg = SimpleNamespace(
+        mcp_enabled=True,
+        mcp_servers=["files|python -m server"],
+        mcp_config_path="",
+        mcp_read_only_tools=["files:read"],
+    )
     client = start_mcp(cfg)
 
     assert client is not None
-    assert len(fake._tools) == 2
+    assert len(fake._tools) == 1
     names = list(fake._tools.keys())
-    assert names[0].startswith("mcp_files_")
-    assert "read" in names[0] and "write" in names[1]
+    assert names == ["mcp_files_read"]
+    assert fake._tools["mcp_files_read"]["risk_class"] == "safe"
+
+
+def test_config_reads_mcp_read_only_tools_from_env(monkeypatch):
+    from charlie.config import Config
+
+    monkeypatch.setenv("MCP_READ_ONLY_TOOLS", "files:read, notes:list ,")
+
+    assert Config().mcp_read_only_tools == ["files:read", "notes:list"]
 
 
 def test_start_mcp_enabled_without_servers_returns_none():
@@ -344,6 +506,121 @@ for line in sys.stdin:
         print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"pong": True}}))
         sys.stdout.flush()
 """
+
+
+_OPERATION_STUB_SCRIPT = """
+import json, sys
+mode = sys.argv[1]
+for line in sys.stdin:
+    msg = json.loads(line)
+    request_id = msg.get("id")
+    method = msg.get("method")
+    if method == "initialize":
+        response = {"jsonrpc": "2.0", "id": request_id, "result": {"ok": True}}
+    elif method == "tools/list":
+        response = {"jsonrpc": "2.0", "id": request_id, "result": {"tools": [
+            {"name": "read_probe", "description": "Read-only probe", "inputSchema": {"type": "object"}}
+        ]}}
+    elif method == "tools/call" and mode == "rpc_error":
+        response = {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32000, "message": "remote denied"}}
+    elif method == "tools/call" and mode == "is_error":
+        response = {"jsonrpc": "2.0", "id": request_id, "result": {
+            "isError": True, "content": [{"type": "text", "text": "server rejected the read"}]
+        }}
+    elif method == "tools/call":
+        response = {"jsonrpc": "2.0", "id": request_id, "result": {
+            "content": [{"type": "text", "text": "read-only value"}]
+        }}
+    else:
+        continue
+    print(json.dumps(response), flush=True)
+"""
+
+
+async def _execute_local_mcp_probe(mode: str, tmp_path):
+    from charlie.capabilities import capability_index
+    from charlie.config import Config
+    from charlie.core import Brain
+    from charlie.tools import registry
+
+    client = MCPClient(read_only_tools=["g9_stdio:read_probe"])
+    client.add_server(MCPServerConfig(
+        name="g9_stdio",
+        command=sys.executable,
+        args=["-u", "-c", _OPERATION_STUB_SCRIPT, mode],
+        timeout=3.0,
+    ))
+    observed = []
+    brain = None
+    try:
+        client.start()
+        registered = client.register_tools_into(registry)
+        tool_name = "mcp_g9_stdio_read_probe"
+        assert registered == [tool_name]
+        operation = capability_index.get_operation(tool_name)
+        assert operation is not None
+        assert operation.risk_class == "safe"
+        assert registry.get_owner(tool_name) == "mcp"
+
+        brain = Brain(
+            Config(
+                llm_url="http://127.0.0.1:1/v1",
+                llm_model="test",
+                memory_file=str(tmp_path / "MEMORY.md"),
+                user_file=str(tmp_path / "USER.md"),
+                opinions_file=str(tmp_path / "OPINIONS.md"),
+                session_db_path=str(tmp_path / "sessions.db"),
+                world_model_db_path=str(tmp_path / "world-model.db"),
+                memory_graph_db=str(tmp_path / "memory-graph.db"),
+            ),
+            register_panic_hotkey=False,
+            on_operation_result=lambda name, envelope: observed.append((name, envelope)),
+        )
+        result = await brain.execute_tool_operation(
+            tool_name,
+            {},
+            request="Read the local probe",
+            task_id="task-g9",
+            session_id="session-g9",
+            turn_id="turn-g9",
+        )
+        assert observed == [(tool_name, result)]
+        assert result.capability == "mcp"
+        assert result.turn_id == "turn-g9"
+        assert result.task_id == "task-g9"
+        return result
+    finally:
+        if brain is not None:
+            await brain.close()
+        client.remove_server(registry, "g9_stdio")
+
+
+@pytest.mark.asyncio
+async def test_mcp_read_only_result_uses_brain_operation_success_path(tmp_path):
+    from charlie.turn_contracts import ResultStatus
+
+    result = await _execute_local_mcp_probe("success", tmp_path)
+    assert result.status == ResultStatus.COMPLETED.value
+    assert result.result == "read-only value"
+    assert result.verification is None
+    assert result.verification_status is None
+    assert result.errors == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode,error_text", [
+    ("rpc_error", "remote denied"),
+    ("is_error", "server rejected the read"),
+])
+async def test_mcp_errors_become_failed_brain_operation_envelopes(mode, error_text, tmp_path):
+    from charlie.turn_contracts import ResultStatus
+
+    result = await _execute_local_mcp_probe(mode, tmp_path)
+    assert result.status == ResultStatus.FAILED.value
+    assert error_text in result.result
+    assert any(error_text in error for error in result.errors)
+    assert result.verification is None
+    assert result.verification_status is None
 
 
 class TestManagedServerSingleReader:

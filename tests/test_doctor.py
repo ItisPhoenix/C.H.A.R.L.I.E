@@ -16,7 +16,7 @@ from charlie.subsystem_health import HealthRegistry, HealthStatus
 from charlie.task_journal import TaskJournal
 
 
-@pytest.mark.parametrize("check", ["event_bus", "vision_ocr", "terminal_subsystem", "subsystem_health"])
+@pytest.mark.parametrize("check", ["event_bus", "vision_ocr", "subsystem_health"])
 def test_doctor_never_reports_missing_runtime_evidence_as_ok(check):
     inspector = SimpleNamespace(get_health_info=lambda: {}, get_subsystem_info=lambda: {})
     result = getattr(CharlieDoctor(introspector=inspector), f"_check_{check}")()
@@ -224,8 +224,8 @@ def test_doctor_repair_circuit_breaker_and_bounded_retries(mock_doctor_env):
     assert "circuit breaker" in res["message"].lower() or "too many failed" in res["message"].lower()
 
 
-def test_doctor_report_serialization_and_cli(mock_doctor_env):
-    """Verify Doctor report converts to dict and CLI formatting works cleanly."""
+def test_doctor_report_serialization_and_formatting(mock_doctor_env):
+    """Verify Doctor report converts to dict and formats cleanly."""
     doctor, _, _, _, _ = mock_doctor_env
     report = doctor.diagnose()
 
@@ -233,6 +233,6 @@ def test_doctor_report_serialization_and_cli(mock_doctor_env):
     assert "checks" in rep_dict
     assert rep_dict["total_checks"] > 10
 
-    cli_text = doctor.format_cli_report(report)
-    assert "CHARLIE DOCTOR" in cli_text
-    assert "Evidence:" in cli_text
+    report_text = doctor.format_report(report)
+    assert "CHARLIE DOCTOR" in report_text
+    assert "Evidence:" in report_text

@@ -1,7 +1,7 @@
 """Incremental CodeIndex for Charlie V1 repository code introspection.
 
 Provides deterministic, AST-grounded indexing for Charlie's Python backend
-and TypeScript/React source with incremental refresh, path-safe excerpts,
+and typed source with incremental refresh, path-safe excerpts,
 symbol discovery, and secret file exclusion.
 """
 
@@ -120,7 +120,7 @@ class FileIndexInfo:
 
 
 class CodeIndex:
-    """Incremental, AST-grounded repository index for Charlie's Python and TypeScript code."""
+    """Incremental, AST-grounded repository index for Charlie source code."""
 
     def __init__(self, repo_root: Optional[Path | str] = None) -> None:
         if repo_root is None:
@@ -362,7 +362,7 @@ class CodeIndex:
                 )
                 continue
 
-            # 5. Const declarations (React.FC, create Zustand store, hooks)
+            # 5. Const declarations and factory-style state helpers
             m = re_const.match(line_s)
             if m:
                 name = m.group(1)

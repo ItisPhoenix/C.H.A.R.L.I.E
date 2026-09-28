@@ -13,6 +13,8 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+.pytest-*/
+.pytest_*/
 .ruff_cache/
 .mypy_cache/
 
@@ -68,6 +70,8 @@ temp/
 .cache/
 .tempmediaStorage/
 .codex-pytest-tmp/
+.codex-pytest-*/
+.uv-cache*/
 .codex-uv-cache/
 .coverage
 coverage/
@@ -86,6 +90,7 @@ voicedock-preview.html
 .agents/
 requirements.txt
 plans/
+mcp_config.json
 
 # === Personal / project docs excluded from git ===
 OPINIONS.md

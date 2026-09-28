@@ -2,7 +2,6 @@
 
 
 import pytest
-from starlette.testclient import TestClient
 
 from charlie.geo import geo_service
 from charlie.geo.geocoding.nominatim import NominatimProvider
@@ -13,8 +12,7 @@ from charlie.geo.intelligence.cyber import (
     OfflineIPGeolocationProvider,
 )
 from charlie.geo.routing.osrm import OSRMProvider
-from charlie.geo.tiles.pmtiles import PMTILES_HEADER_SIZE, PMTILES_MAGIC, PMTILES_VERSION, PMTilesManager
-from charlie.web_server import app
+from charlie.geo.tiles.pmtiles import PMTilesManager
 
 
 @pytest.mark.asyncio
@@ -171,55 +169,6 @@ def test_pmtiles_v3_header_inspection_and_security():
     assert pm_manager.resolve_safe_path("../../../etc/passwd") is None
     assert pm_manager.resolve_safe_path("..\\..\\Windows\\win.ini") is None
     assert pm_manager.resolve_safe_path(sample["name"]) is not None
-
-
-def test_pmtiles_http_range_endpoint():
-    """Verify FastAPI /api/geo/pmtiles/{archive_name} endpoint with HTTP Range requests."""
-    client = TestClient(app)
-
-    # 1. HEAD request
-    head_resp = client.head("/api/geo/pmtiles/sample_regional.pmtiles")
-    assert head_resp.status_code == 200
-    assert "content-length" in head_resp.headers
-    total_size = int(head_resp.headers["content-length"])
-    assert total_size >= PMTILES_HEADER_SIZE
-    assert head_resp.headers.get("accept-ranges") == "bytes"
-
-    # 2. Valid Range request for 127-byte header (bytes=0-126)
-    range_resp = client.get(
-        "/api/geo/pmtiles/sample_regional.pmtiles",
-        headers={"Range": "bytes=0-126"},
-    )
-    assert range_resp.status_code == 206
-    assert len(range_resp.content) == 127
-    assert range_resp.headers.get("content-range") == f"bytes 0-126/{total_size}"
-    # Verify magic bytes in range response
-    assert range_resp.content[0:7] == PMTILES_MAGIC
-    assert range_resp.content[7] == PMTILES_VERSION
-
-    # 3. Suffix Range request (last 50 bytes: bytes=-50)
-    suffix_resp = client.get(
-        "/api/geo/pmtiles/sample_regional.pmtiles",
-        headers={"Range": "bytes=-50"},
-    )
-    assert suffix_resp.status_code == 206
-    assert len(suffix_resp.content) == 50
-
-    # 4. Open-ended Range request (bytes=100-)
-    open_resp = client.get(
-        "/api/geo/pmtiles/sample_regional.pmtiles",
-        headers={"Range": "bytes=100-"},
-    )
-    assert open_resp.status_code == 206
-    assert len(open_resp.content) == total_size - 100
-
-    # 5. Invalid Range (416 Range Not Satisfiable)
-    invalid_resp = client.get(
-        "/api/geo/pmtiles/sample_regional.pmtiles",
-        headers={"Range": f"bytes={total_size + 100}-{total_size + 200}"},
-    )
-    assert invalid_resp.status_code == 416
-    assert invalid_resp.headers.get("content-range") == f"bytes */{total_size}"
 
 
 @pytest.mark.asyncio

@@ -236,6 +236,11 @@ class TaskJournal:
     def max_terminal_records(self) -> int:
         return self._max_terminal_records
 
+    def set_on_change(self, callback: Optional[Callable[[TaskRecord], None]]) -> None:
+        """Attach a non-blocking observer for runtime task projections."""
+        with self._lock:
+            self._on_change = callback
+
     def create_task(
         self,
         title: str,

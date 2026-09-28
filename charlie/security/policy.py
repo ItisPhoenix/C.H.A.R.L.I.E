@@ -1,7 +1,6 @@
 """Deterministic tool-call policy gate. Additive to the existing
 gated-keyword check in core.py's _exec_one -- never replaces it. Routes
-through the same Brain.request_tool_approval channel (WS/Telegram/voice), so
-there's no new UI surface.
+through the same Brain.request_tool_approval channel (Telegram/voice).
 """
 
 import difflib
@@ -17,7 +16,7 @@ _FUZZY_GATE_THRESHOLD = 0.85
 _FUZZY_LOG_THRESHOLD = 0.70
 _FUZZY_MIN_ARG_LEN = 8  # shorter strings match nearly everything, not worth checking
 
-_PATH_ARG_TOOLS = ("file_read", "file_write")
+_PATH_ARG_TOOLS = ("file_read", "file_write", "download_public_pdf")
 _INJECTION_CHECK_TOOLS = ("shell_execute", "browser_task")
 
 
@@ -70,9 +69,8 @@ def check_tool_call(
     """Pre-flight policy check for one tool call. Returns whether it needs
     explicit user approve/decline, and why.
 
-    1. Path containment: file_read/file_write against a sensitive path
-       (re-wires charlie.tools.get_path_gate_reason, previously computed but
-       never actually checked by either tool).
+    1. File paths: automatic local-folder access, overwrite approval, and
+       sensitive-path approval through charlie.tools.get_path_gate_reason.
     2. Injected-command heuristic: shell_execute/browser_task whose argument
        closely matches text from a recent tool_external result in this turn
        -- catches "the page says run X" injection that a keyword list can't,
@@ -80,7 +78,7 @@ def check_tool_call(
     """
     if tool_name in _PATH_ARG_TOOLS:
         path = arguments.get("path", "")
-        gate_reason = get_path_gate_reason(path)
+        gate_reason = get_path_gate_reason(path, tool_name=tool_name)
         if gate_reason:
             return PolicyResult(True, gate_reason)
 

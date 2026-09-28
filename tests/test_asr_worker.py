@@ -71,6 +71,17 @@ def test_real_transcription_uses_configured_vad_parameters():
     assert kwargs["condition_on_previous_text"] is True
 
 
+def test_real_transcription_uses_capture_vad_threshold_override():
+    kwargs = _build_transcribe_kwargs(
+        is_warmup=False,
+        flags={"capture": {"vad_threshold": 0.032}},
+        default_language="en",
+        asr_config={"vad_threshold": 0.05},
+    )
+
+    assert kwargs["vad_parameters"]["threshold"] == 0.032
+
+
 def test_warmup_disables_vad_filter():
     kwargs = _build_transcribe_kwargs(
         is_warmup=True, flags={}, default_language="en", asr_config=None

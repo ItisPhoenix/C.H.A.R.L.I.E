@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 import time
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
@@ -146,23 +145,21 @@ class CharlieDoctor:
         checks.append(self._check_mcp_subsystem())
         # 9. Memory Subsystem
         checks.append(self._check_memory_subsystem())
-        # 10. Terminal Subsystem
-        checks.append(self._check_terminal_subsystem())
-        # 11. Browser Subsystem
+        # 10. Browser Subsystem
         checks.append(self._check_browser_subsystem())
-        # 12. Desktop Subsystem
+        # 11. Desktop Subsystem
         checks.append(self._check_desktop_subsystem())
-        # 13. Vision & OCR
+        # 12. Vision & OCR
         checks.append(self._check_vision_ocr())
-        # 14. Voice Subsystem
+        # 13. Voice Subsystem
         checks.append(self._check_voice_subsystem())
-        # 15. Data Directories
+        # 14. Data Directories
         checks.append(self._check_data_directories())
-        # 16. Subsystem Health Transitions
+        # 15. Subsystem Health Transitions
         checks.append(self._check_subsystem_health())
-        # 17. Recovery State
+        # 16. Recovery State
         checks.append(self._check_recovery_state())
-        # 18. Extension Registry
+        # 17. Extension Registry
         checks.append(self._check_extensions_registry())
 
         warnings = [c for c in checks if c.status == CheckStatus.WARNING]
@@ -487,21 +484,6 @@ class CharlieDoctor:
             evidence=f"{evidence} {total_items} managed item(s) reported.",
         )
 
-    def _check_terminal_subsystem(self) -> DiagnosticCheck:
-        subsys = self._introspector.get_subsystem_info()
-        t_info = subsys.get("terminal", {})
-        conpty = t_info.get("has_conpty", False)
-        available = t_info.get("available") is True
-
-        return DiagnosticCheck(
-            check_id="terminal_subsystem",
-            category="terminal",
-            status=CheckStatus.INFO if available else CheckStatus.WARNING,
-            severity=CheckSeverity.LOW,
-            summary="Terminal dependencies available" if available else "Terminal dependencies unavailable",
-            evidence=f"Module loaded: {available}; ConPTY support: {conpty}. Shell execution unverified.",
-        )
-
     def _check_browser_subsystem(self) -> DiagnosticCheck:
         subsys = self._introspector.get_subsystem_info()
         b_info = subsys.get("browser", {})
@@ -750,11 +732,11 @@ class CharlieDoctor:
             return {"success": False, "repair_id": repair_id, "message": f"Repair failed: {e}"}
 
     # -------------------------------------------------------------------------
-    # CLI Formatting
+    # Report formatting
     # -------------------------------------------------------------------------
 
-    def format_cli_report(self, report: DoctorReport) -> str:
-        """Format doctor report for terminal presentation."""
+    def format_report(self, report: DoctorReport) -> str:
+        """Format a concise runtime health report."""
         lines = [
             "=" * 64,
             " CHARLIE DOCTOR — RUNTIME HEALTH DIAGNOSTICS",
@@ -784,15 +766,3 @@ class CharlieDoctor:
         )
         lines.append("=" * 64)
         return "\n".join(lines)
-
-
-def run_doctor_cli() -> int:
-    """Entry point for CLI `python -m charlie.doctor` or `charlie doctor`."""
-    doctor = CharlieDoctor()
-    report = doctor.diagnose()
-    print(doctor.format_cli_report(report))
-    return 0 if report.is_healthy else 1
-
-
-if __name__ == "__main__":
-    sys.exit(run_doctor_cli())

@@ -19,14 +19,22 @@ _SOCIAL_CONVERSATION_SIGNALS = re.compile(
     r"what(?:'s|\s+is)\s+up\s+with\s+you\b|how\s+are\s+things\s+going\b)",
     re.IGNORECASE,
 )
+_LOCAL_VERSION_CONTEXT = re.compile(
+    r"\b(?:installed|locally|on this (?:pc|computer|machine|device)|on my (?:pc|computer|machine|device))\b",
+    re.IGNORECASE,
+)
 _RESEARCH_SIGNALS = re.compile(
     r"\b(research|investigate|deep research|in[- ]depth|compare|comparison|thorough|thoroughly|"
     r"look into|analyze current|multi[- ]source|multi[- ]step)\b",
     re.IGNORECASE,
 )
 _SUSTAINED_RESEARCH_SIGNALS = re.compile(
-    r"\b(?:research|investigate|deep\s+research|in[- ]depth|thorough(?:ly)?|"
+    r"\b(?:investigate|deep\s+research|in[- ]depth|thorough(?:ly)?|"
     r"multi[- ]source|multi[- ]step|look\s+into|analyze\s+current|comparison|compare)\b",
+    re.IGNORECASE,
+)
+_BACKGROUND_TASK_REQUEST = re.compile(
+    r"\b(?:start|create|run|schedule)\s+(?:a\s+)?background\s+(?:task|job)\b",
     re.IGNORECASE,
 )
 _BRIEFING_SIGNALS = re.compile(
@@ -58,7 +66,7 @@ class ResearchDecision:
 
 
 def is_briefing_query(query: str) -> bool:
-    """Identify briefing intent consistently across routing and presentation."""
+    """Identify briefing intent consistently across routing and research."""
     return bool(_BRIEFING_SIGNALS.search(query.strip()))
 
 
@@ -77,6 +85,8 @@ def choose_mode(query: str, requested: str | ResearchMode | None = None) -> Rese
     text = query.strip()
     if explicit is not None:
         return ResearchDecision(True, explicit, "explicit mode")
+    if _BACKGROUND_TASK_REQUEST.search(text) and not _RESEARCH_SIGNALS.search(text):
+        return ResearchDecision(False, None, "explicit background task request")
     if _INTERACTIVE_SIGNALS.search(text) and re.search(r"\bon\s+(youtube|amazon|x|twitter)\b", text, re.I):
         return ResearchDecision(False, None, "interactive site task", interactive=True)
     if is_briefing_query(text):
@@ -84,6 +94,8 @@ def choose_mode(query: str, requested: str | ResearchMode | None = None) -> Rese
     if _RESEARCH_SIGNALS.search(text):
         mode = ResearchMode.DEEP if re.search(r"deep|in[- ]depth|thorough", text, re.I) else ResearchMode.STANDARD
         return ResearchDecision(True, mode, "explicit research intent")
+    if re.search(r"\bversion\b", text, re.IGNORECASE) and _LOCAL_VERSION_CONTEXT.search(text):
+        return ResearchDecision(False, None, "local installed-version lookup")
     if _SOCIAL_CONVERSATION_SIGNALS.search(text):
         return ResearchDecision(False, None, "social conversation is not a live-web request")
     if _STABLE_EXPLANATION.search(text) and not _CURRENT_SIGNALS.search(text):

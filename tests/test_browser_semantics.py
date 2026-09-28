@@ -183,6 +183,20 @@ def test_intent_slots_and_http_resolution_are_environment_driven():
     assert resolve_website_url("my desktop") is None
 
 
+def test_explicit_url_path_does_not_become_a_browser_filter():
+    opened = intent.parse_browser_intent("Open https://docs.python.org/3/ in Charlie's browser.")
+    assert opened.operation == "OPEN"
+    assert opened.constraints == ()
+
+    filtered = intent.parse_browser_intent(
+        "Open https://docs.python.org/3/ in Charlie's browser and filter results under 5 minutes."
+    )
+    assert filtered.operation == "FILTER"
+    assert [(item.attribute, item.operator, item.value) for item in filtered.constraints] == [
+        ("duration", "lte", "5 MINUTES")
+    ]
+
+
 def test_price_constraints_choose_min_or_max_control_from_rendered_evidence():
     minimum = _PriceSelect(["Min", "₹20,000", "₹40,000", "₹75,000"], "Min")
     maximum = _PriceSelect(["₹20,000", "₹40,000", "₹75,000", "₹75,000+"], "₹75,000+")

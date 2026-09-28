@@ -2,10 +2,7 @@
 import asyncio
 import concurrent.futures
 import dataclasses
-import errno
-import http.client
 import io
-import inspect
 import json
 import logging
 import logging.handlers
@@ -23,13 +20,26 @@ from charlie.runtime import configure as _configure_platform
 
 _configure_platform()
 import subprocess
-import tempfile
 import uuid
 
 from charlie.text_utils import normalize_app_list as _normalize_app_list
 
 
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+from charlie.logging_policy import (
+    NOISY_LOGGER_PREFIXES,
+    ConciseConsoleFormatter,
+    ConsolePolicyFilter,
+    RedactingFormatter,
+    env_flag,
+    parse_log_level,
+)
+
+if os.getenv("CHARLIE_TEST_MODE", "").lower() != "true":
+    load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=True)
 
 
 # 1. SETUP ENVIRONMENT FIRST
@@ -77,18 +87,24 @@ os.makedirs("logs", exist_ok=True)
 LOG_FILE = "logs/charlie.log"
 
 # 2. CONFIGURE SPLIT LOGGING
+file_log_level = parse_log_level(os.getenv("FILE_LOG_LEVEL"), logging.DEBUG)
+console_log_level = parse_log_level(os.getenv("CONSOLE_LOG_LEVEL"), logging.INFO)
+console_diagnostics = env_flag("CONSOLE_DIAGNOSTICS")
 root_logger = logging.getLogger()
-root_logger.setLevel(logging.DEBUG)
+root_logger.setLevel(min(file_log_level, console_log_level))
 
-file_formatter = logging.Formatter("%(asctime)s [%(name)s] [%(levelname)s] %(funcName)s:%(lineno)d - %(message)s")
+file_formatter = RedactingFormatter(
+    "%(asctime)s [%(name)s] [%(levelname)s] %(funcName)s:%(lineno)d - %(message)s"
+)
 file_handler = logging.handlers.RotatingFileHandler(
     LOG_FILE, encoding="utf-8", maxBytes=20 * 1024 * 1024, backupCount=5
 )
+file_handler.setLevel(file_log_level)
 file_handler.setFormatter(file_formatter)
 
-console_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+console_formatter = ConciseConsoleFormatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(logging.INFO)
+console_handler.setLevel(console_log_level)
 console_handler.setFormatter(console_formatter)
 
 root_logger.handlers = []
@@ -97,24 +113,25 @@ from charlie.log_redaction import SensitiveDataFilter, redact_sensitive_text
 redaction_filter = SensitiveDataFilter()
 file_handler.addFilter(redaction_filter)
 console_handler.addFilter(redaction_filter)
+console_handler.addFilter(ConsolePolicyFilter(console_log_level, diagnostics=console_diagnostics))
 root_logger.addHandler(file_handler)
 root_logger.addHandler(console_handler)
-for _logger_name in ("httpcore", "httpx", "asyncio", "comtypes", "trafilatura"):
-    logging.getLogger(_logger_name).setLevel(logging.WARNING)
+for _logger_name in NOISY_LOGGER_PREFIXES:
+    # Keep dependency records available to the DEBUG file handler. The console
+    # policy, not logger-level suppression, decides what users see.
+    logging.getLogger(_logger_name).setLevel(logging.DEBUG)
 
 # 3. NOW IMPORT CHARLIE MODULES
 from charlie import background_task, telemetry
 from charlie.errors import ErrorClass, classify_exception
 from charlie.config import Config, config
-from charlie.core import Brain, OperationCancelled, _await_executor_quiescence
+from charlie.core import Brain
 from charlie.extensions import (
     ExtensionRuntimeRegistry,
     RuntimeExtension,
     build_skill_card,
     canonical_extension_request_fingerprint,
 )
-from charlie.presentation_control import PresentationRequest, get_presentation_controller
-from charlie.surface_intent import match_surface_request
 from charlie.events import EventMeta, EventSource, EventType
 from charlie.ipc import EventBus
 from charlie.memory_graph import MemoryGraph
@@ -128,34 +145,16 @@ from charlie.personality import (
 from charlie.session_store import (
     SessionConflictError,
     SessionNotFoundError,
-    SessionOutcomeUnknownError,
     SessionStore,
-    SessionStoreError,
-    canonical_session_request_fingerprint,
 )
-from charlie.privacy_service import (
-    PRIVACY_OPERATIONS,
-    PRIVACY_PURGE_CATEGORIES,
-    PrivacyService,
-    canonical_privacy_request_fingerprint,
-)
+from charlie.results import ResultsStore
 from charlie.settings_service import (
-    SettingValidationError,
     SettingsService,
-    canonical_settings_request_fingerprint,
 )
 from charlie.state import StateMachine
 from charlie.subsystem_health import HealthRegistry, HealthStatus, RuntimeStatus
-from charlie.task_journal import TaskOrigin, get_task_journal
-from charlie.turn_contracts import ExecutionPolicy, IntentDecision, ResultEnvelope, ResultStatus, TurnRequest
-from charlie.presentation import (
-    AnchorTarget,
-    AttentionLevel as PresentationAttention,
-    DismissPolicy,
-    PresentationIntent,
-    PresentationKind,
-    PreferredZone,
-)
+from charlie.task_journal import TaskOrigin, TaskStatus, get_task_journal
+from charlie.turn_contracts import ExecutionPolicy, IntentDecision, ResultEnvelope, TurnRequest
 from charlie.voice import VoiceEngine
 from charlie.attention import AttentionLevel
 from charlie.watchers import (
@@ -195,14 +194,30 @@ _NON_CANCELLABLE_FOREGROUND_TOOLS = frozenset(
 )
 _LAUNCH_ID: str = str(uuid.uuid4())  # sidebar filters "this launch" vs "all history" by this
 config.charlie_launch_id = _LAUNCH_ID
+
+_runtime_health = HealthRegistry(
+    (
+        "brain",
+        "llm",
+        "memory",
+        "plugins",
+        "mcp",
+        "telegram",
+        "voice",
+        "voice_capture",
+        "asr",
+        "watchers",
+        "background_tasks",
+        "browser",
+    ),
+    launch_id=_LAUNCH_ID,
+)
+
 # Bounded replay/idempotency window; evicted IDs may be treated as new requests.
-_TERMINAL_RESULT_CACHE_MAX = 512
 _MEDIA_RESULT_CACHE_MAX = 512
 _CALENDAR_RESULT_CACHE_MAX = 512
-_SESSION_RESULT_CACHE_MAX = 512
 _SETTINGS_RESULT_CACHE_MAX = 512
 _EXTENSION_RESULT_CACHE_MAX = 512
-_PRIVACY_RESULT_CACHE_MAX = 512
 from charlie.runtime_identity import git_build_identity
 
 _SOURCE_IDENTITY, _SOURCE_DIRTY = git_build_identity(Path(__file__).resolve().parent)
@@ -255,232 +270,18 @@ def _allocate_turn_request(text: str, session_id: str, channel: str) -> TurnRequ
     return TurnRequest.allocate(text, session_id, channel)
 
 
-_TERMINAL_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+def _should_queue_active_turn(turn_active: bool, approval_pending: bool, channel: str) -> bool:
+    """Queue Telegram messages while an approval owns the active turn."""
+    return turn_active and (not approval_pending or channel == "telegram")
 
 
-def _normalize_terminal_request_id(value: Any) -> str:
-    """Keep valid web correlation IDs stable and replace malformed values."""
-    if isinstance(value, str):
-        candidate = value.strip()
-        if _TERMINAL_REQUEST_ID_RE.fullmatch(candidate):
-            return candidate
-    return uuid.uuid4().hex
-
-
-def _terminal_request_fingerprint(terminal_session_id: str, command: str) -> tuple[str, str]:
-    """Bind a request ID to the terminal operation it first represents."""
-    return terminal_session_id, command
-
-
-def _terminal_command_result_payload(
-    request_id: str,
-    terminal_session_id: str,
-    command: str,
-    envelope: Any,
-) -> dict[str, Any]:
-    result = envelope.to_dict()
-    approval_status = str((result.get("data") or {}).get("approval_status", "not_required"))
-    status = str(result.get("status", "failed"))
-    return {
-        "request_id": request_id,
-        "terminal_session_id": terminal_session_id,
-        "command": command,
-        "approved": approval_status == "approved",
-        "approval_status": approval_status,
-        "status": status,
-        "result": result,
-    }
-
-
-def _cache_terminal_result(
-    result_cache: OrderedDict[str, dict[str, Any]],
-    request_id: str,
-    payload: dict[str, Any],
-) -> None:
-    result_cache[request_id] = payload
-    result_cache.move_to_end(request_id)
-    while len(result_cache) > _TERMINAL_RESULT_CACHE_MAX:
-        result_cache.popitem(last=False)
-
-
-def _terminal_request_id_conflict_payload(
-    request_id: str,
-    terminal_session_id: str,
-    command: str,
-) -> dict[str, Any]:
-    """Report correlation misuse without associating an unrelated result."""
-    message = "request_id is already bound to a different terminal operation"
-    return {
-        "request_id": request_id,
-        "terminal_session_id": terminal_session_id,
-        "command": command,
-        "approved": False,
-        "approval_status": "conflict",
-        "status": "request_id_conflict",
-        "result": {"status": "request_id_conflict", "reason": message},
-        "request_id_conflict": True,
-        "error": message,
-    }
-
-
-_terminal_session_result_waiters: dict[str, Any] = {}
-
-
-def _resolve_terminal_session_result(payload: object) -> bool:
-    """Resolve only the waiter bound to the exact terminal request/session."""
-
-    if not isinstance(payload, dict):
-        return False
-    request_id = payload.get("request_id")
-    if not isinstance(request_id, str) or not request_id:
-        return False
-    entry = _terminal_session_result_waiters.get(request_id)
-    if entry is None:
-        return False
-    if isinstance(entry, tuple) and len(entry) == 3:
-        waiter, expected_session_id, expected_command = entry
-        if payload.get("terminal_session_id") != expected_session_id or payload.get("command") != expected_command:
-            return False
-    else:
-        waiter = entry
-    if waiter.done():
-        return False
-    waiter.set_result(dict(payload))
-    return True
-
-
-def _cache_media_result(
-    result_cache: OrderedDict[str, dict[str, Any]],
-    request_id: str,
-    payload: dict[str, Any],
-    fingerprint_cache: Optional[dict[str, str]] = None,
-    fingerprint: Optional[tuple[Any, ...]] = None,
-) -> None:
-    result_cache[request_id] = payload
-    result_cache.move_to_end(request_id)
-    if fingerprint_cache is not None and fingerprint is not None:
-        fingerprint_cache[request_id] = fingerprint
-    while len(result_cache) > _MEDIA_RESULT_CACHE_MAX:
-        evicted_id, _ = result_cache.popitem(last=False)
-        if fingerprint_cache is not None:
-            fingerprint_cache.pop(evicted_id, None)
-
-
-def _media_request_id_conflict_payload(
-    request_id: str,
-    payload: dict[str, Any],
-    fingerprint: str,
-) -> dict[str, Any]:
-    message = "request_id is already bound to a different media operation"
-    return {
-        "request_id": request_id,
-        "operation": payload.get("operation"),
-        "request_fingerprint": fingerprint,
-        "status": "request_id_conflict",
-        "result": {"status": "request_id_conflict", "reason": message},
-        "request_id_conflict": True,
-        "error": message,
-    }
-
-
-def _cache_calendar_result(
-    result_cache: OrderedDict[str, dict[str, Any]],
-    request_id: str,
-    payload: dict[str, Any],
-    fingerprint_cache: dict[str, str],
-    fingerprint: str,
-) -> None:
-    result_cache[request_id] = payload
-    result_cache.move_to_end(request_id)
-    fingerprint_cache[request_id] = fingerprint
-    while len(result_cache) > _CALENDAR_RESULT_CACHE_MAX:
-        evicted_id, _ = result_cache.popitem(last=False)
-        fingerprint_cache.pop(evicted_id, None)
-
-
-def _calendar_request_id_conflict_payload(
-    request_id: str,
-    operation: Any,
-    fingerprint: str,
-) -> dict[str, Any]:
-    message = "request_id is already bound to a different calendar operation"
-    return {
-        "request_id": request_id,
-        "request_fingerprint": fingerprint,
-        "operation": operation,
-        "status": "request_id_conflict",
-        "result": {"status": "request_id_conflict", "reason": message},
-        "request_id_conflict": True,
-        "error": message,
-    }
-
-
-def _cache_settings_result(
-    result_cache: OrderedDict[str, dict[str, Any]],
-    request_id: str,
-    payload: dict[str, Any],
-    fingerprint_cache: dict[str, str],
-    fingerprint: str,
-) -> None:
-    result_cache[request_id] = payload
-    result_cache.move_to_end(request_id)
-    fingerprint_cache[request_id] = fingerprint
-    while len(result_cache) > _SETTINGS_RESULT_CACHE_MAX:
-        evicted_id, _ = result_cache.popitem(last=False)
-        fingerprint_cache.pop(evicted_id, None)
-
-
-def _settings_request_id_conflict_payload(
-    request_id: str,
-    operation: Any,
-    fingerprint: str,
-) -> dict[str, Any]:
-    message = "request_id is already bound to a different settings operation"
-    return {
-        "request_id": request_id,
-        "request_fingerprint": fingerprint,
-        "operation": operation,
-        "status": "request_id_conflict",
-        "result": {"ok": False, "reason": message},
-        "request_id_conflict": True,
-        "error": message,
-    }
-
-
-def _log_received_web_command(command: Any) -> None:
-    """Log web commands without serializing settings values or secrets."""
-    if isinstance(command, dict) and command.get("type") == "settings_operation":
-        payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
-        updates = payload.get("updates") if isinstance(payload.get("updates"), dict) else {}
-        logger.debug(
-            "ZMQ received settings command: operation=%s request_id=%s fingerprint=%s fields=%s",
-            payload.get("operation"),
-            payload.get("request_id"),
-            canonical_settings_request_fingerprint(str(payload.get("operation") or "invalid"), updates),
-            sorted(str(key) for key in updates),
-        )
-        return
-    if isinstance(command, dict) and command.get("type") == "extension_operation":
-        payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
-        logger.debug(
-            "ZMQ received extension command: operation=%s request_id=%s kind=%s name=%s fingerprint=%s",
-            payload.get("operation"),
-            payload.get("request_id"),
-            payload.get("kind"),
-            payload.get("name"),
-            canonical_extension_request_fingerprint(str(payload.get("operation") or "invalid"), payload),
-        )
-        return
-    if isinstance(command, dict) and command.get("type") == "privacy_operation":
-        payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
-        logger.debug(
-            "ZMQ received privacy command: operation=%s request_id=%s fingerprint=%s",
-            payload.get("operation"),
-            payload.get("request_id"),
-            canonical_privacy_request_fingerprint(str(payload.get("operation") or "invalid"), payload),
-        )
-        return
-    logger.debug("ZMQ received command: %s", command)
+def _telegram_approval_reason(tool_name: str, risk_class: Any) -> str:
+    risk = str(getattr(risk_class, "value", risk_class)).casefold()
+    if tool_name == "shell_execute":
+        if risk in {"destructive", "irreversible"}:
+            return "This command may change or stop something on your PC. Please review it before approving."
+        return "I can't confirm this command is read-only. Please review it before approving."
+    return "This action may change something on your PC. Please review it before approving."
 
 
 def _reload_plugin_tools_state(
@@ -620,1434 +421,83 @@ def _reload_callback_outcome(outcome: Any) -> tuple[bool, str]:
     return bool(outcome), ""
 
 
-async def _handle_settings_operation_request(
-    settings_service: Any,
-    event_bus: Any,
-    payload: Any,
-    *,
-    result_cache: Optional[OrderedDict[str, dict[str, Any]]] = None,
-    in_flight: Optional[dict[str, Any]] = None,
-    fingerprint_cache: Optional[dict[str, str]] = None,
-    reload_handlers: Optional[dict[str, Callable[[], Any]]] = None,
-    post_reload: Optional[Callable[[], Any]] = None,
-    operation_lock: Optional[asyncio.Lock] = None,
-) -> dict[str, Any] | None:
-    """Own correlated settings persistence and targeted reload requests."""
-    payload = payload if isinstance(payload, dict) else {}
-    result_cache = result_cache if result_cache is not None else OrderedDict()
-    in_flight = in_flight if in_flight is not None else {}
-    fingerprint_cache = fingerprint_cache if fingerprint_cache is not None else {}
-    reload_handlers = reload_handlers or {}
-    request_id = _normalize_terminal_request_id(payload.get("request_id"))
-    operation = payload.get("operation")
-    updates = payload.get("updates", {}) if operation == "update" else {}
-    fingerprint = canonical_settings_request_fingerprint(
-        str(operation or "invalid"), updates if isinstance(updates, dict) else {}
-    )
-
-    async def _publish(
-        result_payload: dict[str, Any],
-        *,
-        rationale: str,
-        cache: bool = True,
-    ) -> dict[str, Any]:
-        if cache:
-            _cache_settings_result(result_cache, request_id, result_payload, fingerprint_cache, fingerprint)
-        await event_bus.emit(
-            "settings_operation_result",
-            result_payload,
-            meta=EventMeta(source=EventSource.BRAIN, task_id=request_id, rationale=rationale),
-        )
-        return result_payload
-
-    supplied_fingerprint = payload.get("request_fingerprint")
-    if not isinstance(supplied_fingerprint, str) or supplied_fingerprint != fingerprint:
-        return await _publish(
-            _settings_request_id_conflict_payload(request_id, operation, fingerprint),
-            rationale="invalid settings request fingerprint",
-            cache=False,
-        )
-
-    cached = result_cache.get(request_id)
-    if cached is not None:
-        if fingerprint_cache.get(request_id) != fingerprint:
-            return await _publish(
-                _settings_request_id_conflict_payload(request_id, operation, fingerprint),
-                rationale="settings request ID conflicts with completed operation",
-                cache=False,
-            )
-        return await _publish(cached, rationale="settings result replayed from main idempotency cache")
-
-    existing_entry = in_flight.get(request_id)
-    existing = existing_entry[0] if isinstance(existing_entry, tuple) else existing_entry
-    existing_fingerprint = (
-        existing_entry[1]
-        if isinstance(existing_entry, tuple) and len(existing_entry) == 2
-        else None
-    )
-    current = asyncio.current_task()
-    if existing is not None and existing is not current and not existing.done():
-        if existing_fingerprint != fingerprint:
-            return await _publish(
-                _settings_request_id_conflict_payload(request_id, operation, fingerprint),
-                rationale="settings request ID conflicts with in-flight operation",
-                cache=False,
-            )
-        await asyncio.shield(existing)
-        cached = result_cache.get(request_id)
-        if cached is not None:
-            return await _publish(cached, rationale="settings result replayed to duplicate waiter")
-        return None
-
-    if current is not None:
-        in_flight[request_id] = (current, fingerprint)
-    lock_acquired = False
-    if operation_lock is not None:
-        await operation_lock.acquire()
-        lock_acquired = True
-
-    result_payload: dict[str, Any] = {
-        "request_id": request_id,
-        "request_fingerprint": fingerprint,
-        "operation": operation,
-        "status": "failed",
-        "result": {"ok": False, "reason": "Invalid settings operation request."},
-    }
-    try:
-        if operation == "update":
-            if not isinstance(updates, dict):
-                raise SettingValidationError("Settings updates must be an object.")
-            update_result = settings_service.apply_updates(updates)
-            result_payload.update(
-                {
-                    "status": "completed",
-                    "result": {"ok": True, **update_result},
-                }
-            )
-            await _publish_settings_snapshot(
-                event_bus,
-                settings_service,
-                rationale="settings persisted and runtime projection updated",
-            )
-        elif operation == "reload":
-            reloaded_tiers: list[str] = []
-            failed_tiers: dict[str, str] = {}
-            pending = settings_service.pending_reload_work()
-            for tier in sorted(pending):
-                if tier == "process":
-                    continue
-                expected_values = pending[tier]
-                handler = reload_handlers.get(tier)
-                if handler is None and tier == "reload":
-                    outcome = (True, "Settings consumers read Config per operation.")
-                elif handler is None:
-                    outcome = (False, f"No reload handler is registered for tier '{tier}'.")
-                else:
-                    try:
-                        outcome = handler()
-                        if inspect.isawaitable(outcome):
-                            outcome = await outcome
-                    except Exception:
-                        logger.error("Settings reload failed for tier %s", tier, exc_info=True)
-                        outcome = (False, f"{tier} reload failed.")
-                success, reason = _reload_callback_outcome(outcome)
-                settings_service.mark_reload_result(tier, success, expected_values=expected_values)
-                if success:
-                    reloaded_tiers.append(tier)
-                else:
-                    failed_tiers[tier] = reason or f"{tier} reload failed."
-
-            snapshot = settings_service.snapshot()
-            process_restart_required = snapshot["process_restart_required"]
-            full_success = not failed_tiers and not process_restart_required and not snapshot["pending_reload"]
-            result_payload.update(
-                {
-                    "status": "completed" if full_success else "partial",
-                    "result": {
-                        "ok": full_success,
-                        "reloaded_tiers": reloaded_tiers,
-                        "failed_tiers": failed_tiers,
-                        "pending_reload": snapshot["pending_reload"],
-                        "process_restart_required": process_restart_required,
-                    },
-                }
-            )
-            if post_reload is not None:
-                try:
-                    projection_refresh = post_reload()
-                    if inspect.isawaitable(projection_refresh):
-                        await projection_refresh
-                except Exception:
-                    logger.warning("Settings reload projection refresh failed", exc_info=True)
-            await _publish_settings_snapshot(
-                event_bus,
-                settings_service,
-                rationale="targeted settings reload completed",
-            )
-        else:
-            return await _publish(result_payload, rationale="invalid settings operation")
-    except SettingValidationError as exc:
-        result_payload["result"] = {"ok": False, "reason": str(exc)}
-    except Exception:
-        logger.error("Main settings operation failed", exc_info=True)
-        result_payload["result"] = {"ok": False, "reason": "Settings operation failed."}
-    finally:
-        entry = in_flight.get(request_id)
-        if current is not None and (
-            entry is current or (isinstance(entry, tuple) and len(entry) == 2 and entry[0] is current)
-        ):
-            in_flight.pop(request_id, None)
-        if lock_acquired:
-            operation_lock.release()
-    return await _publish(result_payload, rationale="main settings authority result")
-
-
-async def _handle_terminal_command_request(
-    brain: Any,
-    event_bus: Any,
-    *,
-    request_id: str,
-    terminal_session_id: str,
-    command: str,
-    result_cache: OrderedDict[str, dict[str, Any]],
-    in_flight: dict[str, Any],
-    execution_target: str = "shell",
-) -> dict[str, Any] | None:
-    """Run one terminal request through main Brain authority exactly once."""
-    request_id = _normalize_terminal_request_id(request_id)
-    fingerprint = _terminal_request_fingerprint(terminal_session_id, command)
-    cached = result_cache.get(request_id)
-    if cached is not None:
-        cached_fingerprint = _terminal_request_fingerprint(
-            str(cached.get("terminal_session_id", "")), str(cached.get("command", ""))
-        )
-        if cached_fingerprint != fingerprint:
-            conflict = _terminal_request_id_conflict_payload(request_id, terminal_session_id, command)
-            await event_bus.emit(
-                "terminal_command_result",
-                conflict,
-                meta=EventMeta(
-                    source=EventSource.BRAIN,
-                    task_id=request_id,
-                    rationale="terminal request ID conflicts with completed operation",
-                ),
-            )
-            return conflict
-        await event_bus.emit(
-            "terminal_command_result",
-            cached,
-            meta=EventMeta(
-                source=EventSource.BRAIN,
-                task_id=request_id,
-                rationale="terminal command result replayed from main idempotency cache",
-            ),
-        )
-        return cached
-
-    existing_entry = in_flight.get(request_id)
-    existing = existing_entry
-    existing_fingerprint = None
-    if isinstance(existing_entry, tuple) and len(existing_entry) == 2:
-        existing, existing_fingerprint = existing_entry
-    current = asyncio.current_task()
-    if existing is not None and existing is not current and not existing.done():
-        if existing_fingerprint is not None and existing_fingerprint != fingerprint:
-            conflict = _terminal_request_id_conflict_payload(request_id, terminal_session_id, command)
-            await event_bus.emit(
-                "terminal_command_result",
-                conflict,
-                meta=EventMeta(
-                    source=EventSource.BRAIN,
-                    task_id=request_id,
-                    rationale="terminal request ID conflicts with in-flight operation",
-                ),
-            )
-            return conflict
-        logger.info("Waiting for duplicate terminal command request: %s", request_id)
-        try:
-            await asyncio.shield(existing)
-        except asyncio.CancelledError:
-            cached = result_cache.get(request_id)
-            if cached is not None:
-                await event_bus.emit(
-                    "terminal_command_result",
-                    cached,
-                    meta=EventMeta(
-                        source=EventSource.BRAIN,
-                        task_id=request_id,
-                        rationale="terminal cancellation result replayed to duplicate waiter",
-                    ),
-                )
-                return cached
-            raise
-        except Exception:
-            logger.warning("Shared terminal command request failed: %s", request_id, exc_info=True)
-        cached = result_cache.get(request_id)
-        if cached is not None:
-            await event_bus.emit(
-                "terminal_command_result",
-                cached,
-                meta=EventMeta(
-                    source=EventSource.BRAIN,
-                    task_id=request_id,
-                    rationale="terminal command result replayed to duplicate waiter",
-                ),
-            )
-            return cached
-        return None
-
-    if current is not None:
-        in_flight[request_id] = (current, fingerprint)
-    try:
-        async def _execute_selected_terminal() -> Any:
-            from charlie.tools import ToolExecutionResult
-
-            loop = asyncio.get_running_loop()
-            waiter = loop.create_future()
-            _terminal_session_result_waiters[request_id] = (waiter, terminal_session_id, command)
-            try:
-                await event_bus.emit(
-                    "terminal_execute_request",
-                    {
-                        "request_id": request_id,
-                        "terminal_session_id": terminal_session_id,
-                        "command": command,
-                    },
-                    meta=EventMeta(
-                        source=EventSource.BRAIN,
-                        task_id=request_id,
-                        rationale="approved terminal command routed to selected terminal session",
-                    ),
-                )
-                result = await asyncio.wait_for(waiter, timeout=30.0)
-            except asyncio.TimeoutError:
-                return ToolExecutionResult(
-                    "Error: selected terminal session did not return a result before timeout.",
-                    {
-                        "ok": True,
-                        "exit_code": None,
-                        "terminal_session_id": terminal_session_id,
-                        "verification_status": "verification_unavailable",
-                    },
-                    "terminal_session_result",
-                )
-            finally:
-                _terminal_session_result_waiters.pop(request_id, None)
-
-            stdout = str(result.get("stdout") or "")
-            stderr = str(result.get("stderr") or "")
-            model_text = "\n".join(part for part in (stdout, stderr) if part)
-            if not model_text:
-                model_text = str(result.get("failure_kind") or result.get("status") or "")
-            structured = dict(result)
-            structured["ok"] = result.get("status") in {"completed", "unverified"}
-            return ToolExecutionResult(model_text, structured, "terminal_session_result")
-
-        try:
-            operation_kwargs = {
-                "request": command,
-                "task_id": request_id,
-                "session_id": None,
-                "turn_id": None,
-                "platform": "web",
-            }
-            if execution_target == "terminal_session":
-                operation_kwargs["execute_override"] = _execute_selected_terminal
-            envelope = await brain.execute_tool_operation(
-                "shell_execute",
-                {"command": command},
-                **operation_kwargs,
-            )
-        except OperationCancelled as cancelled:
-            payload = _terminal_command_result_payload(
-                request_id,
-                terminal_session_id,
-                command,
-                cancelled.envelope,
-            )
-            _cache_terminal_result(result_cache, request_id, payload)
-            try:
-                await event_bus.emit(
-                    "terminal_command_result",
-                    payload,
-                    meta=EventMeta(
-                        source=EventSource.BRAIN,
-                        task_id=request_id,
-                        rationale="terminal command cancellation finalized",
-                    ),
-                )
-            except Exception:
-                logger.debug("Terminal cancellation result could not be published: %s", request_id, exc_info=True)
-            raise
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            envelope = ResultEnvelope(
-                request=command,
-                task_id=request_id,
-                session_id=None,
-                capability="terminal",
-                operation="terminal.shell.execute",
-                status=ResultStatus.FAILED.value,
-                result=f"Error executing terminal command: {exc}",
-                reason="Terminal operation failed before canonical completion.",
-                source="brain.terminal_request",
-                data={"failure_kind": "exception", "approval_status": "unavailable"},
-                errors=[str(exc)],
-            )
-            finalizer = getattr(brain, "_finalize_operation_common", None)
-            if callable(finalizer):
-                finalizer("shell_execute", {"command": command}, envelope, session_id=None)
-        payload = _terminal_command_result_payload(request_id, terminal_session_id, command, envelope)
-        _cache_terminal_result(result_cache, request_id, payload)
-        await event_bus.emit(
-            "terminal_command_result",
-            payload,
-            meta=EventMeta(
-                source=EventSource.BRAIN,
-                task_id=request_id,
-                rationale="terminal command execution completed",
-            ),
-        )
-        return payload
-    finally:
-        entry = in_flight.get(request_id)
-        if current is not None and (
-            entry is current or (isinstance(entry, tuple) and len(entry) == 2 and entry[0] is current)
-        ):
-            in_flight.pop(request_id, None)
-
-
-async def _handle_media_operation_request(
-    brain: Any,
-    event_bus: Any,
-    payload: Any,
-    *,
-    result_cache: Optional[OrderedDict[str, dict[str, Any]]] = None,
-    in_flight: Optional[dict[str, Any]] = None,
-    fingerprint_cache: Optional[dict[str, str]] = None,
-) -> dict[str, Any] | None:
-    """Own correlated OS media snapshot and mutation requests from the web process."""
-    from charlie.media_runtime import canonical_media_request_fingerprint
-    from charlie.tools import MEDIA_ACTIONS, media_operation_id
-
-    payload = payload if isinstance(payload, dict) else {}
-    result_cache = result_cache if result_cache is not None else OrderedDict()
-    in_flight = in_flight if in_flight is not None else {}
-    fingerprint_cache = fingerprint_cache if fingerprint_cache is not None else {}
-    request_id = _normalize_terminal_request_id(payload.get("request_id"))
-    operation = payload.get("operation")
-    fingerprint = canonical_media_request_fingerprint(
-        str(operation or "invalid"),
-        action=payload.get("action"),
-        percent=payload.get("percent"),
-    )
-    supplied_fingerprint = payload.get("request_fingerprint")
-
-    async def _publish(
-        result_payload: dict[str, Any],
-        *,
-        rationale: str,
-        cache: bool = True,
-    ) -> dict[str, Any]:
-        if cache:
-            _cache_media_result(result_cache, request_id, result_payload, fingerprint_cache, fingerprint)
-        await event_bus.emit(
-            "media_operation_result",
-            result_payload,
-            meta=EventMeta(source=EventSource.BRAIN, task_id=request_id, rationale=rationale),
-        )
-        return result_payload
-
-    cached = result_cache.get(request_id)
-    if cached is not None:
-        if fingerprint_cache.get(request_id) != fingerprint:
-            return await _publish(
-                _media_request_id_conflict_payload(request_id, payload, fingerprint),
-                rationale="media request ID conflicts with completed operation",
-                cache=False,
-            )
-        return await _publish(cached, rationale="media operation result replayed from main idempotency cache")
-
-    existing_entry = in_flight.get(request_id)
-    existing = existing_entry[0] if isinstance(existing_entry, tuple) else existing_entry
-    existing_fingerprint = existing_entry[1] if isinstance(existing_entry, tuple) and len(existing_entry) == 2 else None
-    current = asyncio.current_task()
-    if existing is not None and existing is not current and not existing.done():
-        if existing_fingerprint != fingerprint:
-            return await _publish(
-                _media_request_id_conflict_payload(request_id, payload, fingerprint),
-                rationale="media request ID conflicts with in-flight operation",
-                cache=False,
-            )
-        try:
-            await asyncio.shield(existing)
-        except asyncio.CancelledError:
-            cached = result_cache.get(request_id)
-            if cached is not None:
-                return await _publish(cached, rationale="media cancellation result replayed to duplicate waiter")
-            raise
-        cached = result_cache.get(request_id)
-        if cached is not None:
-            return await _publish(cached, rationale="media operation result replayed to duplicate waiter")
-        return None
-
-    if current is not None:
-        in_flight[request_id] = (current, fingerprint)
-
-    result_payload: dict[str, Any] = {
-        "request_id": request_id,
-        "operation": operation,
-        "request_fingerprint": fingerprint,
-        "status": "failed",
-        "result": {"available": False, "reason": "Invalid media operation request."},
-    }
-    try:
-        if not isinstance(supplied_fingerprint, str) or supplied_fingerprint != fingerprint:
-            result_payload["status"] = "request_id_conflict"
-            result_payload["result"] = {
-                "status": "request_id_conflict",
-                "reason": "Media request fingerprint is invalid or does not match its arguments.",
-            }
-            return await _publish(result_payload, rationale="invalid media request fingerprint", cache=False)
-        if not isinstance(operation, str) or operation not in {"snapshot", "control"}:
-            return await _publish(result_payload, rationale="invalid media operation request")
-        try:
-            if operation == "snapshot":
-                envelope = await brain.execute_tool_operation(
-                    "media_snapshot",
-                    {},
-                    request="read media snapshot",
-                    task_id=request_id,
-                    session_id=None,
-                    turn_id=None,
-                    platform="web",
-                )
-                structured = envelope.data.get("structured_data")
-                outer_status = envelope.status
-                if isinstance(structured, dict) and structured.get("adapter_available") is False:
-                    outer_status = "unavailable"
-                result_payload.update({"status": outer_status, "result": envelope.to_dict()})
-            else:
-                action = payload.get("action")
-                if not isinstance(action, str) or action not in MEDIA_ACTIONS:
-                    result_payload["result"] = {
-                        "available": True,
-                        "failure_kind": "unsupported",
-                        "reason": "Unsupported media action.",
-                    }
-                    return await _publish(result_payload, rationale="unsupported media action")
-                arguments: dict[str, Any] = {"action": action}
-                if "percent" in payload:
-                    arguments["percent"] = payload.get("percent")
-                if action == "set_volume":
-                    percent = payload.get("percent")
-                    if (
-                        percent is None
-                        or isinstance(percent, bool)
-                        or not isinstance(percent, (int, float))
-                        or not 0 <= percent <= 100
-                    ):
-                        result_payload["result"] = {
-                            "available": True,
-                            "reason": "Volume percent must be between 0 and 100.",
-                        }
-                        return await _publish(result_payload, rationale="invalid media volume request")
-                envelope = await brain.execute_tool_operation(
-                    "media_control",
-                    arguments,
-                    request=f"media control: {action}",
-                    task_id=request_id,
-                    session_id=None,
-                    turn_id=None,
-                    platform="web",
-                    operation_override=media_operation_id(action),
-                )
-                structured = envelope.data.get("structured_data")
-                outer_status = envelope.status
-                if isinstance(structured, dict) and structured.get("available") is False:
-                    outer_status = "unavailable"
-                result_payload.update({"status": outer_status, "result": envelope.to_dict()})
-        except Exception as exc:
-            logger.warning("Main media operation failed: %s", type(exc).__name__, exc_info=True)
-            result_payload.update(
-                {
-                    "status": ResultStatus.FAILED.value,
-                    "result": {"available": False, "reason": f"Media operation failed: {type(exc).__name__}"},
-                }
-            )
-        return await _publish(result_payload, rationale="main media authority result")
-    finally:
-        entry = in_flight.get(request_id)
-        if current is not None and (
-            entry is current or (isinstance(entry, tuple) and len(entry) == 2 and entry[0] is current)
-        ):
-            in_flight.pop(request_id, None)
-
-
-async def _handle_calendar_operation_request(
-    brain: Any,
-    event_bus: Any,
-    payload: Any,
-    *,
-    result_cache: Optional[OrderedDict[str, dict[str, Any]]] = None,
-    in_flight: Optional[dict[str, Any]] = None,
-    fingerprint_cache: Optional[dict[str, str]] = None,
-) -> dict[str, Any] | None:
-    from charlie.calendar_runtime import canonical_calendar_request_fingerprint
-
-    payload = payload if isinstance(payload, dict) else {}
-    result_cache = result_cache if result_cache is not None else OrderedDict()
-    in_flight = in_flight if in_flight is not None else {}
-    fingerprint_cache = fingerprint_cache if fingerprint_cache is not None else {}
-    request_id = _normalize_terminal_request_id(payload.get("request_id"))
-    operation = payload.get("operation")
-    fingerprint = canonical_calendar_request_fingerprint(str(operation or "invalid"), payload)
-    supplied_fingerprint = payload.get("request_fingerprint")
-
-    async def _publish(result_payload: dict[str, Any], *, rationale: str, cache: bool = True) -> dict[str, Any]:
-        if cache:
-            _cache_calendar_result(result_cache, request_id, result_payload, fingerprint_cache, fingerprint)
-        await event_bus.emit(
-            "calendar_operation_result",
-            result_payload,
-            meta=EventMeta(source=EventSource.BRAIN, task_id=request_id, rationale=rationale),
-        )
-        return result_payload
-
-    cached = result_cache.get(request_id)
-    if cached is not None:
-        if fingerprint_cache.get(request_id) != fingerprint:
-            return await _publish(
-                _calendar_request_id_conflict_payload(request_id, operation, fingerprint),
-                rationale="calendar request ID conflicts with completed operation",
-                cache=False,
-            )
-        return await _publish(cached, rationale="calendar operation result replayed from main idempotency cache")
-
-    existing_entry = in_flight.get(request_id)
-    existing = existing_entry[0] if isinstance(existing_entry, tuple) else existing_entry
-    existing_fingerprint = existing_entry[1] if isinstance(existing_entry, tuple) and len(existing_entry) == 2 else None
-    current = asyncio.current_task()
-    if existing is not None and existing is not current and not existing.done():
-        if existing_fingerprint != fingerprint:
-            return await _publish(
-                _calendar_request_id_conflict_payload(request_id, operation, fingerprint),
-                rationale="calendar request ID conflicts with in-flight operation",
-                cache=False,
-            )
-        await asyncio.shield(existing)
-        cached = result_cache.get(request_id)
-        if cached is not None:
-            return await _publish(cached, rationale="calendar operation result replayed to duplicate waiter")
-        return None
-
-    if current is not None:
-        in_flight[request_id] = (current, fingerprint)
-
-    result_payload: dict[str, Any] = {
-        "request_id": request_id,
-        "request_fingerprint": fingerprint,
-        "operation": operation,
-        "status": ResultStatus.FAILED.value,
-        "result": {"ok": False, "reason": "Invalid calendar operation request."},
-    }
-    tool_map = {
-        "list": ("calendar_list", {"day": payload.get("day")} if payload.get("day") is not None else {}),
-        "create": (
-            "calendar_create",
-            {
-                key: payload.get(key)
-                for key in ("title", "start_at", "end_at", "reminder_at")
-                if key in payload
-            },
-        ),
-        "update": (
-            "calendar_update",
-            {
-                key: payload.get(key)
-                for key in ("event_id", "title", "start_at", "end_at", "reminder_at", "completed")
-                if key in payload
-            },
-        ),
-        "delete": ("calendar_delete", {"event_id": payload.get("event_id")}),
-        "get": ("calendar_get", {"event_id": payload.get("event_id")}),
-    }
-    try:
-        if not isinstance(supplied_fingerprint, str) or supplied_fingerprint != fingerprint:
-            result_payload["status"] = "request_id_conflict"
-            result_payload["result"] = {
-                "ok": False,
-                "failure_kind": "request_id_conflict",
-                "reason": "Calendar request fingerprint is invalid or does not match its arguments.",
-            }
-            return await _publish(result_payload, rationale="invalid calendar request fingerprint", cache=False)
-        if operation not in tool_map:
-            result_payload["result"] = {
-                "ok": False,
-                "failure_kind": "unsupported",
-                "reason": "Unsupported calendar operation.",
-            }
-            return await _publish(result_payload, rationale="unsupported calendar operation")
-        tool_name, arguments = tool_map[operation]
-        envelope = await brain.execute_tool_operation(
-            tool_name,
-            arguments,
-            request=f"calendar {operation}",
-            task_id=request_id,
-            session_id=None,
-            turn_id=None,
-            platform="web",
-        )
-        result_payload.update({"status": envelope.status, "result": envelope.to_dict()})
-        return await _publish(result_payload, rationale="main calendar authority result")
-    except Exception as exc:
-        logger.warning("Main calendar operation failed: %s", type(exc).__name__, exc_info=True)
-        result_payload.update(
-            {
-                "status": ResultStatus.FAILED.value,
-                "result": {"ok": False, "failure_kind": "exception", "reason": f"{type(exc).__name__}: {exc}"},
-            }
-        )
-        return await _publish(result_payload, rationale="main calendar operation failed")
-    finally:
-        entry = in_flight.get(request_id)
-        if current is not None and (
-            entry is current or (isinstance(entry, tuple) and len(entry) == 2 and entry[0] is current)
-        ):
-            in_flight.pop(request_id, None)
-
-
-def _cache_session_result(
-    result_cache: OrderedDict[str, dict[str, Any]],
-    request_id: str,
-    payload: dict[str, Any],
-    fingerprint_cache: dict[str, str],
-    fingerprint: str,
-) -> None:
-    result_cache[request_id] = payload
-    result_cache.move_to_end(request_id)
-    fingerprint_cache[request_id] = fingerprint
-    while len(result_cache) > _SESSION_RESULT_CACHE_MAX:
-        evicted_id, _ = result_cache.popitem(last=False)
-        fingerprint_cache.pop(evicted_id, None)
-
-
-def _session_request_id_conflict_payload(
-    request_id: str,
-    operation: Any,
-    fingerprint: str,
-) -> dict[str, Any]:
-    message = "request_id is already bound to a different session operation"
-    return {
-        "request_id": request_id,
-        "request_fingerprint": fingerprint,
-        "operation": operation,
-        "status": "request_id_conflict",
-        "result": {"ok": False, "failure_kind": "request_id_conflict", "reason": message},
-        "request_id_conflict": True,
-        "error": message,
-    }
-
-
-async def _handle_session_operation_request(
-    store: SessionStore,
-    event_bus: Any,
-    payload: Any,
-    *,
-    result_cache: Optional[OrderedDict[str, dict[str, Any]]] = None,
-    in_flight: Optional[dict[str, Any]] = None,
-    fingerprint_cache: Optional[dict[str, str]] = None,
-    active_session_id: Optional[str] = None,
-    active_turn_session_id: Optional[str] = None,
-    queued_session_ids: tuple[str, ...] = (),
-    background_session_ids: tuple[str, ...] = (),
-    accept_callback: Optional[Callable[[], Any]] = None,
-    launch_id: str,
-) -> dict[str, Any]:
-    """Apply one main-owned session mutation and publish its persisted truth."""
-    payload = payload if isinstance(payload, dict) else {}
-    result_cache = result_cache if result_cache is not None else OrderedDict()
-    in_flight = in_flight if in_flight is not None else {}
-    fingerprint_cache = fingerprint_cache if fingerprint_cache is not None else {}
-    operation = str(payload.get("operation") or "invalid")
-    request_id = _normalize_terminal_request_id(payload.get("request_id"))
-    fingerprint = canonical_session_request_fingerprint(operation, payload)
-
-    async def _publish(result_payload: dict[str, Any], *, cache: bool = True) -> dict[str, Any]:
-        if cache:
-            _cache_session_result(result_cache, request_id, result_payload, fingerprint_cache, fingerprint)
-        await event_bus.emit(
-            "session_operation_result",
-            result_payload,
-            meta=EventMeta(
-                source=EventSource.RUNTIME,
-                task_id=request_id,
-                session_id=payload.get("session_id") if isinstance(payload.get("session_id"), str) else None,
-                rationale="main session authority result",
-            ),
-        )
-        return result_payload
-
-    cached = result_cache.get(request_id)
-    if cached is not None:
-        if fingerprint_cache.get(request_id) != fingerprint:
-            return await _publish(
-                _session_request_id_conflict_payload(request_id, operation, fingerprint),
-                cache=False,
-            )
-        replay = dict(cached)
-        replay_result = dict(replay.get("result") or {})
-        replay_result["replayed"] = True
-        replay["result"] = replay_result
-        return await _publish(replay, cache=False)
-
-    existing_entry = in_flight.get(request_id)
-    existing = existing_entry[0] if isinstance(existing_entry, tuple) else existing_entry
-    existing_fingerprint = (
-        existing_entry[1] if isinstance(existing_entry, tuple) and len(existing_entry) == 2 else None
-    )
-    current = asyncio.current_task()
-    if existing is not None and existing is not current and not existing.done():
-        if existing_fingerprint != fingerprint:
-            return await _publish(
-                _session_request_id_conflict_payload(request_id, operation, fingerprint),
-                cache=False,
-            )
-        await asyncio.shield(existing)
-        cached = result_cache.get(request_id)
-        replay = dict(cached) if cached is not None else {
-            "request_id": request_id,
-            "request_fingerprint": fingerprint,
-            "operation": operation,
-            "status": "failed",
-            "result": {"ok": False, "reason": "Session operation produced no result."},
-        }
-        replay_result = dict(replay.get("result") or {})
-        replay_result["replayed"] = True
-        replay["result"] = replay_result
-        return await _publish(
-            replay,
-            cache=False,
-        )
-
-    if current is not None:
-        in_flight[request_id] = (current, fingerprint)
-
-    result_payload: dict[str, Any] = {
-        "request_id": request_id,
-        "request_fingerprint": fingerprint,
-        "operation": operation,
-        "status": "failed",
-        "result": {"ok": False, "reason": "Invalid session operation request."},
-    }
-    session_id = payload.get("session_id")
-    try:
-        supplied_fingerprint = payload.get("request_fingerprint")
-        if supplied_fingerprint != fingerprint:
-            result_payload.update(
-                status="request_id_conflict",
-                result={
-                    "ok": False,
-                    "failure_kind": "request_id_conflict",
-                    "reason": "Session request fingerprint is invalid or does not match its arguments.",
-                },
-            )
-            return await _publish(result_payload, cache=False)
-
-        if operation == "create":
-            if not isinstance(session_id, str) or not session_id.strip():
-                result_payload.update(status="invalid", result={"ok": False, "reason": "session_id is required"})
-            else:
-                row = store.create_session(
-                    session_id,
-                    title=str(payload.get("title") or "New Chat"),
-                    source="web",
-                    launch_id=launch_id,
-                    parent_session_id=payload.get("parent_session_id"),
-                )
-                result_payload.update(status="completed", result={"ok": True, "session": row})
-        elif operation == "rename":
-            if not isinstance(session_id, str) or not isinstance(payload.get("title"), str):
-                result_payload.update(
-                    status="invalid",
-                    result={"ok": False, "reason": "session_id and title are required"},
-                )
-            else:
-                store.update_session_title(session_id, payload["title"])
-                row = store.get_session_record(session_id)
-                result_payload.update(status="completed", result={"ok": True, "session": row})
-                await event_bus.emit(
-                    "session_updated",
-                    {"session_id": session_id, "title": row["title"] if row else payload["title"]},
-                    meta=EventMeta(source=EventSource.RUNTIME, session_id=session_id),
-                )
-        elif operation == "delete":
-            if not isinstance(session_id, str):
-                result_payload.update(status="invalid", result={"ok": False, "reason": "session_id is required"})
-            elif (
-                session_id == active_turn_session_id
-                or session_id in set(queued_session_ids)
-                or session_id in set(background_session_ids)
-            ):
-                result_payload.update(
-                    status="session_busy",
-                    result={
-                        "ok": False,
-                        "failure_kind": "session_busy",
-                        "reason": "Session owns an active or queued turn.",
-                    },
-                )
-            else:
-                deleted = store.delete_session(session_id)
-                next_active = None if session_id == active_session_id else active_session_id
-                result_payload.update(
-                    status="completed",
-                    result={"ok": True, "deleted": True, "session": deleted, "active_session_id": next_active},
-                )
-                await event_bus.emit(
-                    "session_updated",
-                    {"session_id": session_id, "deleted": True},
-                    meta=EventMeta(source=EventSource.RUNTIME, session_id=session_id),
-                )
-                if session_id == active_session_id:
-                    await event_bus.emit(
-                        "session_active",
-                        {"session_id": None},
-                        meta=EventMeta(source=EventSource.RUNTIME),
-                    )
-        elif operation == "active":
-            if not isinstance(session_id, str):
-                result_payload.update(status="invalid", result={"ok": False, "reason": "session_id is required"})
-            else:
-                row = store.get_session_record(session_id)
-                if row is None:
-                    result_payload.update(
-                        status="not_found",
-                        result={
-                            "ok": False,
-                            "failure_kind": "session_not_found",
-                            "reason": "Session does not exist.",
-                        },
-                    )
-                    await event_bus.emit(
-                        "session_active",
-                        {"session_id": None},
-                        meta=EventMeta(source=EventSource.RUNTIME),
-                    )
-                elif row.get("launch_id") not in (None, launch_id):
-                    result_payload.update(
-                        status="conflict",
-                        result={
-                            "ok": False,
-                            "failure_kind": "launch_mismatch",
-                            "reason": "Session belongs to another launch.",
-                        },
-                    )
-                    await event_bus.emit(
-                        "session_active",
-                        {"session_id": None},
-                        meta=EventMeta(source=EventSource.RUNTIME),
-                    )
-                else:
-                    result_payload.update(
-                        status="completed",
-                        result={"ok": True, "active_session_id": session_id, "session": row},
-                    )
-                    await event_bus.emit(
-                        "session_active",
-                        {"session_id": session_id, "title": row.get("title")},
-                        meta=EventMeta(source=EventSource.RUNTIME, session_id=session_id),
-                    )
-        elif operation == "chat":
-            if not isinstance(session_id, str):
-                result_payload.update(status="invalid", result={"ok": False, "reason": "session_id is required"})
-            else:
-                row = store.get_session_record(session_id)
-                if row is None:
-                    result_payload.update(
-                        status="not_found",
-                        result={
-                            "ok": False,
-                            "failure_kind": "session_not_found",
-                            "reason": "Session does not exist.",
-                        },
-                    )
-                elif row.get("launch_id") not in (None, launch_id):
-                    result_payload.update(
-                        status="conflict",
-                        result={
-                            "ok": False,
-                            "failure_kind": "launch_mismatch",
-                            "reason": "Session belongs to another launch.",
-                        },
-                    )
-                else:
-                    result_payload.update(status="accepted", result={"ok": True, "session_id": session_id})
-                    if accept_callback is not None:
-                        accepted_data = accept_callback()
-                        if inspect.isawaitable(accepted_data):
-                            accepted_data = await accepted_data
-                        if isinstance(accepted_data, dict) and accepted_data.get("accepted") is False:
-                            status = accepted_data.get("status")
-                            if status not in {"unavailable", "shutting_down"}:
-                                status = "unavailable"
-                            result_payload.update(
-                                status=status,
-                                result=dict(
-                                    accepted_data.get("result")
-                                    or {
-                                        "ok": False,
-                                        "failure_kind": "runtime_unavailable",
-                                        "reason": "Main foreground turn admission is unavailable.",
-                                    }
-                                ),
-                            )
-                        else:
-                            result_payload["result"].update(dict(accepted_data or {}))
-        else:
-            result_payload.update(
-                status="unsupported",
-                result={"ok": False, "reason": "Unsupported session operation."},
-            )
-    except SessionNotFoundError as exc:
-        result_payload.update(
-            status="not_found",
-            result={"ok": False, "failure_kind": "session_not_found", "reason": str(exc)},
-        )
-    except SessionConflictError as exc:
-        result_payload.update(
-            status="conflict",
-            result={"ok": False, "failure_kind": "session_conflict", "reason": str(exc)},
-        )
-    except SessionOutcomeUnknownError as exc:
-        result_payload.update(
-            status="failed",
-            result={"ok": False, "failure_kind": "storage_outcome_unknown", "reason": str(exc)},
-        )
-    except SessionStoreError as exc:
-        logger.warning("Session authority persistence failed: %s", type(exc).__name__)
-        result_payload.update(status="failed", result={"ok": False, "failure_kind": "storage", "reason": str(exc)})
-    except Exception as exc:
-        logger.warning("Main session operation failed: %s", type(exc).__name__, exc_info=True)
-        result_payload.update(status="failed", result={"ok": False, "failure_kind": "exception", "reason": str(exc)})
-    finally:
-        entry = in_flight.get(request_id)
-        if current is not None and (
-            entry is current or (isinstance(entry, tuple) and len(entry) == 2 and entry[0] is current)
-        ):
-            in_flight.pop(request_id, None)
-    return await _publish(result_payload)
-
-
-def _cache_privacy_result(
-    result_cache: OrderedDict[str, dict[str, Any]],
-    request_id: str,
-    payload: dict[str, Any],
-    fingerprint_cache: dict[str, str],
-    fingerprint: str,
-) -> None:
-    result_cache[request_id] = payload
-    result_cache.move_to_end(request_id)
-    fingerprint_cache[request_id] = fingerprint
-    while len(result_cache) > _PRIVACY_RESULT_CACHE_MAX:
-        evicted_id, _ = result_cache.popitem(last=False)
-        fingerprint_cache.pop(evicted_id, None)
-
-
-def _privacy_request_id_conflict_payload(
-    request_id: str,
-    operation: Any,
-    fingerprint: str,
-) -> dict[str, Any]:
-    message = "request_id is already bound to a different privacy operation"
-    return {
-        "request_id": request_id,
-        "request_fingerprint": fingerprint,
-        "operation": operation,
-        "status": "request_id_conflict",
-        "result": {"ok": False, "failure_kind": "request_id_conflict", "reason": message},
-        "request_id_conflict": True,
-        "error": message,
-    }
-
-
-def _privacy_shutdown_result(payload: Any) -> dict[str, Any]:
-    payload = payload if isinstance(payload, dict) else {}
-    operation = str(payload.get("operation") or "invalid")
-    request_id = _normalize_terminal_request_id(payload.get("request_id"))
-    fingerprint = canonical_privacy_request_fingerprint(operation, payload)
-    return {
-        "request_id": request_id,
-        "request_fingerprint": fingerprint,
-        "operation": operation,
-        "status": "shutting_down",
-        "result": {
-            "ok": False,
-            "failure_kind": "runtime_shutting_down",
-            "reason": "Main runtime is shutting down; privacy operation was not admitted.",
-        },
-    }
-
-
-async def _run_privacy_sync(call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Run privacy I/O through existing main submission tracking."""
-
-    async def _tracked_worker() -> Any:
-        operation = asyncio.create_task(asyncio.to_thread(call, *args, **kwargs))
-        try:
-            return await asyncio.shield(operation)
-        except asyncio.CancelledError as cancellation:
-            await _await_executor_quiescence(operation)
-            raise cancellation
-
-    registry = _main_event_bus_registry
-    if registry is None:
-        worker = asyncio.create_task(_tracked_worker())
+def _sync_brain_skill_block(brain: Any, extension_orchestrator: Any, name: str) -> None:
+    blocks = extension_orchestrator.get_active_skill_blocks()
+    if name in blocks:
+        brain.add_installed_skill_block(name, blocks[name])
     else:
-        worker = registry.submit_task(_tracked_worker(), asyncio.get_running_loop())
-        if worker is None:
-            raise RuntimeError("Main privacy worker admission is closed")
-    try:
-        return await asyncio.shield(worker)
-    except asyncio.CancelledError as cancellation:
-        await _await_executor_quiescence(worker)
-        raise cancellation
+        brain.remove_installed_skill_block(name)
 
 
-async def _handle_privacy_operation_request(
-    service: Any,
-    event_bus: Any,
-    payload: Any,
-    *,
-    result_cache: Optional[OrderedDict[str, dict[str, Any]]] = None,
-    in_flight: Optional[dict[str, Any]] = None,
-    fingerprint_cache: Optional[dict[str, str]] = None,
-    active_turn_session_id: Optional[str] = None,
-    queued_session_ids: tuple[str, ...] = (),
-    background_session_ids: tuple[str, ...] = (),
-    browser_owner: Optional[Callable[[], Optional[str]]] = None,
-    admission_open: Optional[Callable[[], bool]] = None,
-    backup_dir: str | Path = "backups",
-    lifecycle_gate: Optional[asyncio.Lock] = None,
-    session_state: Optional[
-        Callable[[], tuple[Optional[str], tuple[str, ...], tuple[str, ...]]]
-    ] = None,
-) -> dict[str, Any]:
-    """Apply one main-owned privacy request and publish its authoritative result."""
-    payload = payload if isinstance(payload, dict) else {}
-    result_cache = result_cache if result_cache is not None else OrderedDict()
-    in_flight = in_flight if in_flight is not None else {}
-    fingerprint_cache = fingerprint_cache if fingerprint_cache is not None else {}
-    operation = str(payload.get("operation") or "invalid").strip()
-    request_id = _normalize_terminal_request_id(payload.get("request_id"))
-    fingerprint = canonical_privacy_request_fingerprint(operation, payload)
+def _load_rehydrated_skill_blocks(brain: Any, extension_orchestrator: Any) -> None:
+    for name, block in extension_orchestrator.get_active_skill_blocks().items():
+        brain.add_installed_skill_block(name, block)
 
-    async def _publish(result_payload: dict[str, Any], *, cache: bool = True) -> dict[str, Any]:
-        if cache:
-            _cache_privacy_result(result_cache, request_id, result_payload, fingerprint_cache, fingerprint)
-        if event_bus is not None:
-            await event_bus.emit(
-                EventType.PRIVACY_OPERATION_RESULT.value,
-                result_payload,
-                meta=EventMeta(
-                    source=EventSource.RUNTIME,
-                    task_id=request_id,
-                    rationale="main privacy authority result",
-                ),
-            )
-        return result_payload
 
-    supplied_fingerprint = payload.get("request_fingerprint")
-    if not isinstance(supplied_fingerprint, str) or supplied_fingerprint != fingerprint:
-        return await _publish(
-            _privacy_request_id_conflict_payload(request_id, operation, fingerprint),
-            cache=False,
-        )
-
-    if operation not in PRIVACY_OPERATIONS:
-        return await _publish(
-            {
-                "request_id": request_id,
-                "request_fingerprint": fingerprint,
-                "operation": operation,
-                "status": "unsupported",
-                "result": {"ok": False, "failure_kind": "unsupported", "reason": "Unsupported privacy operation."},
-            }
-        )
-
-    category = str(payload.get("category") or "").strip().lower()
-    older_than_days = payload.get("older_than_days")
-    if operation == "purge":
-        if category not in PRIVACY_PURGE_CATEGORIES:
-            return await _publish(
-                {
-                    "request_id": request_id,
-                    "request_fingerprint": fingerprint,
-                    "operation": operation,
-                    "status": "invalid",
-                    "result": {"ok": False, "failure_kind": "invalid_request", "reason": "Unsupported purge category."},
-                }
-            )
-        if older_than_days is not None and (
-            isinstance(older_than_days, bool)
-            or not isinstance(older_than_days, int)
-            or older_than_days < 0
-        ):
-            return await _publish(
-                {
-                    "request_id": request_id,
-                    "request_fingerprint": fingerprint,
-                    "operation": operation,
-                    "status": "invalid",
-                    "result": {
-                        "ok": False,
-                        "failure_kind": "invalid_request",
-                        "reason": "older_than_days must be a non-negative integer",
-                    },
-                }
-            )
-        if payload.get("confirmed") is not True:
-            return await _publish(
-                {
-                    "request_id": request_id,
-                    "request_fingerprint": fingerprint,
-                    "operation": operation,
-                    "status": "confirmation_required",
-                    "result": {
-                        "ok": False,
-                        "failure_kind": "confirmation_required",
-                        "reason": "Explicit confirmation is required before privacy purge.",
-                    },
-                }
-            )
-    elif operation == "backup_export":
-        passphrase = payload.get("passphrase")
-        if passphrase is not None and not isinstance(passphrase, str):
-            return await _publish(
-                {
-                    "request_id": request_id,
-                    "request_fingerprint": fingerprint,
-                    "operation": operation,
-                    "status": "invalid",
-                    "result": {"ok": False, "failure_kind": "invalid_request", "reason": "passphrase must be text"},
-                }
-            )
-    elif operation in {"audit_list", "audit_export"}:
-        default_limit = 500 if operation == "audit_export" else 100
-        limit = payload.get("limit", default_limit)
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
-            return await _publish(
-                {
-                    "request_id": request_id,
-                    "request_fingerprint": fingerprint,
-                    "operation": operation,
-                    "status": "invalid",
-                    "result": {
-                        "ok": False,
-                        "failure_kind": "invalid_request",
-                        "reason": "limit must be between 1 and 500",
-                    },
-                }
-            )
-
-    cached = result_cache.get(request_id)
-    if cached is not None:
-        if fingerprint_cache.get(request_id) != fingerprint:
-            return await _publish(
-                _privacy_request_id_conflict_payload(request_id, operation, fingerprint),
-                cache=False,
-            )
-        replay = dict(cached)
-        replay_result = dict(replay.get("result") or {})
-        replay_result["replayed"] = True
-        replay["result"] = replay_result
-        return await _publish(replay, cache=False)
-
-    existing_entry = in_flight.get(request_id)
-    existing = existing_entry[0] if isinstance(existing_entry, tuple) else existing_entry
-    existing_fingerprint = (
-        existing_entry[1] if isinstance(existing_entry, tuple) and len(existing_entry) == 2 else None
+async def _resolve_skill_candidate_review(
+    extension_orchestrator: Any, brain: Any, review_token: str, action: str
+) -> bool:
+    """Resolve persistent owner skill review separately from foreground tool approval."""
+    if action not in {"approve", "reject", "disable"}:
+        return False
+    expected_status = "approved" if action == "disable" else "pending"
+    candidate = await asyncio.to_thread(
+        extension_orchestrator.resolve_skill_candidate_review_token,
+        review_token,
+        expected_status,
     )
-    current = asyncio.current_task()
-    if existing is not None and existing is not current and not existing.done():
-        if existing_fingerprint != fingerprint:
-            return await _publish(
-                _privacy_request_id_conflict_payload(request_id, operation, fingerprint),
-                cache=False,
-            )
-        await asyncio.shield(existing)
-        cached = result_cache.get(request_id)
-        replay = dict(cached) if cached is not None else _privacy_shutdown_result(payload)
-        replay_result = dict(replay.get("result") or {})
-        replay_result["replayed"] = True
-        replay["result"] = replay_result
-        return await _publish(replay, cache=False)
+    if candidate is None:
+        return False
+    name, content_hash = candidate
+    operation = {
+        "approve": extension_orchestrator.approve_skill_candidate,
+        "reject": extension_orchestrator.reject_skill_candidate,
+        "disable": extension_orchestrator.disable_skill_candidate,
+    }[action]
+    result = await asyncio.to_thread(operation, name, content_hash)
+    if not getattr(result, "success", False):
+        return False
+    if action in {"approve", "disable"}:
+        _sync_brain_skill_block(brain, extension_orchestrator, name)
+    return True
 
-    if admission_open is not None:
-        try:
-            admitting = bool(admission_open())
-        except Exception:
-            admitting = False
-        if not admitting:
-            return await _publish(_privacy_shutdown_result(payload))
 
-    if current is not None:
-        in_flight[request_id] = (current, fingerprint)
-
-    result_payload: dict[str, Any] = {
-        "request_id": request_id,
-        "request_fingerprint": fingerprint,
-        "operation": operation,
-        "status": "failed",
-        "result": {"ok": False, "reason": "Privacy operation was not applied."},
-    }
-    browser_guard_owner: Optional[str] = None
-    lifecycle_gate_acquired = False
+async def _send_pending_skill_candidate_reviews(
+    telegram_bot: Any, extension_orchestrator: Any, chat_id: int
+) -> int:
+    """Submit pending reviews once per successful Telegram API send."""
+    sent = 0
     try:
-        transcript_purge = operation == "purge" and category in {"transcripts", "all"}
-        full_transcript_purge = transcript_purge and older_than_days is None
-        if transcript_purge and lifecycle_gate is not None:
-            await lifecycle_gate.acquire()
-            lifecycle_gate_acquired = True
-        if session_state is not None:
-            (
-                active_turn_session_id,
-                queued_session_ids,
-                background_session_ids,
-            ) = session_state()
-        protected_session_ids = tuple(
-            sorted(
-                {
-                    session_id
-                    for session_id in (
-                        active_turn_session_id,
-                        *queued_session_ids,
-                        *background_session_ids,
-                    )
-                    if isinstance(session_id, str) and session_id
-                }
-            )
-        )
-        if full_transcript_purge:
-            if protected_session_ids:
-                result_payload.update(
-                    status="busy",
-                    result={
-                        "ok": False,
-                        "failure_kind": "session_busy",
-                        "reason": "An active, queued, or background session owns transcript state.",
-                    },
-                )
-                return await _publish(result_payload)
-
-        if operation == "purge" and category in {"browser", "all"}:
-            from charlie import resource_locks
-
-            owner = browser_owner() if browser_owner is not None else resource_locks.current_owner("browser")
-            if owner is not None:
-                result_payload.update(
-                    status="busy",
-                    result={
-                        "ok": False,
-                        "failure_kind": "resource_busy",
-                        "reason": "Browser capability is active; browser storage was not purged.",
-                    },
-                )
-                return await _publish(result_payload)
-            browser_guard_owner = f"privacy:{request_id}"
-            if not resource_locks.acquire("browser", browser_guard_owner):
-                result_payload.update(
-                    status="busy",
-                    result={
-                        "ok": False,
-                        "failure_kind": "resource_busy",
-                        "reason": "Browser capability became active; browser storage was not purged.",
-                    },
-                )
-                return await _publish(result_payload)
-
-        if service is None:
-            result_payload.update(
-                status="unavailable",
-                result={
-                    "ok": False,
-                    "failure_kind": "authority_unavailable",
-                    "reason": "Main privacy authority is unavailable; operation was not applied.",
-                },
-            )
-        elif operation == "summary":
-            summary = await _run_privacy_sync(service.get_storage_summary)
-            result_payload.update(status="completed", result={"ok": True, **summary})
-        elif operation == "purge":
-            purge_result = await _run_privacy_sync(
-                service.purge_category,
-                category,
-                older_than_days,
-                protected_session_ids=protected_session_ids,
-            )
-            if purge_result.get("status") == "ok":
-                result_payload.update(status="completed", result={"ok": True, **purge_result})
-            else:
-                result_payload.update(
-                    status="busy" if purge_result.get("status") == "busy" else "failed",
-                    result={"ok": False, **purge_result},
-                )
-        elif operation in {"audit_list", "audit_export"}:
-            entries = await _run_privacy_sync(service.list_audit, limit)
-            result_payload.update(
-                status="completed",
-                result={
-                    "ok": True,
-                    "format": "json" if operation == "audit_export" else None,
-                    "entries": entries,
-                },
-            )
-        else:
-            suffix = ".charlie" if passphrase else ".zip"
-            timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-            target = Path(backup_dir) / f"charlie-{timestamp}-{uuid.uuid4().hex}{suffix}"
-            backup_result = await _run_privacy_sync(service.export_backup, target, passphrase)
-            result_payload.update(status="completed", result={"ok": True, **backup_result})
-    except SessionConflictError as exc:
-        result_payload.update(
-            status="busy",
-            result={"ok": False, "failure_kind": "session_busy", "reason": str(exc)},
-        )
-    except SessionOutcomeUnknownError as exc:
-        result_payload.update(
-            status="failed",
-            result={"ok": False, "failure_kind": "storage_outcome_unknown", "reason": str(exc)},
-        )
-    except SessionStoreError as exc:
-        result_payload.update(
-            status="failed",
-            result={"ok": False, "failure_kind": "storage", "reason": str(exc)},
-        )
-    except ValueError as exc:
-        result_payload.update(
-            status="invalid",
-            result={"ok": False, "failure_kind": "invalid_request", "reason": str(exc)},
-        )
-    except Exception as exc:
-        logger.warning("Main privacy operation failed: %s", type(exc).__name__, exc_info=True)
-        result_payload.update(
-            status="failed",
-            result={"ok": False, "failure_kind": "exception", "reason": f"{type(exc).__name__}: {exc}"},
-        )
-    finally:
-        if browser_guard_owner is not None:
-            from charlie import resource_locks
-
-            resource_locks.release("browser", browser_guard_owner)
-        if lifecycle_gate_acquired:
-            lifecycle_gate.release()
-        entry = in_flight.get(request_id)
-        if current is not None and (
-            entry is current or (isinstance(entry, tuple) and len(entry) == 2 and entry[0] is current)
+        candidates = extension_orchestrator.list_skill_candidates()
+    except Exception:
+        logger.warning("Could not read pending skill candidate reviews", exc_info=True)
+        return 0
+    for candidate in candidates:
+        if (
+            candidate.get("status") != "pending"
+            or candidate.get("review_submitted")
+            or not candidate.get("review_token")
+            or not candidate.get("matches_hash")
         ):
-            in_flight.pop(request_id, None)
-    return await _publish(result_payload)
+            continue
+        try:
+            await telegram_bot.send_skill_candidate_review(
+                chat_id,
+                candidate["name"],
+                candidate["content_hash"],
+                candidate["review_token"],
+                candidate.get("content") or "",
+            )
+            marked = await asyncio.to_thread(
+                extension_orchestrator.mark_skill_candidate_review_submitted,
+                candidate["name"],
+                candidate["content_hash"],
+            )
+            if marked:
+                sent += 1
+        except Exception:
+            logger.warning("Could not submit skill candidate review for %s", candidate.get("name"), exc_info=True)
+    return sent
 
 
 def _is_sustained_research_request(text: str, runtime_config: Any) -> bool:
@@ -2183,76 +633,9 @@ async def _start_sustained_research_task(
     return task
 
 
-def _watcher_surface_kind(level: AttentionLevel) -> tuple[PresentationKind, DismissPolicy, int | None, PreferredZone]:
-    """Map authoritative watcher urgency to the matching non-tool HUD surface."""
-    if level >= AttentionLevel.ATTENTION:
-        return PresentationKind.ATTENTION, DismissPolicy.MANUAL, None, PreferredZone.CENTER
-    return PresentationKind.NOTIFICATION, DismissPolicy.TIMED, 8000, PreferredZone.TOP_RIGHT
-
-
-def _task_workspace_intent(task: Any) -> PresentationIntent:
-    """Build canonical task workspace intent from runtime Task Journal record."""
-    return PresentationIntent(
-        id=f"task-workspace:{task.id}",
-        kind=PresentationKind.WORKSPACE,
-        task_id=task.id,
-        title=f"TASK // {task.title}",
-        summary=f"{task.status.value.upper()} // {task.id}",
-        content={"task_id": task.id, "task": task.to_dict()},
-        priority=70,
-        dismiss_policy=DismissPolicy.MANUAL,
-        workspace_type="tasks",
-        preferred_zone=PreferredZone.CONTEXTUAL,
-        anchor=AnchorTarget.CORE,
-        replayable=True,
-        replace_key=f"task-focus:{task.id}",
-    )
-
-
-def _task_workspace_admitted(task: Any) -> bool:
-    """Return whether task has execution substance for a full workspace.
-
-    Lifecycle status alone is not enough: fast-path and placeholder records can
-    be active with zero steps and no meaningful execution detail.
-    """
-    total_steps = int(getattr(task, "total_steps", 0) or 0)
-    if total_steps > 0:
-        return True
-    if str(getattr(task, "current_action", "") or "").strip():
-        return True
-    if str(getattr(task, "waiting_reason", "") or "").strip():
-        return True
-    if str(getattr(task, "approval_reference", "") or "").strip():
-        return True
-    if getattr(task, "capability_requirements", ()):
-        return True
-    return False
-
-
-_runtime_health = HealthRegistry(
-    (
-        "brain",
-        "llm",
-        "memory",
-        "plugins",
-        "mcp",
-        "web",
-        "companion",
-        "telegram",
-        "voice",
-        "voice_capture",
-        "asr",
-        "watchers",
-        "background_tasks",
-        "terminal",
-        "browser",
-    ),
-    launch_id=_LAUNCH_ID,
-)
-
-
 def _configure_runtime_health(runtime_config: Any) -> None:
     """Configure main-owned policy without turning static availability into readiness."""
+    voice_enabled = bool(getattr(runtime_config, "voice_enabled", True))
     try:
         from charlie.browser import BROWSER_AVAILABLE
 
@@ -2266,15 +649,12 @@ def _configure_runtime_health(runtime_config: Any) -> None:
         "memory": (True, False, True, "main.memory"),
         "plugins": (bool(getattr(runtime_config, "plugins_enabled", False)), False, True, "main.plugins"),
         "mcp": (bool(getattr(runtime_config, "mcp_enabled", False)), False, True, "main.mcp"),
-        "web": (True, True, True, "main.web_process"),
-        "companion": (bool(getattr(runtime_config, "pet_enabled", False)), False, None, "main.companion_process"),
         "telegram": (bool(getattr(runtime_config, "telegram_enabled", False)), False, None, "main.telegram"),
-        "voice": (True, False, None, "main.voice"),
-        "voice_capture": (True, False, None, "main.voice"),
-        "asr": (True, False, None, "main.voice"),
+        "voice": (voice_enabled, False, None, "main.voice"),
+        "voice_capture": (voice_enabled, False, None, "main.voice"),
+        "asr": (voice_enabled, False, None, "main.voice"),
         "watchers": (True, False, True, "main.watchers"),
         "background_tasks": (True, True, True, "main.background_tasks"),
-        "terminal": (True, False, None, "web.terminal_manager"),
         "browser": (
             bool(getattr(runtime_config, "browser_enabled", False)),
             False,
@@ -2330,8 +710,6 @@ def _build_runtime_introspector(
     )
 
 
-hud_visible: bool = True
-hud_client_count: int = 0
 _main_event_bus: Optional[Any] = None
 
 
@@ -2571,62 +949,6 @@ def _close_runtime_stores(audit_store: Any, store: Any, *, quiescent: bool) -> N
             logger.info("SessionStore closed")
         except Exception as exc:
             logger.warning("SessionStore close error: %s", exc)
-
-
-async def _summon_hud(toggle: bool = False, event_bus: Optional[Any] = None) -> None:
-    """Show the React HUD without opening a workspace."""
-    global hud_visible, hud_client_count
-    from charlie.utils import open_url_in_browser
-
-    if toggle:
-        if hud_client_count == 0:
-            # No actual HUD client exists.
-            # Treat this as SUMMON, not hide.
-            hud_visible = True
-        else:
-            hud_visible = not hud_visible
-    elif not hud_visible:
-        hud_visible = True
-
-    host = "127.0.0.1" if config.charlie_host == "0.0.0.0" else config.charlie_host
-    # Open HUD only if no browser client is already connected.
-    # If already visible + connected, do NOT open another tab.
-    if hud_visible:
-        if hud_client_count == 0:
-            open_url_in_browser(f"http://{host}:{config.charlie_port}/")
-        # else: hud_client_count > 0 -> browser already connected, do not open another tab
-
-    bus = event_bus or _main_event_bus
-    if bus:
-        await bus.emit(
-            "hud_visibility",
-            {"visible": hud_visible},
-            meta=EventMeta(source=EventSource.SURFACE, rationale="pet or hotkey summoned React HUD"),
-        )
-
-
-async def _open_conversation_workspace(event_bus: Optional[Any] = None) -> None:
-    """Ensure HUD visibility, then open the canonical conversation workspace."""
-    await _summon_hud(event_bus=event_bus)
-    bus = event_bus or _main_event_bus
-    if bus:
-        await bus.emit(
-            "presentation_intent",
-            PresentationIntent(
-                id="conversation-workspace",
-                kind=PresentationKind.WORKSPACE,
-                title="CONVERSATION",
-                summary="Chat Session",
-                priority=80,
-                dismiss_policy=DismissPolicy.PERSISTENT,
-                workspace_type="conversation",
-                preferred_zone=PreferredZone.CENTER,
-                anchor=AnchorTarget.SCREEN,
-                replace_key="workspace:conversation",
-                replayable=True,
-            ).to_dict(),
-            meta=EventMeta(source=EventSource.SURFACE, rationale="operator opened conversation workspace"),
-        )
 
 
 async def _publish_subsystem_health(bus: Optional[EventBus] = None) -> None:
@@ -2893,33 +1215,6 @@ async def _publish_runtime_state(
     await _publish_runtime_telemetry(bus)
     await _publish_settings_snapshot(bus, settings_service, rationale="runtime settings projection replay")
     await _publish_extension_snapshot(bus, extension_registry, rationale="runtime extension projection replay")
-
-
-async def _dispatch_web_command(
-    cmd: dict,
-    bus: Optional[EventBus] = None,
-    mcp_client: Any = None,
-    settings_service: Any = None,
-    extension_registry: Optional[ExtensionRuntimeRegistry] = None,
-) -> bool:
-    """Dispatch the runtime-state command from the live web command consumer."""
-    if not isinstance(cmd, dict) or cmd.get("type") != "runtime_state_request":
-        return False
-    await _publish_runtime_state(bus, mcp_client, settings_service, extension_registry)
-    return True
-
-
-async def _handle_runtime_state_request(
-    cmd_type: str,
-    bus: Optional[EventBus] = None,
-    mcp_client: Any = None,
-    settings_service: Any = None,
-    extension_registry: Optional[ExtensionRuntimeRegistry] = None,
-) -> bool:
-    """Handle the command-loop runtime replay branch and report whether it matched."""
-    return await _dispatch_web_command(
-        {"type": cmd_type}, bus, mcp_client, settings_service, extension_registry
-    )
 
 
 def _build_extension_snapshot(extension_registry: ExtensionRuntimeRegistry) -> dict[str, Any]:
@@ -3495,266 +1790,6 @@ async def _handle_extension_operation_request(
             operation_lock.release()
 
 
-def _mcp_operation_result(
-    payload: dict[str, Any],
-    *,
-    success: bool,
-    error: Optional[str] = None,
-) -> dict[str, Any]:
-    """Build the safe correlated acknowledgement for one MCP command."""
-    result = {
-        "request_id": str(payload.get("request_id", "")),
-        "operation": str(payload.get("operation", "")),
-        "success": success,
-        "server_name": str(payload.get("server_name", "")),
-    }
-    if error:
-        result["error"] = error[:500]
-    return result
-
-
-def _memory_operation_result(
-    payload: dict[str, Any],
-    *,
-    success: bool,
-    data: Any = None,
-    error: Optional[str] = None,
-    runtime_status: str = "completed",
-) -> dict[str, Any]:
-    """Build one correlated result from the main-owned memory facade."""
-    result = {
-        "request_id": str(payload.get("request_id", "")),
-        "operation": str(payload.get("operation", "")),
-        "success": success,
-        "runtime_status": runtime_status,
-        "data": data,
-    }
-    if error:
-        result["error"] = error[:500]
-    return result
-
-
-def apply_memory_operation(payload: dict[str, Any], memory_service: Any) -> dict[str, Any]:
-    """Execute one web memory request against main's canonical facade."""
-    if not isinstance(payload, dict):
-        payload = {}
-    request_id = payload.get("request_id")
-    operation = payload.get("operation")
-    allowed = {
-        "get_facts",
-        "delete_fact",
-        "list_items",
-        "search_items",
-        "create_item",
-        "update_item",
-        "delete_item",
-        "clear",
-        "export",
-        "stats",
-    }
-    if not isinstance(request_id, str) or not request_id or operation not in allowed:
-        return _memory_operation_result(
-            payload,
-            success=False,
-            runtime_status="invalid_request",
-            error="Invalid memory operation request.",
-        )
-    if memory_service is None:
-        return _memory_operation_result(
-            payload,
-            success=False,
-            runtime_status="unavailable",
-            error="Main memory authority is unavailable.",
-        )
-
-    try:
-        health = memory_service.get_health()
-        structured = health.get("structured", {}) if isinstance(health, dict) else {}
-        if structured.get("status") != "available":
-            return _memory_operation_result(
-                payload,
-                success=False,
-                runtime_status="unavailable",
-                error="Main memory authority is unavailable.",
-            )
-
-        if operation == "get_facts":
-            facts = memory_service.list_facts(limit=int(payload.get("limit", 500)))
-            if facts is None:
-                raise RuntimeError("structured memory unavailable")
-            data = {"facts": [{"subject": s, "predicate": p, "object": o} for s, p, o in facts]}
-        elif operation == "delete_fact":
-            removed = memory_service.remove_fact(
-                str(payload.get("subject", "")),
-                str(payload.get("predicate", "")),
-                str(payload.get("object", "")),
-            )
-            if removed is None:
-                raise RuntimeError("structured memory unavailable")
-            data = {"removed": bool(removed)}
-        elif operation == "list_items":
-            data = {
-                "items": memory_service.list_items(
-                    category=payload.get("category"),
-                    limit=int(payload.get("limit", 200)),
-                )
-            }
-        elif operation == "search_items":
-            data = {
-                "items": memory_service.search_items(
-                    query=str(payload.get("query", "")),
-                    category=payload.get("category"),
-                    limit=int(payload.get("limit", 50)),
-                )
-            }
-        elif operation == "create_item":
-            data = {
-                "item": memory_service.add_item(
-                    category=str(payload.get("category", "fact")).strip(),
-                    content=str(payload.get("content", "")).strip(),
-                    subject=str(payload.get("subject", "")).strip(),
-                    predicate=str(payload.get("predicate", "")).strip(),
-                    obj=str(payload.get("object", "")).strip(),
-                    metadata=payload.get("metadata"),
-                )
-            }
-        elif operation == "update_item":
-            item = memory_service.update_item(
-                str(payload.get("item_id", "")),
-                content=str(payload.get("content", "")).strip(),
-                category=payload.get("category"),
-                metadata=payload.get("metadata"),
-            )
-            if item is None:
-                return _memory_operation_result(
-                    payload,
-                    success=False,
-                    runtime_status="not_found",
-                    error="Memory item not found.",
-                )
-            data = {"item": item}
-        elif operation == "delete_item":
-            removed = memory_service.delete_item(str(payload.get("item_id", "")))
-            if not removed:
-                return _memory_operation_result(
-                    payload,
-                    success=False,
-                    runtime_status="not_found",
-                    error="Memory item not found.",
-                )
-            data = {"removed": True}
-        elif operation == "clear":
-            data = {"cleared_count": memory_service.clear_category(payload.get("category"))}
-        elif operation == "export":
-            data = memory_service.export_all()
-        else:  # stats
-            data = memory_service.get_stats()
-        return _memory_operation_result(payload, success=True, data=data)
-    except Exception as exc:
-        logger.warning("Main memory operation failed: %s", type(exc).__name__, exc_info=True)
-        return _memory_operation_result(
-            payload,
-            success=False,
-            runtime_status="failed",
-            error=f"Memory operation failed ({type(exc).__name__}).",
-        )
-
-
-def apply_mcp_operation(
-    payload: dict[str, Any],
-    *,
-    mcp_client: Any,
-    brain: Any = None,
-    tool_registry: Any = None,
-) -> tuple[dict[str, Any], Any]:
-    """Apply one MCP transition against main's canonical client and registry."""
-    if not isinstance(payload, dict):
-        payload = {}
-    operation = payload.get("operation")
-    server_name = payload.get("server_name")
-    allowed_operations = {"add", "connect", "disconnect", "restart", "delete"}
-    if (
-        not isinstance(payload.get("request_id"), str)
-        or not payload["request_id"]
-        or not isinstance(operation, str)
-        or operation not in allowed_operations
-        or not isinstance(server_name, str)
-        or not server_name.strip()
-    ):
-        return (
-            _mcp_operation_result(
-                payload,
-                success=False,
-                error="Invalid MCP operation request.",
-            ),
-            mcp_client,
-        )
-
-    command = payload.get("command")
-    args = payload.get("args", [])
-    if operation == "add" and (
-        not isinstance(command, str)
-        or not command.strip()
-        or not isinstance(args, list)
-        or any(not isinstance(arg, str) for arg in args)
-    ):
-        return (
-            _mcp_operation_result(
-                payload,
-                success=False,
-                error="MCP add requires a command and a list of string arguments.",
-            ),
-            mcp_client,
-        )
-
-    try:
-        if operation == "add":
-            from charlie.mcp_client import MCPClient, MCPServerConfig
-
-            if mcp_client is None:
-                mcp_client = MCPClient()
-            existing = {
-                item.get("name")
-                for item in mcp_client.list_servers_detailed()
-                if isinstance(item, dict)
-            }
-            if server_name in existing:
-                raise ValueError(f"MCP server '{server_name}' is already registered.")
-            mcp_client.add_server(
-                MCPServerConfig(
-                    name=server_name,
-                    command=command.strip(),
-                    args=list(args),
-                )
-            )
-        else:
-            if mcp_client is None:
-                raise RuntimeError("Main MCP client is unavailable.")
-            if tool_registry is None:
-                from charlie.tools import registry as tool_registry
-            if operation == "connect":
-                mcp_client.enable_server(tool_registry, server_name)
-            elif operation == "disconnect":
-                if not mcp_client.disable_server(tool_registry, server_name):
-                    raise KeyError(f"MCP server '{server_name}' is not registered in main runtime.")
-            elif operation == "restart":
-                if not mcp_client.restart_server(tool_registry, server_name):
-                    raise KeyError(f"MCP server '{server_name}' is not registered in main runtime.")
-            else:  # delete
-                if not mcp_client.remove_server(tool_registry, server_name):
-                    raise KeyError(f"MCP server '{server_name}' is not registered in main runtime.")
-            if brain is not None:
-                brain.rebuild_stable_tier()
-        return _mcp_operation_result(payload, success=True), mcp_client
-    except Exception as exc:
-        reason = str(exc).strip() or type(exc).__name__
-        logger.warning("Main MCP operation failed: %s", reason)
-        return (
-            _mcp_operation_result(payload, success=False, error=reason),
-            mcp_client,
-        )
-
-
 def _try_build_mcp_snapshot(mcp_client: Any) -> Optional[dict[str, Any]]:
     """Build a snapshot for operation accounting without inventing state."""
     try:
@@ -3762,69 +1797,6 @@ def _try_build_mcp_snapshot(mcp_client: Any) -> Optional[dict[str, Any]]:
     except Exception as exc:
         logger.error("Could not build authoritative MCP snapshot: %s", exc, exc_info=True)
         return None
-
-
-async def _dispatch_mcp_operation(
-    payload: dict[str, Any],
-    bus: Optional[EventBus],
-    *,
-    mcp_client: Any,
-    brain: Any,
-    tool_registry: Any = None,
-) -> tuple[dict[str, Any], Any]:
-    """Run one MCP command, publish truthful projections, then emit its ACK."""
-    if tool_registry is None:
-        from charlie.tools import registry as tool_registry
-
-    before_tools = _build_tool_snapshot(tool_registry)
-    before_mcp = _try_build_mcp_snapshot(mcp_client)
-    result, updated_client = apply_mcp_operation(
-        payload,
-        mcp_client=mcp_client,
-        brain=brain,
-        tool_registry=tool_registry,
-    )
-    after_tools = _build_tool_snapshot(tool_registry)
-    after_mcp = _try_build_mcp_snapshot(updated_client)
-    operation = result.get("operation")
-    tools_changed = before_tools is None or after_tools != before_tools
-    mcp_changed = before_mcp is None or after_mcp != before_mcp
-
-    if result.get("success") is True and after_mcp is None:
-        result = _mcp_operation_result(
-            payload,
-            success=False,
-            error="MCP operation changed runtime but its authoritative snapshot could not be built.",
-        )
-        result["partial"] = True
-
-    if result.get("success") is True:
-        if operation in {"connect", "disconnect", "restart"}:
-            await _publish_tool_snapshot(bus, tool_registry)
-        elif operation == "delete" and tools_changed:
-            await _publish_tool_snapshot(bus, tool_registry)
-        await _publish_mcp_snapshot(bus, updated_client)
-    else:
-        # Failed operations normally leave both projections untouched. If a
-        # client partially mutated before raising, publish the truthful state
-        # before the correlated failure acknowledgement.
-        if tools_changed:
-            await _publish_tool_snapshot(bus, tool_registry)
-        if mcp_changed and after_mcp is not None:
-            await _publish_mcp_snapshot(bus, updated_client)
-        if tools_changed or mcp_changed:
-            result["partial"] = True
-
-    if bus is not None:
-        await bus.emit(
-            EventType.MCP_OPERATION_RESULT.value,
-            result,
-            meta=EventMeta(
-                source=EventSource.BRAIN,
-                rationale="authoritative main-runtime MCP operation result",
-            ),
-        )
-    return result, updated_client
 
 
 def _set_subsystem_health(name: str, status: HealthStatus, public_detail: Optional[str] = None) -> None:
@@ -3851,188 +1823,11 @@ def _on_brain_llm_health(status: HealthStatus, detail: Optional[str] = None) -> 
             pass
 
 
-def _companion_dependency_status() -> tuple[bool, Optional[str]]:
-    """Check optional Qt dependency before spawning the companion process."""
-    try:
-        from charlie.pet_window import QT_AVAILABLE, QT_IMPORT_ERROR
-    except Exception as exc:
-        return False, f"Companion dependency initialization failed: {type(exc).__name__}"
-    if QT_AVAILABLE:
-        return True, None
-    reason = str(QT_IMPORT_ERROR) if QT_IMPORT_ERROR else "Qt binding unavailable"
-    return False, f"Optional companion dependency unavailable: {reason}"
-
-
-async def _monitor_companion_readiness(process: subprocess.Popen, ready_file: Path, event_bus: Any) -> None:
-    """Publish companion readiness only after child initialization signals success."""
-    deadline = time.monotonic() + 10.0
-    try:
-        while time.monotonic() < deadline:
-            if ready_file.is_file():
-                _set_subsystem_health("companion", HealthStatus.RUNNING, "Ready")
-                await _publish_subsystem_health(event_bus)
-                return
-            exit_code = process.poll()
-            if exit_code is not None:
-                _set_subsystem_health(
-                    "companion",
-                    HealthStatus.DEGRADED,
-                    f"Companion exited before readiness (exit code {exit_code})",
-                )
-                await _publish_subsystem_health(event_bus)
-                return
-            await asyncio.sleep(0.1)
-        _set_subsystem_health("companion", HealthStatus.DEGRADED, "Companion readiness timed out")
-        await _publish_subsystem_health(event_bus)
-    finally:
-        try:
-            ready_file.unlink(missing_ok=True)
-        except OSError:
-            logger.debug("Unable to remove companion readiness marker", exc_info=True)
-
-
-def _start_subsystem_process(
-    name: str,
-    command: Tuple[str, ...],
-    env: Optional[Dict[str, str]] = None,
-    readiness_file: Optional[Path] = None,
-) -> Optional[subprocess.Popen]:
-    """Start one optional child process without taking down the core."""
-    try:
-        process = subprocess.Popen(
-            command,
-            cwd=os.path.dirname(__file__),
-            env=env,
-        )
-    except Exception:
-        logger.warning("Failed to start %s", name, exc_info=True)
-        _set_subsystem_health(name, HealthStatus.DEGRADED)
-        return None
-    logger.info("%s subprocess started (PID: %s)", name.capitalize(), process.pid)
-    _set_subsystem_health(name, HealthStatus.STARTING if readiness_file else HealthStatus.RUNNING)
-    return process
-
-
-_WEB_STARTUP_TIMEOUT_SECONDS = 10.0
-_WEB_PROBE_TIMEOUT_SECONDS = 0.5
-
-
-def _web_probe_host(host: str) -> str:
-    """Use a loopback probe address for the configured local web host."""
-    normalized = host.strip()
-    return "127.0.0.1" if normalized.lower() == "localhost" else normalized
-
-
-def _web_port_is_listening(host: str, port: int) -> bool:
-    """Return whether a TCP listener currently owns the configured web port."""
-    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        probe.bind((_web_probe_host(host), port))
-    except OSError as exc:
-        if exc.errno == errno.EADDRINUSE or getattr(exc, "winerror", None) == 10048:
-            return True
-        raise RuntimeError(
-            f"Unable to determine whether Charlie web port {port} is available."
-        ) from exc
-    finally:
-        probe.close()
-    return False
-
-
-def _fetch_web_status(host: str, port: int) -> Optional[dict[str, Any]]:
-    """Read the local runtime identity endpoint without using proxy settings."""
-    connection: Optional[http.client.HTTPConnection] = None
-    try:
-        connection = http.client.HTTPConnection(
-            _web_probe_host(host),
-            port,
-            timeout=_WEB_PROBE_TIMEOUT_SECONDS,
-        )
-        connection.request("GET", "/api/status", headers={"Accept": "application/json"})
-        response = connection.getresponse()
-        if response.status != 200:
-            return None
-        payload = json.loads(response.read(64 * 1024).decode("utf-8"))
-        return payload if isinstance(payload, dict) else None
-    except (http.client.HTTPException, OSError, ValueError, TypeError, json.JSONDecodeError):
-        return None
-    finally:
-        if connection is not None:
-            connection.close()
-
-
-def _web_process_owns_pid(process: subprocess.Popen, reported_pid: Any) -> bool:
-    """Accept the launcher PID or the real interpreter child PID on Windows."""
-    try:
-        reported_pid = int(reported_pid)
-    except (TypeError, ValueError):
-        return False
-    if reported_pid == process.pid:
-        return True
-
-    try:
-        import psutil
-
-        return any(child.pid == reported_pid for child in psutil.Process(process.pid).children(recursive=True))
-    except (psutil.Error, OSError, ValueError):
-        return False
-
-
-def _web_identity_error(
-    status: Optional[dict[str, Any]],
-    process: subprocess.Popen,
-    launch_id: str,
-) -> Optional[str]:
-    """Return a safe explanation when a ready response is not this launch."""
-    if not isinstance(status, dict):
-        return "Charlie web runtime returned no valid identity response."
-    if status.get("launch_id") != launch_id:
-        return "Charlie web runtime launch identity mismatch; refusing to attach to an unknown or stale web process."
-    if not _web_process_owns_pid(process, status.get("pid")):
-        return "Charlie web runtime process identity mismatch; refusing to attach to an unexpected web process."
-    if status.get("source_identity") != _SOURCE_IDENTITY:
-        return "Charlie web runtime source identity differs from its parent runtime."
-    return None
-
-
-def _terminate_subsystem_process(process: subprocess.Popen) -> None:
-    """Stop an owned launcher and its interpreter descendants."""
-    import psutil
-
-    try:
-        descendants = psutil.Process(process.pid).children(recursive=True)
-    except (psutil.Error, OSError, AttributeError):
-        descendants = []
-    try:
-        process.terminate()
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
-    except (OSError, AttributeError):
-        logger.debug("Unable to terminate failed subsystem child", exc_info=True)
-    finally:
-        for child in reversed(descendants):
-            try:
-                child.terminate()
-            except psutil.NoSuchProcess:
-                pass
-            except psutil.Error:
-                logger.warning("Unable to stop owned descendant %s", child.pid, exc_info=True)
-        _, alive = psutil.wait_procs(descendants, timeout=5)
-        for child in alive:
-            try:
-                child.kill()
-            except psutil.NoSuchProcess:
-                pass
-        _, alive = psutil.wait_procs(alive, timeout=5)
-        if alive:
-            logger.error("Owned subsystem descendants remain alive: %s", [child.pid for child in alive])
-
-
 def _log_port_release(host: str, port: int) -> None:
     try:
-        released = not _web_port_is_listening(host, port)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.2)
+            released = probe.connect_ex((host, port)) != 0
         logger.info("port_release | port=%s | released=%s", port, released)
     except Exception as exc:
         logger.warning(
@@ -4040,65 +1835,6 @@ def _log_port_release(host: str, port: int) -> None:
             port,
             type(exc).__name__,
         )
-
-
-def _start_web_subprocess(
-    command: Tuple[str, ...],
-    env: Dict[str, str],
-    *,
-    host: str,
-    port: int,
-    launch_id: str,
-    startup_timeout: float = _WEB_STARTUP_TIMEOUT_SECONDS,
-) -> subprocess.Popen:
-    """Start only this launch's web runtime and require its identity before continuing."""
-    if _web_port_is_listening(host, port):
-        existing_status = _fetch_web_status(host, port)
-        if isinstance(existing_status, dict) and existing_status.get("launch_id"):
-            message = (
-                f"Port {port} is occupied by another Charlie runtime. "
-                "Stop the existing runtime before starting a new one."
-            )
-        else:
-            message = f"Port {port} is occupied by another process. Stop it before starting Charlie."
-        _set_subsystem_health("web", HealthStatus.DEGRADED, message)
-        raise RuntimeError(message)
-
-    try:
-        process = subprocess.Popen(command, cwd=os.path.dirname(__file__), env=env)
-    except Exception as exc:
-        message = f"Charlie web subprocess could not start: {type(exc).__name__}."
-        _set_subsystem_health("web", HealthStatus.DEGRADED, message)
-        raise RuntimeError(message) from exc
-
-    _set_subsystem_health("web", HealthStatus.STARTING, "Waiting for owned web runtime")
-    deadline = time.monotonic() + startup_timeout
-    try:
-        while time.monotonic() < deadline:
-            exit_code = process.poll()
-            if exit_code is not None:
-                message = f"Charlie web subprocess exited before readiness (exit code {exit_code})."
-                _set_subsystem_health("web", HealthStatus.DEGRADED, message)
-                raise RuntimeError(message)
-
-            status = _fetch_web_status(host, port)
-            if status is not None:
-                identity_error = _web_identity_error(status, process, launch_id)
-                if identity_error is not None:
-                    _set_subsystem_health("web", HealthStatus.DEGRADED, identity_error)
-                    raise RuntimeError(identity_error)
-                _set_subsystem_health("web", HealthStatus.RUNNING, "Ready")
-                logger.info("Owned web runtime ready (PID: %s, launch_id=%s)", process.pid, launch_id)
-                return process
-            time.sleep(0.1)
-    except Exception:
-        _terminate_subsystem_process(process)
-        raise
-
-    message = f"Charlie web subprocess did not become ready within {startup_timeout:.1f}s."
-    _set_subsystem_health("web", HealthStatus.DEGRADED, message)
-    _terminate_subsystem_process(process)
-    raise RuntimeError(message)
 
 
 class _UnavailableVoiceEngine:
@@ -4109,10 +1845,16 @@ class _UnavailableVoiceEngine:
     asr_ready = False
     asr_readiness_status = "failed"
 
-    def __init__(self) -> None:
+    def __init__(self, detail: str = "Microphone unavailable", *, disabled: bool = False) -> None:
         self.is_speaking = threading.Event()
         self._muted = True
         self._volume = 0.0
+        self._readiness_detail = detail
+        if disabled:
+            self.asr_readiness_status = "disabled"
+
+    def readiness_detail(self) -> str:
+        return self._readiness_detail
 
     def speak(self, text: str, emotion: str) -> None:
         return None
@@ -4153,6 +1895,8 @@ class _UnavailableVoiceEngine:
         return None
 
     def asr_readiness_detail(self) -> str:
+        if self.asr_readiness_status == "disabled":
+            return self._readiness_detail
         return "ASR unavailable: microphone engine unavailable"
 
 
@@ -4163,7 +1907,13 @@ def _start_voice_or_degrade(
     on_tts_stop: Callable[[], None],
     on_speech_onset: Optional[Callable[..., None]] = None,
 ) -> VoiceEngine | _UnavailableVoiceEngine:
-    """Start voice or retain text and web operation after a voice failure."""
+    """Start voice while retaining non-audio runtime capabilities on failure."""
+    if not getattr(voice_config, "voice_enabled", True):
+        detail = "Voice input and output disabled by VOICE_ENABLED=false"
+        for name in ("voice", "voice_capture", "asr"):
+            _set_subsystem_health(name, HealthStatus.DISABLED, detail)
+        return _UnavailableVoiceEngine(detail, disabled=True)
+
     try:
         voice = VoiceEngine(
             voice_config,
@@ -4337,7 +2087,7 @@ async def _restart_mcp_client(old_client, config):
     mcp_client.stop() and start_mcp() are synchronous and block on
     subprocess handshakes (up to config.timeout, default 30s per server);
     called directly inside an async def they freeze the whole event loop,
-    including consume_web_commands, for that long.
+    including the foreground voice loop, for that long.
     """
     if old_client is not None:
         await asyncio.to_thread(old_client.stop)
@@ -4406,6 +2156,36 @@ def _wire_memory_service(memory_service: MemoryService) -> None:
     tool_registry.set_memory_service(memory_service)
 
 
+async def _deliver_background_result(task_id, summary, *, db_path, telegram_bot, telegram_user_id, voice):
+    store = ResultsStore(db_path=db_path)
+    try:
+        record = store.get(task_id)
+    finally:
+        store.close()
+    full_result = record.full_result.strip() if record and record.full_result else ""
+    message = f"{summary}\n\n{full_result}" if full_result else summary
+    if len(message) > 4000:
+        message = message[:3960].rstrip() + "\n[Full result retained locally.]"
+
+    delivery = {"telegram": "not_configured", "voice": "not_configured"}
+    if telegram_bot is not None and isinstance(telegram_user_id, int) and telegram_user_id > 0:
+        try:
+            await telegram_bot.send_message(telegram_user_id, message)
+            delivery["telegram"] = "accepted"
+        except Exception:
+            delivery["telegram"] = "failed"
+            logger.warning("Telegram background-result delivery failed for %s", task_id, exc_info=True)
+    if bool(getattr(voice, "is_ready", False)):
+        try:
+            delivery["voice"] = "queued" if voice.speak(summary, "neutral") is None else "not_queued"
+        except Exception:
+            delivery["voice"] = "failed"
+            logger.warning("Voice background-result delivery failed for %s", task_id, exc_info=True)
+    elif voice is not None:
+        delivery["voice"] = "not_ready"
+    return delivery
+
+
 async def main() -> int:
     global _main_event_bus, _main_event_bus_registry
     loop = asyncio.get_running_loop()
@@ -4425,7 +2205,6 @@ async def main() -> int:
     voice = None
     store = None
     audit_store = None
-    privacy_service = None
     memory_graph = None
     brain = None
     calendar_runtime = None
@@ -4435,13 +2214,9 @@ async def main() -> int:
     # VAD-fragmented duplicate text within this window is suppressed (see on_speech).
     recent_turn_texts: Dict[str, float] = {}
     _DEDUPE_WINDOW_SEC = 20.0
-    web_proc = None
-    pet_proc = None
     telegram_bot = None
     mcp_client = None
     mcp_start_task = None
-    companion_ready_file: Optional[Path] = None
-    companion_monitor_task: Optional[asyncio.Task] = None
     exit_code = 0
     shutdown_quiescent = True
     # True while a chat turn's LLM/tool loop runs -- see _dispatch_or_queue.
@@ -4449,6 +2224,17 @@ async def main() -> int:
     pending_turns: list[TurnRequest] = []
     pending_turn_times: Dict[str, float] = {}
     voice_diagnostic_traces: Dict[str, Any] = {}
+    turn_channels_by_id: Dict[str, str] = {}
+    repeated_success_patterns_by_turn: Dict[str, list[dict[str, str]]] = {}
+    telegram_status_messages_by_turn: Dict[str, int] = {}
+    telegram_status_text_by_turn: Dict[str, str] = {}
+    telegram_status_tasks_by_turn: Dict[str, asyncio.Task] = {}
+    telegram_approval_turn_by_request: Dict[str, str] = {}
+    telegram_origin_turn_ids: set[str] = set()
+    telegram_background_tasks_by_turn: Dict[str, set[str]] = {}
+    telegram_background_task_ids: set[str] = set()
+    # ponytail: one-owner Telegram bridge; serialize edits globally, split per-chat if multi-owner support arrives.
+    telegram_status_lock = asyncio.Lock()
     active_turn_id: Optional[str] = None
     active_turn_session_id: Optional[str] = None
     active_task_id: Optional[str] = None
@@ -4459,24 +2245,7 @@ async def main() -> int:
     watcher_callback_lock = threading.Lock()
     watcher_stop_event = threading.Event()
     watcher_thread: Optional[threading.Thread] = None
-    terminal_command_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
-    terminal_command_in_flight: dict[str, Any] = {}
-    media_operation_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
-    media_operation_in_flight: dict[str, Any] = {}
-    media_operation_fingerprints: dict[str, str] = {}
-    calendar_operation_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
-    calendar_operation_in_flight: dict[str, Any] = {}
-    calendar_operation_fingerprints: dict[str, str] = {}
-    session_operation_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
-    session_operation_in_flight: dict[str, Any] = {}
-    session_operation_fingerprints: dict[str, str] = {}
-    settings_operation_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
-    settings_operation_in_flight: dict[str, Any] = {}
-    settings_operation_fingerprints: dict[str, str] = {}
     settings_operation_lock = asyncio.Lock()
-    privacy_operation_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
-    privacy_operation_in_flight: dict[str, Any] = {}
-    privacy_operation_fingerprints: dict[str, str] = {}
     session_lifecycle_gate = asyncio.Lock()
     extension_runtime_registry = ExtensionRuntimeRegistry()
     extension_operation_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
@@ -4606,22 +2375,6 @@ async def main() -> int:
         from charlie.audit_store import AuditStore
 
         audit_store = AuditStore(config.session_db_path)
-        privacy_service = PrivacyService(
-            sessions_db_path=config.session_db_path,
-            audit_db_path=config.session_db_path,
-            browser_dir_path=config.browser_profile_path,
-            memory_db_path=config.memory_db_path,
-            memory_paths=(config.memory_db_path, config.memory_graph_db),
-            logs_dir_path=Path(LOG_FILE).parent,
-            active_log_path=LOG_FILE,
-            log_handler=file_handler,
-            session_store=store,
-            audit_store=audit_store,
-            project_root=Path(__file__).resolve().parent,
-            # Explicit allowlist: data/ contains maps and durable extension state,
-            # so it is not a disposable privacy-artifact root.
-            artifact_paths=(Path("scratchpad.db"),),
-        )
         memory_graph, memory_store, memory_service = _compose_memory_dependencies(config)
         def speaking_callback(text):
             if voice:
@@ -4653,7 +2406,7 @@ async def main() -> int:
                 active_operation_name = name
                 active_operation_task_id = task_id
                 active_operation_cancellable = name not in _NON_CANCELLABLE_FOREGROUND_TOOLS
-            event_session_id = session_id or current_web_session_id
+            event_session_id = session_id or current_session_id
             try:
                 active_audit_store = audit_store
             except NameError:
@@ -4681,7 +2434,7 @@ async def main() -> int:
                 active_operation_name = None
                 active_operation_task_id = None
                 active_operation_cancellable = True
-            event_session_id = session_id or current_web_session_id
+            event_session_id = session_id or current_session_id
             if event_bus:
                 _submit_event_threadsafe(
                     event_bus.emit(
@@ -4707,7 +2460,29 @@ async def main() -> int:
                 status = getattr(envelope.status, "value", envelope.status)
                 if envelope.data.get("persistence_status") == "failed":
                     status = f"{status}:persistence_failed"
-                active_audit_store.record(name, {}, str(status))
+                turn_id = envelope.turn_id
+                from charlie.self_extension.orchestrator import repeated_success_audit_metadata
+
+                audit_arguments = repeated_success_audit_metadata(
+                    envelope,
+                    turn_channels_by_id.get(turn_id or "", ""),
+                    name,
+                )
+                active_audit_store.record(name, audit_arguments, str(status))
+                signature = audit_arguments.get("repeated_success_signature")
+                risk_class = audit_arguments.get("risk_class")
+                if signature and turn_id:
+                    patterns = repeated_success_patterns_by_turn.setdefault(turn_id, [])
+                    if not any(item["signature"] == signature for item in patterns):
+                        patterns.append(
+                            {
+                                "request": envelope.request,
+                                "capability": envelope.capability or "",
+                                "operation": envelope.operation or name,
+                                "signature": signature,
+                                "risk_class": risk_class,
+                            }
+                        )
 
         def on_intent_decision(decision: IntentDecision):
             """Observe the one primary route selected for an interactive turn."""
@@ -4726,8 +2501,175 @@ async def main() -> int:
                 decision.capabilities,
             )
 
+        async def _set_telegram_turn_status(
+            turn_id: str, text: str, *, create: bool = False
+        ) -> None:
+            if telegram_bot is None or config.telegram_user_id <= 0:
+                return
+            async with telegram_status_lock:
+                message_id = telegram_status_messages_by_turn.get(turn_id)
+                previous_text = telegram_status_text_by_turn.get(turn_id)
+                if previous_text == text and (message_id is not None or not create):
+                    return
+                telegram_status_text_by_turn[turn_id] = text
+                if message_id is None:
+                    if create:
+                        message_id = await telegram_bot.send_status_message(
+                            config.telegram_user_id, text
+                        )
+                        if message_id is not None:
+                            telegram_status_messages_by_turn[turn_id] = message_id
+                else:
+                    await telegram_bot.edit_status_message(
+                        config.telegram_user_id, message_id, text
+                    )
+
+        async def _show_telegram_status_after_delay(turn_id: str) -> None:
+            await asyncio.sleep(2.0)
+            if telegram_status_tasks_by_turn.get(turn_id) is not asyncio.current_task():
+                return
+            await _set_telegram_turn_status(
+                turn_id,
+                telegram_status_text_by_turn.get(turn_id, "Working on it…"),
+                create=True,
+            )
+
+        async def _start_telegram_turn_feedback(turn_id: str) -> None:
+            if telegram_bot is None or config.telegram_user_id <= 0:
+                return
+            await telegram_bot.send_typing(config.telegram_user_id)
+            if turn_id in telegram_status_messages_by_turn:
+                await _set_telegram_turn_status(turn_id, "Working on it…")
+                return
+            telegram_status_text_by_turn[turn_id] = "Working on it…"
+            old_task = telegram_status_tasks_by_turn.get(turn_id)
+            if old_task is not None and not old_task.done():
+                old_task.cancel()
+            telegram_status_tasks_by_turn[turn_id] = asyncio.create_task(
+                _show_telegram_status_after_delay(turn_id),
+                name=f"telegram-status-{turn_id}",
+            )
+
+        async def _finish_telegram_turn_feedback(turn_id: str) -> None:
+            task = telegram_status_tasks_by_turn.pop(turn_id, None)
+            if task is not None and task is not asyncio.current_task() and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            message_id = telegram_status_messages_by_turn.pop(turn_id, None)
+            telegram_status_text_by_turn.pop(turn_id, None)
+            for request_id, approval_turn_id in list(telegram_approval_turn_by_request.items()):
+                if approval_turn_id == turn_id:
+                    telegram_approval_turn_by_request.pop(request_id, None)
+            if not telegram_background_tasks_by_turn.get(turn_id):
+                telegram_origin_turn_ids.discard(turn_id)
+            if message_id is not None and telegram_bot is not None:
+                await telegram_bot.delete_status_message(config.telegram_user_id, message_id)
+            for task_id in telegram_background_tasks_by_turn.get(turn_id, set()):
+                if task_id in telegram_status_messages_by_turn:
+                    continue
+                task = telegram_status_tasks_by_turn.get(task_id)
+                if task is None or task.done():
+                    telegram_status_tasks_by_turn[task_id] = asyncio.create_task(
+                        _show_telegram_status_after_delay(task_id),
+                        name=f"telegram-status-{task_id}",
+                    )
+
+        def _schedule_telegram_status_update(turn_id: str, text: str) -> None:
+            def schedule() -> None:
+                if not runtime_shutting_down and turn_id in telegram_status_text_by_turn:
+                    asyncio.create_task(_set_telegram_turn_status(turn_id, text))
+
+            try:
+                loop.call_soon_threadsafe(schedule)
+            except RuntimeError:
+                logger.debug("Telegram status update dropped after loop shutdown")
+
+        def _schedule_telegram_task_status(
+            task_id: str, text: str = "", *, finished: bool = False, parent_turn_id: Optional[str] = None
+        ) -> None:
+            def schedule() -> None:
+                if runtime_shutting_down:
+                    return
+                if finished:
+                    asyncio.create_task(_finish_telegram_turn_feedback(task_id))
+                    telegram_background_task_ids.discard(task_id)
+                    if parent_turn_id:
+                        task_ids = telegram_background_tasks_by_turn.get(parent_turn_id)
+                        if task_ids is not None:
+                            task_ids.discard(task_id)
+                            if not task_ids:
+                                telegram_background_tasks_by_turn.pop(parent_turn_id, None)
+                                telegram_origin_turn_ids.discard(parent_turn_id)
+                    return
+                telegram_status_text_by_turn[task_id] = text
+                if parent_turn_id and active_turn_id == parent_turn_id:
+                    return
+                if task_id in telegram_status_messages_by_turn:
+                    asyncio.create_task(_set_telegram_turn_status(task_id, text))
+                elif task_id not in telegram_status_tasks_by_turn or telegram_status_tasks_by_turn[task_id].done():
+                    telegram_status_tasks_by_turn[task_id] = asyncio.create_task(
+                        _show_telegram_status_after_delay(task_id),
+                        name=f"telegram-status-{task_id}",
+                    )
+
+            try:
+                loop.call_soon_threadsafe(schedule)
+            except RuntimeError:
+                logger.debug("Telegram task status dropped after loop shutdown")
+
+        def _on_task_journal_change(record) -> None:
+            origin = getattr(record.origin, "value", record.origin)
+            if origin not in {TaskOrigin.BACKGROUND.value, TaskOrigin.RESEARCH.value}:
+                return
+            parent_turn_id = record.turn_id
+            if parent_turn_id and (
+                parent_turn_id in telegram_origin_turn_ids
+                or turn_channels_by_id.get(parent_turn_id) == "telegram"
+            ):
+                telegram_origin_turn_ids.add(parent_turn_id)
+                telegram_background_tasks_by_turn.setdefault(parent_turn_id, set()).add(record.id)
+                telegram_background_task_ids.add(record.id)
+            elif record.id not in telegram_background_task_ids:
+                return
+            if record.status in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
+                _schedule_telegram_task_status(
+                    record.id,
+                    finished=True,
+                    parent_turn_id=parent_turn_id,
+                )
+                return
+            status_text = {
+                TaskStatus.QUEUED: "Queued. I’ll get to this next.",
+                TaskStatus.APPROVAL_REQUIRED: "Waiting for your approval…",
+            }.get(record.status, "Working on it…")
+            _schedule_telegram_task_status(
+                record.id,
+                status_text,
+                parent_turn_id=parent_turn_id,
+            )
+
+        get_task_journal().set_on_change(_on_task_journal_change)
+
         def on_thinking_update(name, args, *, turn_id=None, task_id=None, session_id=None):
-            event_session_id = session_id or current_web_session_id
+            event_session_id = session_id or current_session_id
+            if turn_id and turn_channels_by_id.get(turn_id) == "telegram":
+                background_record = None
+                if task_id:
+                    try:
+                        background_record = get_task_journal().get(task_id)
+                    except KeyError:
+                        pass
+                if background_record is not None and background_record.origin in {
+                    TaskOrigin.BACKGROUND,
+                    TaskOrigin.RESEARCH,
+                }:
+                    parent_turn_id = background_record.turn_id or turn_id
+                    telegram_origin_turn_ids.add(parent_turn_id)
+                    telegram_background_tasks_by_turn.setdefault(parent_turn_id, set()).add(task_id)
+                    telegram_background_task_ids.add(task_id)
+                    _schedule_telegram_task_status(task_id, "Working on it…", parent_turn_id=parent_turn_id)
+                else:
+                    _schedule_telegram_status_update(turn_id, "Checking that…")
             if event_bus:
                 desc = f"I'll use the {name} tool"
                 if args:
@@ -4747,18 +2689,65 @@ async def main() -> int:
                     loop,
                 )
 
-        _CONVERSATION_SUMMON_RE = re.compile(r"\b(?:show|open) (?:me )?(?:the )?(?:chat|conversation)\b", re.IGNORECASE)
-
-        def _resolve_tool_approval_and_notify(request_id: str, approved: bool) -> None:
-            """Resolve pending future and dismiss its canonical attention intent."""
-            from charlie.core import resolve_tool_approval
+        def _resolve_tool_approval_and_notify(
+            request_id: str,
+            approved: bool,
+            *,
+            expected_platform: Optional[str] = None,
+        ) -> bool:
+            """Resolve one pending approval future and report whether it was current."""
+            from charlie.core import get_active_tool_approval, resolve_tool_approval
 
             if not isinstance(request_id, str) or not request_id:
                 logger.warning("Rejected malformed tool approval request id")
-                return
-            if not resolve_tool_approval(request_id, approved):
+                return False
+
+            if expected_platform is not None and get_active_tool_approval() != (
+                request_id,
+                expected_platform,
+            ):
+                logger.warning("Rejected approval for a stale or wrong-channel request: %s", request_id)
+                return False
+
+            if expected_platform == "telegram" and approved:
+                journal = get_task_journal()
+                background_record = next(
+                    (
+                        record
+                        for record in journal.list(include_terminal=False)
+                        if record.origin is TaskOrigin.BACKGROUND
+                        and record.status is TaskStatus.APPROVAL_REQUIRED
+                        and record.approval_reference == request_id
+                    ),
+                    None,
+                )
+                if background_record is not None:
+                    try:
+                        journal.transition(
+                            background_record.id,
+                            TaskStatus.RUNNING,
+                            waiting_reason="",
+                            approval_reference="",
+                        )
+                    except Exception:
+                        logger.error(
+                            "Could not resume background task after approval %s",
+                            request_id,
+                            exc_info=True,
+                        )
+                        return resolve_tool_approval(
+                            request_id,
+                            False,
+                            expected_platform=expected_platform,
+                        )
+
+            if not resolve_tool_approval(
+                request_id,
+                approved,
+                expected_platform=expected_platform,
+            ):
                 logger.warning("Ignored stale or unknown tool approval: %s", request_id)
-                return
+                return False
             if event_bus is not None:
                 _submit_event_threadsafe(
                     event_bus.emit(
@@ -4768,26 +2757,26 @@ async def main() -> int:
                     ),
                     loop,
                 )
-                _submit_event_threadsafe(
-                    event_bus.emit(
-                        "presentation_dismiss",
-                        {"id": request_id},
-                        meta=EventMeta(source=EventSource.BRAIN, rationale="approval resolved"),
-                    ),
-                    loop,
-                )
+            approval_turn_id = telegram_approval_turn_by_request.pop(request_id, None)
+            if approved and approval_turn_id:
+                _schedule_telegram_status_update(approval_turn_id, "Working on it…")
+            return True
 
         async def _handle_voice_control(request: TurnRequest, control: Any) -> None:
             nonlocal speech_echo_cooldown
-            from charlie.core import get_active_voice_approval
+            from charlie.core import get_active_tool_approval
 
             action = getattr(control, "action", control)
             target = getattr(control, "target", None)
             trace = voice_diagnostic_traces.get(request.turn_id)
-            pending_approval_id = get_active_voice_approval()
-            if pending_approval_id and action != "stop_tts":
+            pending_approval = get_active_tool_approval()
+            if pending_approval and pending_approval[1] == "voice" and action != "stop_tts":
                 voice.stop_tts()
-                _resolve_tool_approval_and_notify(pending_approval_id, False)
+                _resolve_tool_approval_and_notify(
+                    pending_approval[0],
+                    False,
+                    expected_platform="voice",
+                )
                 handled = True
                 logger.info("voice_control_applied | control=%s | action=decline_approval", action)
             elif action == "stop_tts":
@@ -4820,10 +2809,15 @@ async def main() -> int:
             elif action == "cancel_all_tasks":
                 cancelled_ids = background_task.cancel_all()
                 queued_ids = [item.turn_id for item in pending_turns]
+                queued_telegram_ids = [
+                    item.turn_id for item in pending_turns if item.channel == "telegram"
+                ]
                 pending_turns.clear()
                 for queued_id in queued_ids:
                     pending_turn_times.pop(queued_id, None)
                     voice_diagnostic_traces.pop(queued_id, None)
+                for queued_id in queued_telegram_ids:
+                    await _finish_telegram_turn_feedback(queued_id)
                 foreground_handled = await _apply_voice_control(
                     "cancel",
                     voice=voice,
@@ -4882,191 +2876,129 @@ async def main() -> int:
             if handled:
                 speech_echo_cooldown = time.time() + 1.5
 
-        def on_tool_approval_request(
+        async def on_tool_approval_request(
             request_id,
             tool_name,
             reason,
             platform,
             risk_class,
             *,
+            operation_preview=None,
             turn_id=None,
             task_id=None,
             session_id=None,
         ):
-            # telegram_bot is None until its startup block below runs -- read at call time, not def time.
-            if platform == "telegram" and telegram_bot and should_relay_approval(True, config.telegram_user_id):
-                _submit_event_threadsafe(
-                    telegram_bot.send_approval_request(config.telegram_user_id, request_id, tool_name, reason), loop
+            if platform == "telegram":
+                if not telegram_bot:
+                    return False
+
+                from charlie.telegram_bot import should_relay_approval
+
+                if not should_relay_approval(True, config.telegram_user_id):
+                    return False
+
+                journal = get_task_journal()
+                background_task_id = None
+                if task_id:
+                    try:
+                        record = journal.get(task_id)
+                    except KeyError:
+                        record = None
+                    if record is not None and record.origin is TaskOrigin.BACKGROUND:
+                        try:
+                            journal.require_approval(task_id, approval_reference=request_id)
+                        except Exception:
+                            logger.warning(
+                                "Could not record background approval request %s for task %s",
+                                request_id,
+                                task_id,
+                                exc_info=True,
+                            )
+                            return False
+                        background_task_id = task_id
+
+                sent = False
+                try:
+                    status_key = task_id if background_task_id is not None else turn_id
+                    if status_key:
+                        telegram_approval_turn_by_request[request_id] = status_key
+                        await _set_telegram_turn_status(status_key, "Waiting for your approval…")
+                    await asyncio.wait_for(
+                        telegram_bot.send_approval_request(
+                            config.telegram_user_id,
+                            request_id,
+                            tool_name,
+                            _telegram_approval_reason(tool_name, risk_class),
+                            operation_preview=operation_preview,
+                        ),
+                        timeout=15.0,
+                    )
+                    sent = True
+                except asyncio.TimeoutError:
+                    logger.warning("Telegram approval request %s timed out before send confirmation", request_id)
+                except Exception:
+                    logger.warning("Telegram approval request %s could not be sent", request_id, exc_info=True)
+                finally:
+                    if not sent and background_task_id is not None:
+                        try:
+                            record = journal.get(background_task_id)
+                            if (
+                                record.status is TaskStatus.APPROVAL_REQUIRED
+                                and record.approval_reference == request_id
+                            ):
+                                journal.transition(
+                                    background_task_id,
+                                    TaskStatus.RUNNING,
+                                    waiting_reason="",
+                                    approval_reference="",
+                                )
+                        except Exception:
+                            logger.warning(
+                                "Could not clear failed background approval request %s for task %s",
+                                request_id,
+                                background_task_id,
+                                exc_info=True,
+                            )
+                return sent
+            return None
+
+        async def on_result_stored(task_id, summary, attention_level):
+            try:
+                return await _deliver_background_result(
+                    task_id,
+                    summary,
+                    db_path=config.session_db_path,
+                    telegram_bot=telegram_bot,
+                    telegram_user_id=config.telegram_user_id,
+                    voice=voice,
                 )
+            finally:
+                if task_id in telegram_background_task_ids:
+                    await _finish_telegram_turn_feedback(task_id)
+                    telegram_background_task_ids.discard(task_id)
+                    for parent_turn_id, task_ids in list(telegram_background_tasks_by_turn.items()):
+                        task_ids.discard(task_id)
+                        if not task_ids:
+                            telegram_background_tasks_by_turn.pop(parent_turn_id, None)
+                            telegram_origin_turn_ids.discard(parent_turn_id)
+
+        def on_research_result(report, *, session_id, task_id=None, turn_id=None):
             if event_bus is None:
                 return
-            intent = PresentationIntent(
-                id=request_id,
-                kind=PresentationKind.ATTENTION,
-                turn_id=turn_id,
-                task_id=task_id,
-                session_id=session_id,
-                title=f"Approval needed: {tool_name}",
-                summary=reason,
-                content={
-                    "request_id": request_id,
-                    "tool_name": tool_name,
-                    "reason": reason,
-                    "arguments": {},
-                    "risk_class": risk_class,
-                },
-                priority=95,
-                attention_level=PresentationAttention.HIGH,
-                dismiss_policy=DismissPolicy.MANUAL,
-                preferred_zone=PreferredZone.CENTER,
-                anchor=AnchorTarget.CORE,
-                replayable=True,
-                replace_key=f"approval:{request_id}",
-            )
+            payload = {"query": report.query, "text": report.legacy_text()}
             _submit_event_threadsafe(
                 event_bus.emit(
-                    "presentation_intent",
-                    intent.to_dict(),
+                    "research_result",
+                    payload,
                     meta=EventMeta(
-                        source=EventSource.BRAIN,
+                        source=EventSource.TASK,
                         task_id=task_id,
                         session_id=session_id,
                         turn_id=turn_id,
-                        rationale="tool approval requires attention",
                     ),
                 ),
                 loop,
             )
-
-        def on_result_stored(task_id, summary, attention_level):
-            if event_bus is None:
-                return
-            from charlie.utils import make_id
-
-            if AttentionLevel(attention_level) < AttentionLevel.INFORM:
-                return
-            intent = PresentationIntent(
-                id=make_id(),
-                kind=PresentationKind.NOTIFICATION,
-                task_id=task_id,
-                title="Task finished",
-                summary=summary,
-                content={"task_id": task_id},
-                priority=60,
-                attention_level=PresentationAttention.NORMAL,
-                dismiss_policy=DismissPolicy.TIMED,
-                auto_dismiss_ms=60000,
-                preferred_zone=PreferredZone.TOP_RIGHT,
-                anchor=AnchorTarget.CORE,
-            )
-            _submit_event_threadsafe(
-                event_bus.emit(
-                    "presentation_intent",
-                    intent.to_dict(),
-                    meta=EventMeta(source=EventSource.TASK, task_id=task_id, rationale="task result ready"),
-                ),
-                loop,
-            )
-
-        def on_research_result(report, *, session_id, task_id=None, turn_id=None):
-            """Forward typed research cards with identity from owning chat turn."""
-            if event_bus is None:
-                return
-            from charlie.research.router import is_briefing_query
-            from charlie.research.presentation import (
-                build_briefing_workspace_payload,
-                build_research_workspace_payload,
-            )
-
-            is_briefing = is_briefing_query(report.query)
-            payload = (
-                build_briefing_workspace_payload(report)
-                if is_briefing
-                else build_research_workspace_payload(report)
-            )
-            payload["session_id"] = session_id
-
-            from charlie.presentation import default_presentation_resolver
-
-            outcome = ResultEnvelope(
-                request=report.query,
-                capability="research",
-                operation="news_briefing" if is_briefing else "research.web.execute",
-                result=payload.get("summary", ""),
-                status="completed",
-                data=payload,
-                session_id=session_id,
-                task_id=task_id,
-                turn_id=turn_id,
-            )
-            intent = default_presentation_resolver.resolve(outcome)
-            logger.info(
-                "Research result resolved presentation intent: id=%s kind=%s ws_type=%s is_briefing=%s",
-                intent.id,
-                intent.kind,
-                intent.workspace_type,
-                is_briefing,
-            )
-
-            def _emit_events():
-                try:
-                    cur_loop = asyncio.get_running_loop()
-                    _submit_event_task(
-                        event_bus.emit(
-                            "research_result",
-                            payload,
-                            meta=EventMeta(
-                                source=EventSource.TASK,
-                                task_id=task_id,
-                                session_id=session_id,
-                                turn_id=turn_id,
-                            ),
-                        ),
-                        cur_loop,
-                    )
-                    _submit_event_task(
-                        event_bus.emit(
-                            "presentation_intent",
-                            intent.to_dict(),
-                            meta=EventMeta(
-                                source=EventSource.TASK,
-                                task_id=task_id,
-                                session_id=session_id,
-                                turn_id=turn_id,
-                                rationale="research presentation intent",
-                            ),
-                        ),
-                        cur_loop,
-                    )
-                except RuntimeError:
-                    _submit_event_threadsafe(
-                        event_bus.emit(
-                            "research_result",
-                            payload,
-                            meta=EventMeta(
-                                source=EventSource.TASK,
-                                task_id=task_id,
-                                session_id=session_id,
-                                turn_id=turn_id,
-                            ),
-                        ),
-                        loop,
-                    )
-                    _submit_event_threadsafe(
-                        event_bus.emit(
-                            "presentation_intent",
-                            intent.to_dict(),
-                            meta=EventMeta(
-                                source=EventSource.TASK,
-                                task_id=task_id,
-                                session_id=session_id,
-                                turn_id=turn_id,
-                                rationale="research presentation intent",
-                            ),
-                        ),
-                        loop,
-                    )
-            _emit_events()
 
         _set_subsystem_health("llm", HealthStatus.STARTING, "Starting")
         _set_subsystem_health("brain", HealthStatus.STARTING, "Starting")
@@ -5165,9 +3097,7 @@ async def main() -> int:
 
         # Placeholder for event_bus (set later in async context)
         event_bus = None
-        # Per-launch fallback, not the old shared "default" bucket across all launches.
-        current_web_session_id = f"voice_{_LAUNCH_ID}"
-        _voice_fallback_session_id = current_web_session_id
+        current_session_id = f"voice_{_LAUNCH_ID}"
 
         def ensure_session_ready(session_id: str):
             if not session_id:
@@ -5203,7 +3133,6 @@ async def main() -> int:
                 logger.debug(f"update_session_title_from_text skipped: {exc}")
 
         def on_speech(text: str, diagnostic_metadata=None):
-            nonlocal current_web_session_id
             text = _normalize_app_list(text)
             logger.info(f"Speech detected: {text}")
 
@@ -5217,9 +3146,7 @@ async def main() -> int:
                 return
             recent_turn_texts[normalized] = now
 
-            session_id = _voice_fallback_session_id
-            if current_web_session_id not in (None, _voice_fallback_session_id, ""):
-                session_id = current_web_session_id
+            session_id = current_session_id
             request = _allocate_turn_request(text, session_id, "voice")
             trace = diagnostic_metadata.get("trace") if isinstance(diagnostic_metadata, dict) else None
             if trace is not None:
@@ -5248,7 +3175,7 @@ async def main() -> int:
             nonlocal turn_active
             nonlocal active_process_task
             nonlocal active_turn_id, active_turn_session_id, active_task_id
-            from charlie.core import get_active_voice_approval
+            from charlie.core import get_active_tool_approval
 
             ensure_session_ready(request.session_id)
             for pending_index, pending_request in enumerate(pending_turns):
@@ -5262,10 +3189,12 @@ async def main() -> int:
             if (
                 callable(sustained_checker)
                 and runtime_config is not None
-                and request.channel in {"voice", "web", "telegram"}
-                and not get_active_voice_approval()
+                and request.channel in {"voice", "telegram"}
+                and get_active_tool_approval() is None
                 and sustained_checker(request.input, runtime_config)
             ):
+                if request.channel == "telegram":
+                    telegram_origin_turn_ids.add(request.turn_id)
                 brain.record_intent_decision(
                     request,
                     intent="research",
@@ -5292,9 +3221,15 @@ async def main() -> int:
                     on_operation_result=on_operation_result,
                     on_thinking_update=on_thinking_update,
                 )
+                if request.channel == "telegram" and not telegram_background_tasks_by_turn.get(request.turn_id):
+                    telegram_origin_turn_ids.discard(request.turn_id)
                 return
 
-            blocked_by_active_turn = turn_active and not get_active_voice_approval()
+            blocked_by_active_turn = _should_queue_active_turn(
+                turn_active,
+                get_active_tool_approval() is not None,
+                request.channel,
+            )
 
             if request.channel == "voice" and blocked_by_active_turn:
                 current_task = asyncio.current_task()
@@ -5336,13 +3271,17 @@ async def main() -> int:
                     )
                     blocked_by_active_turn = False
 
-            # A gated tool call inside the still-running turn is waiting on a
-            # spoken yes/no -- that answer must reach _process() immediately
-            # (it routes to resolve_tool_approval), never queued behind the
-            # very turn it's meant to unblock.
+            # Approval replies must reach _process() immediately, never queue
+            # behind the turn that is waiting for them.
             if blocked_by_active_turn:
                 pending_turns.append(request)
                 pending_turn_times[request.turn_id] = time.monotonic()
+                if request.channel == "telegram":
+                    await _set_telegram_turn_status(
+                        request.turn_id,
+                        "Queued. I’ll get to this next.",
+                        create=True,
+                    )
                 if request.channel == "voice":
                     logger.info(
                         "voice_turn_schedule | utterance_id=%s | turn_id=%s | session_id=%s "
@@ -5379,8 +3318,20 @@ async def main() -> int:
             turn_active = True
             release_lifecycle_gate()
             try:
+                if request.channel == "telegram":
+                    telegram_origin_turn_ids.add(request.turn_id)
+                    await _start_telegram_turn_feedback(request.turn_id)
                 await _process(request, brain, voice)
             finally:
+                if request.channel == "telegram":
+                    try:
+                        await _finish_telegram_turn_feedback(request.turn_id)
+                    except Exception:
+                        logger.warning(
+                            "Could not clear Telegram turn status for %s",
+                            request.turn_id,
+                            exc_info=True,
+                        )
                 if active_process_task is asyncio.current_task():
                     active_process_task = None
                 if globals().get("active_process_task") is asyncio.current_task():
@@ -5463,6 +3414,15 @@ async def main() -> int:
                         timestamp=time.monotonic(),
                     )
 
+            async def _deliver_immediate_reply(message: str) -> None:
+                if platform == "telegram" and telegram_bot is not None:
+                    try:
+                        await telegram_bot.send_message(config.telegram_user_id, message)
+                    except Exception:
+                        logger.warning("Failed to send Telegram reply", exc_info=True)
+                else:
+                    _safe_speak(voice, message, last_emotion, "fast-reply")
+
             def record_primary_decision(
                 *,
                 intent: str,
@@ -5502,26 +3462,54 @@ async def main() -> int:
                 mark_response_complete("suppressed_echo")
                 return
 
-            # A gated tool call (destructive shell command / sensitive file path)
-            # is waiting on a spoken yes/no -- route this utterance to the answer
-            # instead of starting a new chat turn. See
-            # charlie.core.Brain.request_tool_approval / get_active_voice_approval.
-            from charlie.core import get_active_voice_approval
+            # Route an approval response to its waiting request instead of
+            # starting an unrelated chat turn.
+            from charlie.core import get_active_tool_approval
 
-            pending_approval_id = get_active_voice_approval()
-            if pending_approval_id:
+            pending_approval = get_active_tool_approval()
+            if pending_approval:
+                pending_approval_id, approval_channel = pending_approval
                 record_primary_decision(
                     intent="control",
                     routing_source="control",
                     rationale="pending tool approval response handled by the control path",
                 )
-                answer = parse_yes_no(text)
+                if platform == "voice" and approval_channel == "voice":
+                    answer = parse_yes_no(text)
+                else:
+                    from charlie.telegram_bot import parse_text_approval_response
+
+                    answer = parse_text_approval_response(text)
                 if answer is None:
-                    voice.speak("Sorry, I didn't catch that. Say yes to continue or no to cancel.", last_emotion)
+                    guidance = "Use the matching Approve or Decline button in Telegram. Typed yes does not approve."
+                    if platform == "voice":
+                        voice.speak(guidance, last_emotion)
+                    elif telegram_bot:
+                        try:
+                            await telegram_bot.send_message(config.telegram_user_id, guidance)
+                        except Exception:
+                            logger.warning("Failed to send Telegram approval guidance", exc_info=True)
                     mark_response_complete()
                     return
-                _resolve_tool_approval_and_notify(pending_approval_id, answer)
-                voice.speak("Okay, running it." if answer else "Cancelled.", last_emotion)
+                resolved = _resolve_tool_approval_and_notify(
+                    pending_approval_id,
+                    answer,
+                    expected_platform=platform,
+                )
+                if platform == "voice":
+                    if answer and resolved:
+                        voice.speak("Okay, running it.", last_emotion)
+                    elif resolved:
+                        voice.speak("Cancelled.", last_emotion)
+                    else:
+                        voice.speak("That approval expired.", last_emotion)
+                elif not resolved and telegram_bot:
+                    try:
+                        await telegram_bot.send_message(
+                            config.telegram_user_id, "That approval has expired. Send the request again."
+                        )
+                    except Exception:
+                        logger.warning("Failed to send expired-approval notice", exc_info=True)
                 mark_response_complete()
                 return
 
@@ -5579,7 +3567,7 @@ async def main() -> int:
                         truncated = content[:120] + "..." if len(content) > 120 else content
                         response_str += f"- [{role}]: {truncated}\n"
                 print(f"\n{response_str}", flush=True)
-                voice.speak(response_str, last_emotion)
+                await _deliver_immediate_reply(response_str)
                 mark_response_complete()
                 return
             # Route /memory-review command
@@ -5610,49 +3598,13 @@ async def main() -> int:
                             if len(preds) > 3:
                                 response_str += f"    ... +{len(preds) - 3} more\n"
                 print(f"\n{response_str}", flush=True)
-                voice.speak(response_str, last_emotion)
+                await _deliver_immediate_reply(response_str)
                 mark_response_complete()
                 return
-            panel_intent = match_surface_request(text)
-            if panel_intent is not None:
-                record_primary_decision(
-                    intent="control",
-                    routing_source="control",
-                    rationale=f"presentation command selected {panel_intent.action}",
-                )
-                result = get_presentation_controller().execute(
-                    PresentationRequest(
-                        action=panel_intent.action,
-                        surface=panel_intent.surface_id,
-                        source=EventSource.VOICE,
-                    )
-                )
-                voice.speak(result.message, last_emotion)
-                mark_response_complete()
-                return
-
-            # Route conversation-only phrase to the normal HUD summon path.
-            if _CONVERSATION_SUMMON_RE.search(text):
-                record_primary_decision(
-                    intent="control",
-                    routing_source="control",
-                    rationale="conversation workspace command selected presentation control",
-                )
-                await _open_conversation_workspace()
-                voice.speak("Here you go.", last_emotion)
-                mark_response_complete()
-                return
-
             task_id = request.task_id
             active_task_id = task_id
 
-            # Emit transcript event for voice-originated turns only. The web
-            # client already renders its own optimistic user bubble the instant
-            # it sends the chat command (see handleSendMessage in page.tsx), so
-            # echoing a "transcript" event for platform="web" too produced a
-            # duplicate user bubble on every web chat message. Voice has no
-            # client-side echo of its own -- this event is its only way to get
-            # recognized speech into the web UI transcript feed.
+            # Emit the recognized voice transcript once for runtime observers.
             if event_bus and platform == "voice":
                 _submit_event_task(
                     event_bus.emit(
@@ -5694,7 +3646,10 @@ async def main() -> int:
                     "calm": "Got it, calming down.",
                 }
                 ack = ack_map.get(cmd_emotion, "Got it.")
-                voice.speak(ack, cmd_emotion)
+                if platform == "telegram" and telegram_bot is not None:
+                    await _deliver_immediate_reply(ack)
+                else:
+                    voice.speak(ack, cmd_emotion)
                 return
 
             # Detect emotion for this turn
@@ -5730,12 +3685,11 @@ async def main() -> int:
 
             # Streaming buffer
             sentence_buffer = ""
-            web_buffer = ""  # sentence buffer for web UI token events
             full_reply_buffer = ""
             is_first_chunk = True
-
             is_first_flush = True
             turn_active = True
+            turn_channels_by_id[request.turn_id] = platform
             try:
                 async for chunk in brain.chat_stream(
                     text,
@@ -5752,36 +3706,6 @@ async def main() -> int:
                     print(chunk, end="", flush=True)
                     sentence_buffer += chunk
                     full_reply_buffer += chunk
-                    web_buffer += chunk
-
-                    # Real-time UI token stream: emit whole sentences as they complete.
-                    # This is the ONLY source of "token" events for the chat UI, so the
-                    # text accumulates without duplication. Internal model text like
-                    # <think>...</think>, [SEARCH RESULTS]...[/SEARCH RESULTS], and
-                    # TOOL: ... lines are stripped here so reasoning/tool metadata
-                    # never leaks into the chat.
-                    if event_bus and _SENTENCE_BOUNDARY.search(web_buffer):
-                        parts = _SENTENCE_BOUNDARY.split(web_buffer)
-                        for part in parts[:-1]:
-                            if part.strip():
-                                safe = _strip_search_result_tags(part.strip())
-                                safe = _strip_tool_lines(safe)
-                                safe = _strip_think(safe)
-                                if safe:
-                                    await event_bus.emit(
-                                        "token",
-                                        {
-                                            "text": safe if safe.endswith((".", "!", "?")) else safe + ". ",
-                                            "session_id": session_id,
-                                        },
-                                        meta=EventMeta(
-                                            source=EventSource.BRAIN,
-                                            task_id=task_id,
-                                            session_id=session_id,
-                                            turn_id=request.turn_id,
-                                        ),
-                                    )
-                        web_buffer = parts[-1]
 
                     # Progressive flush: sentence boundary > clause boundary > force-flush.
                     flushed = False
@@ -5830,29 +3754,61 @@ async def main() -> int:
                                 )
                                 sentence_buffer = sentence_buffer[_MAX_FLUSH_CHARS:]
 
-                # Final web UI flush - emit any remaining text stuck in web_buffer
-                if event_bus and web_buffer.strip():
-                    await event_bus.emit(
-                        "token",
-                        {
-                            "text": _strip_think(_strip_tool_lines(_strip_search_result_tags(web_buffer.strip()))),
-                            "session_id": session_id,
-                        },
-                        meta=EventMeta(
-                            source=EventSource.BRAIN,
-                            task_id=task_id,
-                            session_id=session_id,
-                            turn_id=request.turn_id,
-                        ),
-                    )
-
-                # Final TTS
+                # Final TTS for any text that did not reach a progressive boundary.
                 if sentence_buffer.strip():
                     _safe_speak(voice, sparkle + sentence_buffer, detected_emotion, "final")
 
-                # Persist the generated reply, falling back to web_buffer if cancelled.
-                final_reply = full_reply_buffer.strip() or web_buffer.strip()
+                # Persist the generated reply.
+                final_reply = full_reply_buffer.strip()
                 if final_reply:
+                    candidate_staged = False
+                    if platform == "telegram" and self_extension_orchestrator is not None:
+                        try:
+                            correction_candidate = await asyncio.to_thread(
+                                self_extension_orchestrator.stage_reusable_correction_candidate,
+                                text,
+                            )
+                            if correction_candidate is not None and correction_candidate.success:
+                                final_reply += "\n\nI staged an inactive instruction candidate for your review."
+                                candidate_staged = True
+                                logger.info(
+                                    "reusable_skill_candidate_staged_from_owner_correction | status=%s",
+                                    correction_candidate.status.value,
+                                )
+                        except Exception:
+                            logger.warning("Could not stage a reusable correction candidate", exc_info=True)
+                    if (
+                        platform == "telegram"
+                        and self_extension_orchestrator is not None
+                        and not candidate_staged
+                    ):
+                        patterns = repeated_success_patterns_by_turn.pop(request.turn_id, [])
+                        for pattern in patterns:
+                            try:
+                                # ponytail: scan 500 audit rows; add an index if volume outgrows this window.
+                                candidate = await asyncio.to_thread(
+                                    self_extension_orchestrator.stage_repeated_success_candidate,
+                                    pattern["request"],
+                                    pattern["capability"],
+                                    pattern["operation"],
+                                    audit_store.list(limit=500),
+                                    current_turn_id=request.turn_id,
+                                    expected_signature=pattern["signature"],
+                                    risk_class=pattern["risk_class"],
+                                    requires_approval=False,
+                                )
+                                if candidate is not None and candidate.success:
+                                    final_reply += "\n\nI staged an inactive instruction candidate for your review."
+                                    logger.info(
+                                        "reusable_skill_candidate_staged_from_repeated_success | status=%s",
+                                        candidate.status.value,
+                                    )
+                                    candidate_staged = True
+                                    break
+                            except Exception:
+                                logger.warning(
+                                    "Could not stage a repeated-success skill candidate", exc_info=True
+                                )
                     try:
                         store.append("assistant", final_reply, session_id=session_id, turn_id=request.turn_id)
                         store.touch_session(session_id)
@@ -5906,7 +3862,7 @@ async def main() -> int:
             except Exception as exc:
                 logger.error("Turn failed", exc_info=True)
                 error_class, message = classify_exception(exc)
-                _safe_speak(voice, message, last_emotion, "turn-failed")
+                await _deliver_immediate_reply(message)
                 if event_bus:
                     severity = "error" if error_class == ErrorClass.CRITICAL else "warning"
                     await event_bus.emit(
@@ -5933,6 +3889,14 @@ async def main() -> int:
                     )
                 raise
             finally:
+                turn_channels_by_id.pop(request.turn_id, None)
+                repeated_success_patterns_by_turn.pop(request.turn_id, None)
+                if platform == "telegram" and telegram_bot is not None and self_extension_orchestrator is not None:
+                    await _send_pending_skill_candidate_reviews(
+                        telegram_bot,
+                        self_extension_orchestrator,
+                        config.telegram_user_id,
+                    )
                 turn_active = False
                 if active_operation_task_id == task_id:
                     active_operation_name = None
@@ -5968,67 +3932,8 @@ async def main() -> int:
                 or _VISUAL_CONTENT_QUERY_RE.search(text)
             )
 
-            if platform == "voice" and full_reply_buffer.strip() and text.strip() and not screen_content_query:
-
-                async def _background_learn(user_text: str, reply_text: str):
-                    try:
-                        await asyncio.sleep(0)
-                        if not config.llm_url:
-                            return
-                        learning_prompt = (
-                            f"User said: {user_text}\n"
-                            f"Charlie replied: {reply_text}\n"
-                            "Extract 0-1 new user preferences (e.g., 'prefers short answers'). "
-                            "Output ONLY the preference line, or output nothing if nothing new."
-                        )
-                        response = await brain.client.post(
-                            "chat/completions",
-                            json={
-                                "model": config.llm_model,
-                                "messages": [{"role": "user", "content": learning_prompt}],
-                                "temperature": 0.0,
-                                "max_tokens": 120,
-                                "stream": False,
-                            },
-                        )
-                        response.raise_for_status()
-                        content = response.json()["choices"][0]["message"].get("content")
-                        learning = content.strip() if isinstance(content, str) else ""
-                        clean_learning = learning.lower().rstrip(".")
-                        if not learning or any(
-                            clean_learning.startswith(p)
-                            for p in ("nothing", "none", "no new", "no preference", "no change", "no update")
-                        ):
-                            return
-
-                        from charlie.tools import registry as tool_registry
-
-                        existing = ""
-                        u_path = Path(config.user_file)
-                        if u_path.exists():
-                            existing = u_path.read_text(encoding="utf-8")
-
-                        if learning not in existing:
-                            await asyncio.get_running_loop().run_in_executor(
-                                None,
-                                tool_registry.execute_tool,
-                                "memory",
-                                {
-                                    "action": "add",
-                                    "target": "user",
-                                    "content": learning,
-                                },
-                            )
-                            brain.reload_context()
-                            logger.info(f"Learning: {learning}")
-                    except Exception as e:
-                        logger.debug(f"Learning loop skipped: {e}")
-
-                _schedule_housekeeping(_background_learn(text, full_reply_buffer))
-
             if platform == "voice" and full_reply_buffer.strip() and not screen_content_query:
                 _schedule_housekeeping(brain._extract_thread_update(text, full_reply_buffer, session_id))
-                _schedule_housekeeping(brain._background_save_to_memory(full_reply_buffer, "assistant"))
             if platform == "voice":
                 brain.schedule_deferred_background_work()
 
@@ -6040,6 +3945,12 @@ async def main() -> int:
             change alone never reaches them -- only recreating the engine does.
             """
             nonlocal voice
+            if not config.voice_enabled:
+                detail = "Voice input and output disabled by VOICE_ENABLED=false"
+                voice = _UnavailableVoiceEngine(detail, disabled=True)
+                for name in ("voice", "voice_capture", "asr"):
+                    _set_subsystem_health(name, HealthStatus.DISABLED, detail)
+                return True, ""
             try:
                 voice.stop()
             except Exception as ex:
@@ -6230,535 +4141,65 @@ async def main() -> int:
             except Exception as exc:
                 return {"success": False, "error": f"Canonical MCP extension operation failed: {exc}"}
 
-        async def consume_web_commands(event_bus, brain):
-            """Read commands from the web UI and dispatch them."""
-            nonlocal current_web_session_id, voice, mcp_client
-            shutdown_requested = False
-
-            async def _extension_request(payload: dict[str, Any]) -> None:
-                nonlocal mcp_client
-                from charlie.tools import registry as _extension_registry
-
-                _, mcp_client = await _handle_extension_operation_request(
-                    payload,
-                    brain=brain,
-                    plugin_manager=plugin_manager,
-                    mcp_client=mcp_client,
-                    runtime_config=config,
-                    tool_registry=_extension_registry,
-                    extension_registry=extension_runtime_registry,
-                    event_bus=event_bus,
-                    result_cache=extension_operation_results,
-                    in_flight=extension_operation_in_flight,
-                    fingerprint_cache=extension_operation_fingerprints,
-                    operation_lock=settings_operation_lock,
-                )
-
-            async def _session_request(payload, operation=None, accept_callback=None):
-                nonlocal current_web_session_id
-                request_payload = dict(payload or {})
-                if operation is not None:
-                    request_payload["operation"] = operation
-                request_payload.setdefault("request_id", f"session-{id(request_payload)}")
-                try:
-                    session_handler = _handle_session_operation_request
-                except NameError:
-                    if operation == "chat":
-                        result = await accept_callback() if accept_callback is not None else {}
-                        return {"status": "accepted", "result": {"ok": True, **(result or {})}}
-                    raise
-                result = await session_handler(
-                    store,
-                    event_bus,
-                    request_payload,
-                    result_cache=session_operation_results,
-                    in_flight=session_operation_in_flight,
-                    fingerprint_cache=session_operation_fingerprints,
-                    active_session_id=current_web_session_id,
-                    active_turn_session_id=active_turn_session_id,
-                    queued_session_ids=tuple(item.session_id for item in pending_turns),
-                    background_session_ids=tuple(
-                        task.session_id
-                        for task in background_task.list_tasks()
-                        if task.status in {"queued", "running"}
-                    ),
-                    accept_callback=accept_callback,
-                    launch_id=_LAUNCH_ID,
-                )
-                result_data = result.get("result") if isinstance(result.get("result"), dict) else {}
-                if result.get("status") == "completed" and request_payload.get("operation") == "active":
-                    current_web_session_id = result_data.get("active_session_id")
-                    from charlie.recovery import set_active_session_id
-
-                    set_active_session_id(current_web_session_id or _voice_fallback_session_id)
-                elif result.get("status") == "completed" and request_payload.get("operation") == "delete":
-                    if result_data.get("active_session_id") is None:
-                        current_web_session_id = _voice_fallback_session_id
-                        from charlie.recovery import set_active_session_id
-
-                        set_active_session_id(_voice_fallback_session_id)
-                return result
-
-            async def _session_request_with_lifecycle_gate(payload, operation=None, accept_callback=None):
-                operation_name = operation or (payload or {}).get("operation")
-                if operation_name == "chat":
-                    return await _session_request(payload, operation=operation, accept_callback=accept_callback)
-                async with session_lifecycle_gate:
-                    return await _session_request(payload, operation=operation, accept_callback=accept_callback)
-
-            def _privacy_session_state() -> tuple[Optional[str], tuple[str, ...], tuple[str, ...]]:
-                return (
-                    active_turn_session_id,
-                    tuple(item.session_id for item in pending_turns if isinstance(item.session_id, str)),
-                    tuple(
-                        task.session_id
-                        for task in background_task.list_tasks()
-                        if task.status
-                        in {
-                            "queued",
-                            "planning",
-                            "waiting",
-                            "running",
-                            "paused",
-                            "awaiting_approval",
-                            "approval_required",
-                            "verifying",
-                        }
-                        and isinstance(task.session_id, str)
-                    ),
-                )
-
-            def _submit_web_turn(request: TurnRequest) -> dict[str, Any]:
-                try:
-                    submission = _submit_event_task(_dispatch_or_queue(request))
-                except RuntimeError:
-                    logger.warning("Web foreground turn submission failed", exc_info=True)
-                    submission = None
-                if submission is not None:
-                    return {"turn_id": request.turn_id}
-                shutting_down = bool(runtime_shutting_down)
-                return {
-                    "accepted": False,
-                    "status": "shutting_down" if shutting_down else "unavailable",
-                    "result": {
-                        "ok": False,
-                        "failure_kind": "runtime_shutting_down" if shutting_down else "runtime_unavailable",
-                        "reason": (
-                            "Main runtime is shutting down; foreground turn was not admitted."
-                            if shutting_down
-                            else "Main foreground turn authority is unavailable; turn was not admitted."
-                        ),
-                    },
-                }
-
-            while True:
-                try:
-                    cmd = await event_bus.next_command()
-                    _log_received_web_command(cmd)
-                    cmd_type = cmd.get("type")
-                    if cmd_type == "session_operation":
-                        await _session_request_with_lifecycle_gate(cmd.get("payload", {}))
-                    elif cmd_type == "session_chat":
-                        payload = dict(cmd.get("payload") or {})
-                        async def accept_http_chat():
-                            request = _allocate_turn_request(
-                                str(payload.get("text") or ""),
-                                str(payload.get("session_id") or ""),
-                                "web",
-                            )
-                            return _submit_web_turn(request)
-
-                        result = await _session_request(
-                            payload,
-                            operation="chat",
-                            accept_callback=accept_http_chat,
-                        )
-                    elif cmd_type == "chat":
-                        payload_sid = cmd.get("payload", {}).get("session_id")
-                        chat_payload = dict(cmd.get("payload") or {})
-                        chat_payload.setdefault("session_id", cmd.get("session_id") or payload_sid)
-                        chat_payload.setdefault("text", cmd.get("text") or chat_payload.get("text", ""))
-                        async def accept_ws_chat():
-                            nonlocal current_web_session_id
-                            candidate_session_id = chat_payload.get("session_id") or _voice_fallback_session_id
-                            request = _allocate_turn_request(
-                                chat_payload.get("text", ""),
-                                candidate_session_id,
-                                "web",
-                            )
-                            submission = _submit_web_turn(request)
-                            if submission.get("accepted") is False:
-                                return submission
-                            current_web_session_id = candidate_session_id
-                            from charlie.recovery import set_active_session_id
-
-                            set_active_session_id(current_web_session_id)
-                            return submission
-
-                        await _session_request(
-                            chat_payload,
-                            operation="chat",
-                            accept_callback=accept_ws_chat,
-                        )
-                    elif cmd_type == "session_active":
-                        payload_sid = cmd.get("payload", {}).get("session_id")
-                        await _session_request_with_lifecycle_gate(
-                            {
-                                "session_id": cmd.get("session_id") or payload_sid,
-                                "request_id": cmd.get("request_id") or cmd.get("payload", {}).get("request_id"),
-                            },
-                            operation="active",
-                        )
-                        logger.info("Active session request processed")
-                    elif cmd_type == "ws_connection_count":
-                        global hud_client_count
-                        hud_client_count = cmd.get("count", 0)
-                        from charlie.recovery import set_active_ws_count
-
-                        set_active_ws_count(hud_client_count)
-                    elif cmd_type == "runtime_state_request":
-                        await _dispatch_web_command(
-                            cmd, event_bus, mcp_client, settings_service, extension_runtime_registry
-                        )
-                    elif cmd_type == "runtime_shutdown":
-                        payload = cmd.get("payload") if isinstance(cmd.get("payload"), dict) else {}
-                        if payload.get("launch_id") != _LAUNCH_ID:
-                            logger.warning(
-                                "Ignoring stale runtime shutdown request | request_id=%s | launch_id=%s",
-                                payload.get("request_id") or cmd.get("request_id"),
-                                payload.get("launch_id"),
-                            )
-                            continue
-                        if runtime_shutting_down:
-                            continue
-                        logger.info(
-                            "Runtime shutdown request accepted | request_id=%s | launch_id=%s",
-                            payload.get("request_id") or cmd.get("request_id"),
-                            _LAUNCH_ID,
-                        )
-                        shutdown_requested = True
-                        raise asyncio.CancelledError()
-                    elif cmd_type == "recovery_approve":
-                        payload = cmd.get("payload", {})
-                        proposal_id = payload.get("proposal_id")
-                        if proposal_id:
-                            from charlie.recovery import pending_proposals
-
-                            fut = pending_proposals.get(proposal_id)
-                            if fut and not fut.done():
-                                fut.set_result(True)
-                    elif cmd_type == "recovery_reject":
-                        payload = cmd.get("payload", {})
-                        proposal_id = payload.get("proposal_id")
-                        if proposal_id:
-                            from charlie.recovery import pending_proposals
-
-                            fut = pending_proposals.get(proposal_id)
-                            if fut and not fut.done():
-                                fut.set_result(False)
-                    elif cmd_type == "tool_approve":
-                        payload = cmd.get("payload", {})
-                        request_id = payload.get("request_id")
-                        if request_id:
-                            _resolve_tool_approval_and_notify(request_id, True)
-                    elif cmd_type == "tool_reject":
-                        payload = cmd.get("payload", {})
-                        request_id = payload.get("request_id")
-                        if request_id:
-                            _resolve_tool_approval_and_notify(request_id, False)
-                    elif cmd_type == "terminal_command_request":
-                        payload = cmd.get("payload", {})
-                        request_id = _normalize_terminal_request_id(payload.get("request_id"))
-                        terminal_session_id = payload.get("terminal_session_id")
-                        command = payload.get("command")
-                        if terminal_session_id and isinstance(command, str) and command.strip():
-                            _submit_event_task(
-                                _handle_terminal_command_request(
-                                    brain,
-                                    event_bus,
-                                    request_id=request_id,
-                                    terminal_session_id=terminal_session_id,
-                                    command=command,
-                                    result_cache=terminal_command_results,
-                                    in_flight=terminal_command_in_flight,
-                                    execution_target=str(payload.get("execution_target") or "shell"),
-                                )
-                            )
-                    elif cmd_type == "terminal_session_result":
-                        _resolve_terminal_session_result(cmd.get("payload", {}))
-                    elif cmd_type == "media_operation":
-                        _submit_event_task(
-                            _handle_media_operation_request(
-                                brain,
-                                event_bus,
-                                cmd.get("payload", {}),
-                                result_cache=media_operation_results,
-                                in_flight=media_operation_in_flight,
-                                fingerprint_cache=media_operation_fingerprints,
-                            )
-                        )
-                    elif cmd_type == "calendar_operation":
-                        _submit_event_task(
-                            _handle_calendar_operation_request(
-                                brain,
-                                event_bus,
-                                cmd.get("payload", {}),
-                                result_cache=calendar_operation_results,
-                                in_flight=calendar_operation_in_flight,
-                                fingerprint_cache=calendar_operation_fingerprints,
-                            )
-                        )
-                    elif cmd_type == "settings_operation":
-                        _submit_event_task(
-                            _handle_settings_operation_request(
-                                settings_service,
-                                event_bus,
-                                cmd.get("payload", {}),
-                                result_cache=settings_operation_results,
-                                in_flight=settings_operation_in_flight,
-                                fingerprint_cache=settings_operation_fingerprints,
-                                reload_handlers={
-                                    "voice": _reload_voice_engine,
-                                    "mcp": _reload_mcp_client,
-                                    "plugins": _reload_plugin_tools,
-                                },
-                                post_reload=_publish_settings_reload_state,
-                                operation_lock=settings_operation_lock,
-                            )
-                        )
-                    elif cmd_type == "privacy_operation":
-                        payload = cmd.get("payload", {})
-                        from charlie import resource_locks
-
-                        privacy_coroutine = _handle_privacy_operation_request(
-                            privacy_service,
-                            event_bus,
-                            payload,
-                            result_cache=privacy_operation_results,
-                            in_flight=privacy_operation_in_flight,
-                            fingerprint_cache=privacy_operation_fingerprints,
-                            browser_owner=lambda: resource_locks.current_owner("browser"),
-                            admission_open=lambda: not runtime_shutting_down,
-                            backup_dir=Path("backups"),
-                            lifecycle_gate=session_lifecycle_gate,
-                            session_state=_privacy_session_state,
-                        )
-                        if _submit_event_task(privacy_coroutine) is None:
-                            await event_bus.emit(
-                                EventType.PRIVACY_OPERATION_RESULT.value,
-                                _privacy_shutdown_result(payload),
-                                meta=EventMeta(
-                                    source=EventSource.RUNTIME,
-                                    rationale="privacy authority admission closed",
-                                ),
-                            )
-                    elif cmd_type == "stop":
-                        await _apply_voice_control(
-                            "stop",
-                            voice=voice,
-                            brain=brain,
-                            active_turn=active_turn_id is not None,
-                            active_operation_cancellable=active_operation_cancellable,
-                            active_process_task=active_process_task,
-                            cancel_housekeeping=_cancel_housekeeping,
-                        )
-                    elif cmd_type == "presentation_command":
-                        payload = cmd.get("payload", {})
-                        action = payload.get("action")
-                        if action == "summon_hud":
-                            await _summon_hud()
-                        elif action == "open_conversation":
-                            await _open_conversation_workspace()
-                        elif action == "dismiss_widget" and isinstance(payload.get("id"), str):
-                            await event_bus.emit(
-                                "presentation_dismiss",
-                                {"id": payload["id"]},
-                                meta=EventMeta(
-                                    source=EventSource.RUNTIME,
-                                    rationale="operator dismissed widget from HUD",
-                                ),
-                            )
-                        elif action == "focus_task" and isinstance(payload.get("task_id"), str):
-                            task_id = payload["task_id"]
-                            await event_bus.emit(
-                                "presentation_command",
-                                {"action": "focus_task", "task_id": task_id},
-                                meta=EventMeta(
-                                    source=EventSource.BRAIN,
-                                    rationale="operator focused task from HUD rail",
-                                ),
-                            )
-                            try:
-                                task = get_task_journal().get(task_id)
-                            except KeyError:
-                                logger.warning("Ignoring focus request for unknown task %s", task_id)
-                            else:
-                                if _task_workspace_admitted(task):
-                                    intent = _task_workspace_intent(task)
-                                    await event_bus.emit(
-                                        "presentation_intent",
-                                        intent.to_dict(),
-                                        meta=EventMeta(
-                                            source=EventSource.TASK,
-                                            task_id=task.id,
-                                            rationale="task focus opened its runtime workspace",
-                                        ),
-                                    )
-                                else:
-                                    logger.info("Skipping full workspace for completed zero-step task %s", task.id)
-                    elif cmd_type == "hud_invoke":
-                        # Pet/hotkey summon must not open a workspace.
-                        await _summon_hud()
-                    elif cmd_type == "audio_control":
-                        payload = cmd.get("payload", {})
-                        state = voice.set_audio_state(
-                            muted=payload.get("muted"),
-                            volume=payload.get("volume"),
-                        )
-                        await event_bus.emit("audio_state", state, meta=EventMeta(source=EventSource.VOICE))
-                    elif cmd_type == "mic_control":
-                        payload = cmd.get("payload", {})
-                        mic_state = voice.set_mic_state(bool(payload.get("mic_muted", True)))
-                        await event_bus.emit("mic_state", mic_state, meta=EventMeta(source=EventSource.VOICE))
-                    elif cmd_type == "self_extension_request":
-                        payload = cmd.get("payload", {})
-                        request_id = str(payload.get("request_id") or cmd.get("request_id") or uuid.uuid4().hex)
-                        _submit_event_task(
-                            _run_self_extension_request(
-                                self_extension_orchestrator,
-                                payload,
-                                request_id,
-                                event_bus=event_bus,
-                            )
-                        )
-                    elif cmd_type == "self_extension_rollback":
-                        payload = cmd.get("payload", {})
-                        tx_id = str(payload.get("tx_id", ""))
-                        if tx_id and self_extension_orchestrator is not None:
-                            await asyncio.to_thread(self_extension_orchestrator.rollback_transaction, tx_id)
-                    elif cmd_type == "ptt_start":
-                        voice.start_ptt()
-                        await event_bus.emit("ptt_start", {}, meta=EventMeta(source=EventSource.VOICE))
-                        await event_bus.emit("vad_start", {"source": "ptt"}, meta=EventMeta(source=EventSource.VOICE))
-                    elif cmd_type == "ptt_stop":
-                        voice.stop_ptt()
-                        await event_bus.emit("ptt_stop", {}, meta=EventMeta(source=EventSource.VOICE))
-                    elif cmd_type == "ptt_cancel":
-                        voice.cancel_ptt()
-                        await event_bus.emit("ptt_cancel", {}, meta=EventMeta(source=EventSource.VOICE))
-                    elif cmd_type == "extension_operation":
-                        payload = cmd.get("payload", {})
-                        _submit_event_task(_extension_request(payload))
-                    elif cmd_type == "mcp_operation":
-                        payload = cmd.get("payload", {})
-                        _, mcp_client = await _dispatch_mcp_operation(
-                            payload,
-                            event_bus,
-                            mcp_client=mcp_client,
-                            brain=brain,
-                        )
-                    elif cmd_type == "memory_operation":
-                        payload = cmd.get("payload", {})
-                        result = apply_memory_operation(payload, memory_service)
-                        await event_bus.emit(
-                            "memory_operation_result",
-                            result,
-                            meta=EventMeta(
-                                source=EventSource.BRAIN,
-                                rationale="authoritative main-runtime memory operation result",
-                            ),
-                        )
-                    elif cmd_type == "background_task_start":
-                        payload = cmd.get("payload", {})
-
-                        try:
-                            task_session_id = payload.get("session_id") or current_web_session_id
-                            if not isinstance(task_session_id, str) or not store.session_exists(task_session_id):
-                                raise SessionNotFoundError("Background task session does not exist")
-                            async with session_lifecycle_gate:
-                                await background_task.start(
-                                    config,
-                                    event_bus,
-                                    payload.get("text", ""),
-                                    session_store=store,
-                                    memory_store=memory_store,
-                                    memory_graph=memory_graph,
-                                    memory_service=memory_service,
-                                    voice=voice,
-                                    session_id=task_session_id,
-                                    on_tool_call=on_tool_call,
-                                    on_tool_result=on_tool_result,
-                                    on_operation_result=on_operation_result,
-                                    on_thinking_update=on_thinking_update,
-                                )
-                        except RuntimeError as ex:
-                            await event_bus.emit(
-                                "alert",
-                                {"severity": "warning", "message": str(ex)},
-                                meta=EventMeta(source=EventSource.TASK, rationale=str(ex)),
-                            )
-                    elif cmd_type == "background_task_cancel":
-                        payload = cmd.get("payload", {})
-
-                        background_task.cancel(payload.get("task_id", ""))
-                except asyncio.CancelledError:
-                    if shutdown_requested:
-                        raise
-                    break
-                except Exception as e:
-                    logger.error(f"Error handling web command: {e}", exc_info=True)
-
-        # Start web server subprocess.
-        web_entry = os.path.join(os.path.dirname(__file__), "charlie", "web_server_entry.py")
-        _web_env = os.environ.copy()
-        _web_env["CHARLIE_LAUNCH_ID"] = _LAUNCH_ID
-        try:
-            web_proc = await asyncio.to_thread(
-                _start_web_subprocess,
-                (sys.executable, web_entry),
-                _web_env,
-                host=config.charlie_host,
-                port=config.charlie_port,
-                launch_id=_LAUNCH_ID,
-            )
-        except Exception as exc:
-            exit_code = 1
-            logger.error("Charlie runtime startup failed before voice initialization: %s", exc, exc_info=True)
-            raise
-
-        # Start desktop companion subprocess (Windows-only, PySide6)
-        if config.pet_enabled:
-            _set_subsystem_health("companion", HealthStatus.STARTING)
-            companion_ready, companion_detail = _companion_dependency_status()
-            if not companion_ready:
-                logger.warning("Companion unavailable: %s", companion_detail)
-                _set_subsystem_health("companion", HealthStatus.DEGRADED, companion_detail)
-            else:
-                pet_entry = os.path.join(os.path.dirname(__file__), "charlie", "pet_entry.py")
-                companion_ready_file = Path(tempfile.gettempdir()) / f"charlie-companion-{_LAUNCH_ID}.ready"
-                companion_env = os.environ.copy()
-                companion_env["CHARLIE_COMPANION_READY_FILE"] = str(companion_ready_file)
-                pet_proc = _start_subsystem_process(
-                    "companion",
-                    (sys.executable, pet_entry),
-                    companion_env,
-                    readiness_file=companion_ready_file,
-                )
-
-        # Telegram runs in-process (needs direct access to _dispatch_or_queue), not a subprocess like web/pet/hud.
+        # Telegram runs in-process so it shares the canonical dispatch and approval owners.
         if config.telegram_enabled:
             try:
-                from charlie.telegram_bot import TelegramBot, should_relay_approval
+                from charlie.telegram_bot import TelegramBot
 
                 async def on_telegram_message(text, chat_id):
-                    request = _allocate_turn_request(text, current_web_session_id, "telegram")
+                    from charlie.core import get_active_tool_approval
+                    from charlie.telegram_bot import (
+                        is_text_approval_attempt,
+                        parse_text_approval_response,
+                    )
+
+                    pending_approval = get_active_tool_approval()
+                    if pending_approval:
+                        answer = parse_text_approval_response(text)
+                        if answer is None and is_text_approval_attempt(text):
+                            await telegram_bot.send_message(
+                                chat_id,
+                                "Use the matching Approve or Decline button. Typed yes does not approve.",
+                            )
+                            return
+                        if answer is not None and not _resolve_tool_approval_and_notify(
+                            pending_approval[0],
+                            answer,
+                            expected_platform="telegram",
+                        ):
+                            await telegram_bot.send_message(
+                                chat_id, "That approval has expired. Send the request again."
+                            )
+                        if answer is not None:
+                            return
+                    if not turn_active:
+                        await telegram_bot.send_typing(chat_id)
+                    request = _allocate_turn_request(text, current_session_id, "telegram")
                     await _dispatch_or_queue(request)
 
                 def on_telegram_approval(request_id, approved):
-                    _resolve_tool_approval_and_notify(request_id, approved)
+                    return _resolve_tool_approval_and_notify(
+                        request_id,
+                        approved,
+                        expected_platform="telegram",
+                    )
+
+                async def on_telegram_skill_candidate_review(review_token, approved):
+                    if self_extension_orchestrator is None or brain is None:
+                        return False
+                    return await _resolve_skill_candidate_review(
+                        self_extension_orchestrator,
+                        brain,
+                        review_token,
+                        approved,
+                    )
 
                 telegram_bot = TelegramBot(
-                    config.telegram_bot_token, config.telegram_user_id, on_telegram_message, on_telegram_approval
+                    config.telegram_bot_token,
+                    config.telegram_user_id,
+                    on_telegram_message,
+                    on_telegram_approval,
+                    on_skill_candidate_review=on_telegram_skill_candidate_review,
                 )
                 await telegram_bot.start()
                 logger.info("Telegram bot started")
@@ -6774,7 +4215,7 @@ async def main() -> int:
                 _submit_event_threadsafe(
                     event_bus.emit(
                         "speaking_start",
-                        {"session_id": current_web_session_id},
+                        {"session_id": current_session_id},
                         meta=EventMeta(source=EventSource.VOICE),
                     ),
                     loop,
@@ -6785,7 +4226,7 @@ async def main() -> int:
                 _submit_event_threadsafe(
                     event_bus.emit(
                         "speaking_stop",
-                        {"session_id": current_web_session_id},
+                        {"session_id": current_session_id},
                         meta=EventMeta(source=EventSource.VOICE),
                     ),
                     loop,
@@ -6848,26 +4289,32 @@ async def main() -> int:
         voice.set_wake_word_callback(on_wake_word)
 
         # Connection test & Dynamic Welcome
-        logger.debug("Requesting dynamic welcome message from LLM...")
-        welcome_msg = ""
-        # Wrap the generator in a timeout to avoid hangs if LLM IP is unreachable
-        try:
-            async with asyncio.timeout(25.0):
-                async for chunk in brain.chat_stream(
-                    "Give me a very brief, one-sentence startup welcome. Be warm, natural, "
-                    "and speak like a human colleague (not an AI assistant). "
-                    "Do NOT say 'How can I help you' or 'How can I assist'. Speak only in English.",
-                    skip_tools=True,
-                ):
-                    welcome_msg += chunk
-        except asyncio.TimeoutError:
-            logger.warning("Dynamic welcome timed out after 25s. Using fallback.")
-            welcome_msg = "Hey there. I'm online and listening."
-        except Exception as e:
-            logger.warning(f"Dynamic welcome failed: {type(e).__name__}: {e}. Using fallback.")
-            welcome_msg = "Hey there. I'm online and listening."
+        ensure_session_ready(current_session_id)
+        if config.voice_enabled:
+            logger.debug("Requesting dynamic welcome message from LLM...")
+            welcome_msg = ""
+            try:
+                async with asyncio.timeout(25.0):
+                    async for chunk in brain.chat_stream(
+                        "Give me a very brief, one-sentence startup welcome. Be warm, natural, "
+                        "and speak like a human colleague (not an AI assistant). "
+                        "Do NOT say 'How can I help you' or 'How can I assist'. Speak only in English.",
+                        session_id=current_session_id,
+                        skip_tools=True,
+                    ):
+                        welcome_msg += chunk
+            except asyncio.TimeoutError:
+                logger.warning("Dynamic welcome timed out after 25s. Using fallback.")
+                welcome_msg = "Hey there. I'm online and listening."
+            except Exception as e:
+                logger.warning(f"Dynamic welcome failed: {type(e).__name__}: {e}. Using fallback.")
+                welcome_msg = "Hey there. I'm online and listening."
+        else:
+            welcome_msg = "Voice is disabled. Charlie is online for text and Telegram."
 
-        if voice.is_ready:
+        if not config.voice_enabled:
+            online_status = "   Charlie is online; voice disabled"
+        elif voice.is_ready:
             welcome_msg = welcome_msg or "Hey there. I'm online and listening."
             online_status = "   Charlie is online and listening"
         else:
@@ -6877,9 +4324,10 @@ async def main() -> int:
         print(online_status, flush=True)
         print("=" * 40, flush=True)
         print(f"\rCharlie: {welcome_msg}", flush=True)
-        voice.speak(welcome_msg, "neutral")
+        if config.voice_enabled:
+            voice.speak(welcome_msg, "neutral")
 
-        # Real GPU utilization, re-read every tick so the dashboard reflects
+        # Real GPU utilization, re-read every tick so runtime observers reflect
         # live load. Cached briefly (1s) to avoid hammering nvidia-smi on every
         # status emit; falls back to 0.0 only when no NVIDIA GPU is present.
         _gpu_reader: dict = {"value": 0.0, "ts": 0.0}
@@ -6976,24 +4424,6 @@ async def main() -> int:
                                     meta=EventMeta(source=EventSource.TASK, rationale="idle-return catch-up"),
                                 )
                                 voice.speak(catchup_msg, "neutral")
-                                from charlie.utils import make_id
-                                catchup_intent = PresentationIntent(
-                                    id=make_id(),
-                                    kind=PresentationKind.NOTIFICATION,
-                                    title="While you were away",
-                                    summary=catchup_msg,
-                                    priority=60,
-                                    attention_level=PresentationAttention.NORMAL,
-                                    dismiss_policy=DismissPolicy.TIMED,
-                                    auto_dismiss_ms=8000,
-                                    preferred_zone=PreferredZone.TOP_RIGHT,
-                                    anchor=AnchorTarget.CORE,
-                                )
-                                await bus.emit(
-                                    "presentation_intent",
-                                    catchup_intent.to_dict(),
-                                    meta=EventMeta(source=EventSource.TASK, rationale="idle-return catch-up"),
-                                )
                         was_idle = is_idle
                     await asyncio.sleep(1.0)
             except asyncio.CancelledError:
@@ -7001,25 +4431,17 @@ async def main() -> int:
             except Exception as e:
                 logger.error(f"Metric emitter error: {e}")
 
-        # Run voice loop + web command consumer concurrently via ZeroMQ
-        async with EventBus(pub_port=5555, pull_port=5556, is_producer=True) as bus:
+        # Run the canonical voice/runtime loop with the event publisher.
+        async with EventBus(pub_port=5555) as bus:
             event_bus = bus
             _main_event_bus = bus
             await _publish_subsystem_health(bus)
-            if pet_proc is not None and companion_ready_file is not None:
-                companion_monitor_task = asyncio.create_task(
-                    _monitor_companion_readiness(pet_proc, companion_ready_file, bus)
-                )
             bus.set_state_listener(_on_event_for_state)
             voice.set_event_bus(bus)
             import charlie.recovery
 
             charlie.recovery._event_bus = bus
             brain.event_bus = bus
-            charlie.recovery.set_active_session_id(current_web_session_id)
-            import charlie.tools
-
-            charlie.tools.set_event_bus(bus, asyncio.get_running_loop())
             import charlie.mcp_client
 
             charlie.mcp_client.set_event_bus(bus, asyncio.get_running_loop())
@@ -7028,8 +4450,7 @@ async def main() -> int:
             # real EventBus loop and MCP subsystem are available. Chat tools
             # delegate to this instance; they never construct an orchestrator.
             await mcp_start_task
-            # Replay after web subscriber and producer command sockets have had
-            # time to connect; initial PUB events can be lost during startup.
+            # Publish an initial authoritative runtime snapshot after startup.
             await _publish_runtime_state(bus, mcp_client, settings_service, extension_runtime_registry)
             from charlie.capabilities import get_capability_index
             from charlie.code_index import CodeIndex
@@ -7088,13 +4509,43 @@ async def main() -> int:
                 self_knowledge_service=self_knowledge,
                 doctor=doctor,
             )
+            _load_rehydrated_skill_blocks(brain, self_extension_orchestrator)
+            if telegram_bot is not None and config.telegram_user_id > 0:
+                submitted_reviews = await _send_pending_skill_candidate_reviews(
+                    telegram_bot,
+                    self_extension_orchestrator,
+                    config.telegram_user_id,
+                )
+                if submitted_reviews:
+                    logger.info("Submitted %s pending skill candidate review(s) to owner Telegram", submitted_reviews)
 
             from charlie.calendar_runtime import CalendarRuntime, configure_calendar_runtime
-            from charlie.calendar_scheduler import deliver_due_reminders
+            from charlie.calendar_scheduler import (
+                deliver_due_automation_reminders,
+                deliver_due_automation_tasks,
+                deliver_due_reminders,
+            )
             from charlie.utils import utc_now_iso
 
             calendar_runtime = CalendarRuntime(config.session_db_path)
             configure_calendar_runtime(calendar_runtime)
+            interrupted_automations = await calendar_runtime.execute("reconcile_automation_claims")
+            if interrupted_automations:
+                recovery_notice = (
+                    f"{interrupted_automations} scheduled automation run(s) were interrupted by restart "
+                    "and need review before retry."
+                )
+                logger.warning(recovery_notice)
+                await bus.emit(
+                    "alert",
+                    {"severity": "warning", "message": recovery_notice},
+                    meta=EventMeta(
+                        source=EventSource.TASK,
+                        rationale="started automation reminders need review after process restart",
+                    ),
+                )
+                if getattr(voice, "is_ready", False):
+                    voice.speak(recovery_notice, "neutral")
 
             async def _calendar_reminder_loop() -> None:
                 while True:
@@ -7109,12 +4560,57 @@ async def main() -> int:
                     async def _deliver_voice(event: dict) -> None:
                         voice.speak(f"Reminder: {event['title']}", "neutral")
 
+                    async def _deliver_automation_alert(schedule: dict) -> None:
+                        message = f"Reminder: {schedule['text']}"
+                        await bus.emit(
+                            "alert",
+                            {"severity": "info", "message": message, "reminder_id": schedule["id"]},
+                            meta=EventMeta(source=EventSource.WATCHER, rationale="automation reminder became due"),
+                        )
+
+                    def _queue_automation_voice(schedule: dict) -> None:
+                        voice.speak(f"Reminder: {schedule['text']}", "neutral")
+
+                    async def _send_automation_telegram(schedule: dict) -> None:
+                        await telegram_bot.send_message(
+                            config.telegram_user_id, f"Reminder: {schedule['text']}"
+                        )
+
+                    async def _dispatch_scheduled_task(schedule: dict) -> None:
+                        result = await brain._handle_start_background_task(
+                            {"text": schedule["text"]},
+                            platform="telegram",
+                            task_id=schedule["active_task_id"],
+                            require_successful_operation=True,
+                        )
+                        if result.startswith("Error:"):
+                            raise RuntimeError(result)
+
                     try:
                         await deliver_due_reminders(
                             calendar_runtime,
                             utc_now_iso(),
                             alert_callback=_deliver_alert,
-                            voice_callback=_deliver_voice,
+                            voice_callback=(
+                                _deliver_voice if config.voice_enabled and getattr(voice, "is_ready", False) else None
+                            ),
+                        )
+                        await deliver_due_automation_reminders(
+                            calendar_runtime,
+                            utc_now_iso(),
+                            alert_callback=_deliver_automation_alert,
+                            voice_callback=(
+                                _queue_automation_voice if getattr(voice, "is_ready", False) else None
+                            ),
+                            telegram_callback=(
+                                _send_automation_telegram if telegram_bot is not None else None
+                            ),
+                        )
+                        await deliver_due_automation_tasks(
+                            calendar_runtime,
+                            utc_now_iso(),
+                            dispatch_callback=_dispatch_scheduled_task,
+                            task_journal=get_task_journal(),
                         )
                     except asyncio.CancelledError:
                         raise
@@ -7152,31 +4648,8 @@ async def main() -> int:
 
             _watcher_loop = asyncio.get_running_loop()
 
-            async def _spawn_watcher_surface(
-                event: dict, message: str, reason: str, level: AttentionLevel
-            ) -> None:
-                from charlie.utils import make_id
-                kind, dismiss_policy, auto_dismiss_ms, preferred_zone = _watcher_surface_kind(level)
-                watcher_intent = PresentationIntent(
-                    id=make_id(),
-                    kind=kind,
-                    title="Heads up",
-                    summary=message,
-                    priority=65,
-                    attention_level=PresentationAttention.HIGH,
-                    dismiss_policy=dismiss_policy,
-                    auto_dismiss_ms=auto_dismiss_ms,
-                    preferred_zone=preferred_zone,
-                    anchor=AnchorTarget.CORE,
-                )
-                await bus.emit(
-                    "presentation_intent",
-                    watcher_intent.to_dict(),
-                    meta=EventMeta(source=EventSource.WATCHER, rationale=reason),
-                )
-
             def _on_watcher_signal(event: dict, level: AttentionLevel, reason: str) -> None:
-                # Re-emit through the normal alert path -- state.py/pet_window.py already react to it.
+                # Re-emit through the normal alert path so runtime observers see it.
                 with watcher_callback_lock:
                     if runtime_shutting_down:
                         logger.debug("Ignoring watcher signal during runtime shutdown")
@@ -7195,24 +4668,20 @@ async def main() -> int:
                         )
                     except Exception:
                         logger.warning("Failed to emit watcher alert event", exc_info=True)
-                    if level >= AttentionLevel.ATTENTION:
+                    if level >= AttentionLevel.ATTENTION and bool(getattr(voice, "is_ready", False)):
                         try:
                             voice.speak(message, "neutral")
                         except Exception:
                             logger.warning("Failed to speak watcher alert", exc_info=True)
-                        try:
-                            _submit_event_threadsafe(
-                                _spawn_watcher_surface(event, message, reason, level), _watcher_loop
-                            )
-                        except Exception:
-                            logger.warning("Failed to spawn watcher alert surface", exc_info=True)
 
             _watcher_registry = WatcherRegistry()
             _watcher_registry.register(
                 cpu_ram_watcher(_read_cpu_ram_percent, config.alert_cpu_pct, config.alert_ram_pct)
             )
             _watcher_registry.register(mcp_health_watcher(_get_mcp_status))
-            _watcher_registry.register(stalled_task_watcher(background_task.list_tasks))
+            _watcher_registry.register(
+                stalled_task_watcher(lambda: get_task_journal().list(include_terminal=False))
+            )
             _watcher_registry.register(repeated_tool_failure_watcher(telemetry.unreliable_tools))
             if config.watch_paths:
                 _watcher_registry.register(path_change_watcher(config.watch_paths))
@@ -7254,18 +4723,19 @@ async def main() -> int:
             zmq_handler.setLevel(logging.INFO)
             logging.getLogger().addHandler(zmq_handler)
 
-            voice_idle_task = asyncio.create_task(_voice_loop_idle(voice), name="voice_loop_idle")
-            web_cmd_task = asyncio.create_task(consume_web_commands(bus, brain), name="consume_web_commands")
             system_status_task = asyncio.create_task(_emit_system_status(bus), name="emit_system_status")
-            voice_health_task = asyncio.create_task(_monitor_voice_health(bus), name="monitor_voice_health")
             calendar_task = asyncio.create_task(_calendar_reminder_loop(), name="calendar_reminder_loop")
             steady_state_tasks = [
-                voice_idle_task,
-                web_cmd_task,
                 system_status_task,
-                voice_health_task,
                 calendar_task,
             ]
+            if config.voice_enabled:
+                steady_state_tasks.extend(
+                    [
+                        asyncio.create_task(_voice_loop_idle(voice), name="voice_loop_idle"),
+                        asyncio.create_task(_monitor_voice_health(bus), name="monitor_voice_health"),
+                    ]
+                )
 
             try:
                 await asyncio.gather(*steady_state_tasks)
@@ -7296,7 +4766,6 @@ async def main() -> int:
                 active_process_for_shutdown = active_process_task or globals().get("active_process_task")
                 tasks_to_drain = [
                     *steady_state_tasks,
-                    companion_monitor_task,
                     active_process_for_shutdown,
                     *housekeeping_to_drain,
                     *tuple(background_housekeeping_tasks),
@@ -7339,7 +4808,6 @@ async def main() -> int:
 
         active_process_for_shutdown = active_process_task or globals().get("active_process_task")
         outer_tasks = [
-            companion_monitor_task,
             mcp_start_task,
             active_process_for_shutdown,
             *tuple(background_housekeeping_tasks),
@@ -7370,7 +4838,17 @@ async def main() -> int:
 
         _stop_voice(final=True)
 
+        get_task_journal().set_on_change(None)
         if telegram_bot is not None:
+            for turn_id in set(telegram_status_text_by_turn) | set(telegram_status_messages_by_turn):
+                try:
+                    await _finish_telegram_turn_feedback(turn_id)
+                except Exception:
+                    logger.warning(
+                        "Could not clear Telegram status during shutdown for %s",
+                        turn_id,
+                        exc_info=True,
+                    )
             try:
                 await telegram_bot.stop()
                 logger.info("Telegram stopped")
@@ -7393,32 +4871,6 @@ async def main() -> int:
                 logger.info("MCP subsystem stopped")
             except Exception as e:
                 logger.warning("MCP subsystem stop error: %s", e)
-
-        if web_proc is not None:
-            web_pid = getattr(web_proc, "pid", None)
-            try:
-                _terminate_subsystem_process(web_proc)
-                _set_subsystem_health_if_known("web", HealthStatus.STOPPED, "Stopped")
-                logger.info("web child exited | pid=%s | exit_code=%s", web_pid, web_proc.poll())
-            except Exception as e:
-                _set_subsystem_health_if_known("web", HealthStatus.DEGRADED, "Shutdown incomplete")
-                logger.warning("Web process termination error: %s", e)
-
-        if pet_proc is not None:
-            pet_pid = getattr(pet_proc, "pid", None)
-            try:
-                _terminate_subsystem_process(pet_proc)
-                _set_subsystem_health_if_known("companion", HealthStatus.STOPPED, "Stopped")
-                logger.info("companion child exited | pid=%s | exit_code=%s", pet_pid, pet_proc.poll())
-            except Exception as e:
-                _set_subsystem_health_if_known("companion", HealthStatus.DEGRADED, "Shutdown incomplete")
-                logger.warning("Companion process termination error: %s", e)
-
-        if companion_ready_file is not None:
-            try:
-                companion_ready_file.unlink(missing_ok=True)
-            except OSError:
-                pass
 
         if brain is not None:
             try:
@@ -7443,9 +4895,7 @@ async def main() -> int:
         _main_event_bus = None
         loop.call_exception_handler = _orig_handler
 
-        _log_port_release(config.charlie_host, config.charlie_port)
         _log_port_release("127.0.0.1", 5555)
-        _log_port_release("127.0.0.1", 5556)
 
         if shutdown_quiescent and exit_code == 0:
             _runtime_health.set_runtime_lifecycle(RuntimeStatus.STOPPED)

@@ -1,5 +1,5 @@
 """Error classification: a small, closed taxonomy so a turn failure gets a concise, non-technical
-message instead of a raw traceback -- full details still go to the logger, never to a surface,
+message instead of a raw traceback -- full details still go to the logger, never to an external channel,
 voice, or Telegram reply.
 """
 

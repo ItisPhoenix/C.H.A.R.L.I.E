@@ -289,12 +289,6 @@ class TestConfig:
     def test_config_loads(self):
         from charlie.config import config
         assert hasattr(config, "llm_url")
-        assert hasattr(config, "charlie_host")
-        assert hasattr(config, "charlie_port")
-
-    def test_charlie_port_is_int(self):
-        from charlie.config import config
-        assert isinstance(config.charlie_port, int)
 
     def test_soul_is_string(self):
         from charlie.config import config

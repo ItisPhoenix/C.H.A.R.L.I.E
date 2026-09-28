@@ -78,3 +78,62 @@ def test_mcp_adapter_register_and_rollback(mock_config_mcp_env):
     rb_res = mcp_adapter.rollback_mcp_server("sqlite_tool")
     assert rb_res.success is True
     assert cap_idx.get_capability("mcp_sqlite_tool") is None
+
+
+def test_mcp_rehydration_keeps_unallowlisted_tools_approval_gated(tmp_path, monkeypatch):
+    from charlie.capabilities import CapabilityIndex
+    from charlie.mcp_client import MCPClient, MCPTool
+    from charlie.self_extension.models import ExtensionKind
+    from charlie.self_extension.registry import ExtensionEntry
+    from charlie.tools import ToolRegistry
+
+    class _FakeServer:
+        def __init__(self, config):
+            self.config = config
+            self.running = False
+
+        def start(self):
+            self.running = True
+
+        def is_running(self):
+            return self.running
+
+        def list_tools(self):
+            return [MCPTool(name="query_db", description="Read-only query")]
+
+        def stop(self):
+            self.running = False
+
+    monkeypatch.setattr("charlie.mcp_client._ManagedServer", _FakeServer)
+    manifest = tmp_path / "extensions.json"
+    capability_index = CapabilityIndex()
+    registry = ExtensionRegistry(manifest_path=manifest)
+    registry.register(ExtensionEntry(
+        extension_id="mcp_sqlite",
+        name="sqlite",
+        kind=ExtensionKind.MCP_TOOL,
+        source="echo",
+        content_hash="abc",
+        declared_tools=["query_db"],
+        metadata={"command": "echo"},
+    ))
+
+    reloaded = ExtensionRegistry(manifest_path=manifest)
+    tool_registry = ToolRegistry()
+    mcp_client = MCPClient()
+    try:
+        report = reloaded.rehydrate(
+            capability_index,
+            mcp_client=mcp_client,
+            tool_registry=tool_registry,
+        )
+
+        capability = capability_index.get_capability("mcp_sqlite")
+        assert report.restored == 1
+        assert capability is not None
+        assert set(capability.operations) == {"query_db"}
+        assert capability.operations["query_db"].risk_class == "security_sensitive"
+        assert capability_index.get_operation("query_db").risk_class == "security_sensitive"
+        assert tool_registry.get_risk_class("mcp_sqlite_query_db") == "security_sensitive"
+    finally:
+        mcp_client.remove_server(tool_registry, "sqlite")

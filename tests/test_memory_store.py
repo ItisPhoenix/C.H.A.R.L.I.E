@@ -147,6 +147,70 @@ class TestMemoryStore:
         assert n > 0
         store._collection.add.assert_called_once()
 
+    def test_repeated_explicit_fact_is_searchable_once_per_source_scope(self, monkeypatch):
+        from charlie.memory_store import MemoryStore
+
+        class PersistentCollection:
+            def __init__(self):
+                self.records = {}
+
+            def count(self):
+                return len(self.records)
+
+            def add(self, *, ids, documents, metadatas):
+                for record_id, document, metadata in zip(ids, documents, metadatas):
+                    if record_id not in self.records:
+                        self.records[record_id] = (document, metadata)
+
+            def query(self, *, query_texts=None, query_embeddings=None, n_results=3, **_kwargs):
+                if query_embeddings is not None:
+                    return {"distances": [[0.0]]}
+                matches = [
+                    (document, metadata)
+                    for document, metadata in self.records.values()
+                    if query_texts[0].casefold() in document.casefold()
+                ][:n_results]
+                return {
+                    "documents": [[document for document, _ in matches]],
+                    "distances": [[0.0 for _ in matches]],
+                    "metadatas": [[metadata for _, metadata in matches]],
+                }
+
+        collection = PersistentCollection()
+        client = MagicMock()
+        client.get_or_create_collection.return_value = collection
+        monkeypatch.setattr("chromadb.PersistentClient", lambda **_kwargs: client)
+
+        class Embedding:
+            def embed_query(self, _texts):
+                return [[0.1] * 3]
+
+        monkeypatch.setattr("charlie.memory_store._build_embedding_function", lambda _config: Embedding())
+        config = FakeConfig()
+        fact = "My favorite color is teal."
+
+        first_process = MemoryStore(config)
+        assert first_process.add_memory(fact, source="user", session_id="explicit", auto_extract=False) == 1
+
+        restarted_process = MemoryStore(config)
+        assert restarted_process.add_memory(fact, source="user", session_id="explicit", auto_extract=False) == 1
+        assert collection.count() == 1
+
+        assert restarted_process.add_memory(
+            "My backup color is blue.", source="user", session_id="explicit", auto_extract=False
+        ) == 1
+        assert restarted_process.add_memory(fact, source="chat", session_id="explicit", auto_extract=False) == 1
+        assert restarted_process.add_memory(fact, source="user", session_id="another-session", auto_extract=False) == 1
+        assert collection.count() == 4
+
+        results = restarted_process.search(fact, n_results=10, threshold=0.5)
+        same_scope = [
+            result for result in results
+            if result["metadata"].get("source") == "user"
+            and result["metadata"].get("session_id") == "explicit"
+        ]
+        assert [result["text"] for result in same_scope] == [fact]
+
     def test_add_memory_empty_text_returns_zero(self, monkeypatch):
         store = self._make_store(monkeypatch)
         n = store.add_memory("   ", source="chat", session_id="s1")

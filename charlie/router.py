@@ -498,6 +498,20 @@ def known_app_names() -> List[str]:
     return sorted(set(_OPEN_APP_MAP) | set(_CLOSE_APP_MAP))
 
 
+_EXPLICIT_BACKGROUND_TASK_START_RE = re.compile(
+    r"^\s*(?:(?:hey\s+)?charlie[, :]+)?(?:please\s+)?"
+    r"(?:(?:can|could|would)\s+you\s+)?"
+    r"(?:start|create|launch|queue|run)\s+(?:a\s+)?background\s+(?:task|job)\b",
+    re.IGNORECASE,
+)
+
+
+def is_explicit_background_task_start(query: str) -> bool:
+    """Recognize a direct request to queue work for background execution."""
+
+    return bool(_EXPLICIT_BACKGROUND_TASK_START_RE.search(query))
+
+
 _BACKGROUND_TASK_STATUS_RE = re.compile(
     r"\bwhat are you doing\b"
     r"|\bhow'?s (it|the task|your task|the background task) (going|doing)\b"

@@ -24,6 +24,7 @@ class TransactionStatus(StrEnum):
     INSPECTING = "inspecting"
     PLANNING = "planning"
     APPROVAL_REQUIRED = "approval_required"
+    PENDING_REVIEW = "pending_review"
     CHECKPOINTING = "checkpointing"
     APPLYING = "applying"
     TESTING = "testing"

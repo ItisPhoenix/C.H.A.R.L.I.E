@@ -71,12 +71,12 @@ class TestPluginManager:
         manager = PluginManager()
         manager.register(FilesystemPlugin())
         tools = manager.get_all_tool_definitions()
-        assert len(tools) == 4
+        assert len(tools) == 2
         names = [t["name"] for t in tools]
         assert "fs_list_dir" in names
-        assert "fs_read_file" in names
-        assert "fs_write_file" in names
         assert "fs_search" in names
+        assert "fs_read_file" not in names
+        assert "fs_write_file" not in names
 
     def test_call_tool_routes_to_plugin(self):
         manager = PluginManager()
@@ -107,6 +107,7 @@ class TestPluginManager:
         prompt = manager.get_tools_for_prompt()
         assert "Available plugin tools:" in prompt
         assert "fs_list_dir" in prompt
+        assert "fs_read_file" not in prompt
 
     def test_get_tools_for_prompt_empty(self):
         manager = PluginManager()
@@ -125,12 +126,12 @@ class TestFilesystemPlugin:
     def test_name_and_description(self):
         plugin = FilesystemPlugin()
         assert plugin.name == "filesystem"
-        assert "file operations" in plugin.description.lower()
+        assert "directory listing" in plugin.description.lower()
 
     def test_get_tools_count(self):
         plugin = FilesystemPlugin()
         tools = plugin.get_tools()
-        assert len(tools) == 4
+        assert len(tools) == 2
 
     def test_list_dir(self):
         plugin = FilesystemPlugin()
@@ -205,10 +206,7 @@ class TestBrowserPlugin:
     def test_get_tools_count(self):
         plugin = BrowserPlugin()
         tools = plugin.get_tools()
-        assert len(tools) == 2
-        names = [t["name"] for t in tools]
-        assert "browser_fetch" in names
-        assert "browser_screenshot" in names
+        assert tools == []
 
     def test_fetch_example_com(self):
         plugin = BrowserPlugin()
@@ -230,8 +228,7 @@ class TestCalendarPlugin:
     def test_get_tools(self):
         plugin = CalendarPlugin()
         tools = plugin.get_tools()
-        assert len(tools) == 1
-        assert tools[0]["name"] == "cal_list_events"
+        assert tools == []
 
     def test_list_events_no_dir(self):
         plugin = CalendarPlugin(calendar_dir="/nonexistent_path_xyz")
@@ -313,12 +310,16 @@ class TestPluginToolBridge:
         manager = register_plugin_tools_into(reg, _FakeConfig(enabled=True))
         assert manager is not None
         names = {t["function"]["name"] for t in reg.get_tool_definitions()}
-        # All four plugins should be represented.
-        assert "plugin_fs_read_file" in names
-        assert "plugin_fs_write_file" in names
-        assert "plugin_browser_fetch" in names
-        assert "plugin_cal_list_events" in names
+        assert "plugin_fs_list_dir" in names
+        assert "plugin_fs_search" in names
         assert "plugin_code_exec_python" in names
+        assert not names.intersection({
+            "plugin_fs_read_file",
+            "plugin_fs_write_file",
+            "plugin_browser_fetch",
+            "plugin_browser_screenshot",
+            "plugin_cal_list_events",
+        })
 
     def test_enabled_plugin_tools_have_conservative_metadata(self):
         from charlie.tools import ToolRegistry, register_plugin_tools_into
@@ -327,8 +328,9 @@ class TestPluginToolBridge:
         register_plugin_tools_into(reg, _FakeConfig(enabled=True))
 
         metadata = {item["name"]: item for item in reg.list_metadata()}
-        assert metadata["plugin_fs_write_file"]["owner"] == "plugins"
-        assert metadata["plugin_fs_write_file"]["risk_class"] == "security_sensitive"
+        assert "plugin_fs_write_file" not in metadata
+        assert metadata["plugin_fs_search"]["owner"] == "plugins"
+        assert metadata["plugin_fs_search"]["risk_class"] == "security_sensitive"
 
     def test_disabled_then_enabled_is_isolated(self):
         from charlie.tools import ToolRegistry, register_plugin_tools_into
@@ -340,23 +342,16 @@ class TestPluginToolBridge:
         assert reg_off.get_tool_definitions() == []
         assert len(reg_on.get_tool_definitions()) > 0
 
-    def test_filesystem_read_tool_works(self):
+    def test_filesystem_file_aliases_are_hidden(self):
         from charlie.tools import ToolRegistry, register_plugin_tools_into
 
-        cfg, tmpdir = _enabled_config()
+        cfg, _tmpdir = _enabled_config()
         reg = ToolRegistry()
         register_plugin_tools_into(reg, cfg)
 
-        import os
-
-        test_file = os.path.join(tmpdir, "hello.txt")
-        with open(test_file, "w", encoding="utf-8") as fh:
-            fh.write("plugin bridge works")
-
-        result = reg.execute_tool(
-            "plugin_fs_read_file", {"path": test_file}
-        )
-        assert "plugin bridge works" in result
+        assert "plugin_fs_read_file" not in reg.get_tool_names()
+        assert "plugin_fs_write_file" not in reg.get_tool_names()
+        assert "not registered" in reg.execute_tool("plugin_fs_read_file", {"path": "x"})
 
 
 # ---------------------------------------------------------------------------
@@ -372,9 +367,9 @@ class TestPluginRuntimeControl:
 
         registered = enable_plugin(reg, manager, CalendarPlugin())
 
-        assert registered == ["plugin_cal_list_events"]
+        assert registered == []
         names = {t["function"]["name"] for t in reg.get_tool_definitions()}
-        assert names == {"plugin_cal_list_events"}
+        assert names == set()
 
     def test_enable_plugin_is_reachable_via_manager(self):
         from charlie.tools import ToolRegistry, enable_plugin
@@ -394,7 +389,7 @@ class TestPluginRuntimeControl:
 
         removed = disable_plugin(reg, manager, "calendar")
 
-        assert removed == ["plugin_cal_list_events"]
+        assert removed == []
         assert reg.get_tool_definitions() == []
         assert manager.get_plugin("calendar") is None
 
@@ -416,9 +411,9 @@ class TestPluginRuntimeControl:
 
         registered = enable_plugin(reg, manager, CalendarPlugin())
 
-        assert registered == ["plugin_cal_list_events"]
+        assert registered == []
         names = {t["function"]["name"] for t in reg.get_tool_definitions()}
-        assert names == {"plugin_cal_list_events"}
+        assert names == set()
 
     def test_enabling_two_plugins_keeps_both(self):
         from charlie.tools import ToolRegistry, enable_plugin
@@ -429,7 +424,7 @@ class TestPluginRuntimeControl:
         enable_plugin(reg, manager, CodeExecPlugin())
 
         names = {t["function"]["name"] for t in reg.get_tool_definitions()}
-        assert names == {"plugin_cal_list_events", "plugin_code_exec_python"}
+        assert names == {"plugin_code_exec_python"}
 
     def test_disabling_one_plugin_leaves_the_other(self):
         from charlie.tools import ToolRegistry, disable_plugin, enable_plugin

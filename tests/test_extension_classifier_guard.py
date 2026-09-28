@@ -58,6 +58,18 @@ def test_classify_skill_request(mock_classifier_env):
     assert res.kind == ExtensionKind.SKILL
 
 
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Create an inactive, instructions-only skill named receipt_evidence for review",
+        "Stage this correction as an inactive instructions-only skill named receipt_evidence",
+    ],
+)
+def test_classify_inactive_instruction_only_skill_review(prompt, mock_classifier_env):
+    classifier, _, _ = mock_classifier_env
+    assert classifier.classify(prompt).kind == ExtensionKind.SKILL
+
+
 def test_classify_mcp_tool_request(mock_classifier_env):
     """Verify MCP server connection requests classify as MCP_TOOL."""
     classifier, _, _ = mock_classifier_env

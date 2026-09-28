@@ -23,6 +23,28 @@ def test_research_router_distinguishes_stable_and_fresh_requests():
     assert route("deep research open source browser agents").mode is ResearchMode.DEEP
 
 
+def test_installed_local_version_and_help_request_does_not_start_web_research():
+    decision = route(
+        "Charlie, I'm checking what's installed on this PC. Could you tell me the Python version "
+        "and the first heading in Windows' taskkill help? Please don't stop or change any process."
+    )
+    assert decision.should_research is False
+    assert decision.mode is None
+    assert decision.reason == "local installed-version lookup"
+
+
+def test_explicit_background_action_is_not_preempted_by_a_version_signal():
+    action = route(
+        "Charlie, start a background task with two steps: run python --version, then run taskkill /? for help."
+    )
+    assert action.should_research is False
+    assert action.reason == "explicit background task request"
+
+    research = route("Charlie, start a background task to research the latest stable Python version.")
+    assert research.should_research is True
+    assert research.mode is ResearchMode.STANDARD
+
+
 @pytest.mark.parametrize(
     "query",
     [
@@ -36,6 +58,13 @@ def test_explicit_sustained_research_is_task_routed(query):
     decision = route(query)
     assert decision.should_research is True
     assert is_sustained_research_query(query, decision) is True
+
+
+def test_short_explicit_research_request_stays_on_foreground_research_turn():
+    query = "Charlie, research the latest stable Python documentation version. Cite only sources you fetched."
+    decision = route(query)
+    assert decision.should_research is True
+    assert is_sustained_research_query(query, decision) is False
 
 
 def test_current_lookup_is_not_automatically_backgrounded():
@@ -59,7 +88,7 @@ def test_current_request_asking_for_sources_fetches_documents():
         "Create a daily summary.",
     ],
 )
-def test_briefing_intent_is_shared_by_research_and_presentation(query):
+def test_briefing_intent_is_shared_by_research_and_runtime(query):
     assert is_briefing_query(query)
     assert route(query).should_research
 
@@ -129,6 +158,28 @@ def test_document_ranking_prefers_newer_evidence_when_relevance_matches():
 def test_clean_query_removes_instruction_and_format_noise():
     cleaned = clean_query("Do a web search and tell me what's currently trending in AI & tech. Be short under 60 words")
     assert cleaned == "trending in AI & tech"
+
+
+def test_clean_query_removes_assistant_and_citation_instructions_but_preserves_quotes_and_domain():
+    query = (
+        'Charlie, research the exact phrase "cite only sources you fetched" on docs.python.org. '
+        "Cite only sources you fetched."
+    )
+    assert clean_query(query) == 'the exact phrase "cite only sources you fetched" on docs.python.org'
+
+
+def test_standard_plan_keeps_explicit_domain_as_a_filter():
+    plan = build_plan("research Python docs on docs.python.org", ResearchMode.STANDARD)
+    assert plan.domain_filters == ["docs.python.org"]
+    assert all(query.domain_filters == ["docs.python.org"] for query in plan.queries)
+
+
+def test_clean_query_removes_insufficient_evidence_reply_instruction():
+    query = (
+        "Charlie, research the exact phrase CHARLIE-G5-EMPTY-20260923-7F6C on example.invalid. "
+        "If you find no fetched evidence, say so."
+    )
+    assert clean_query(query) == "the exact phrase CHARLIE-G5-EMPTY-20260923-7F6C on example.invalid"
 
 
 def test_standard_plan_does_not_split_on_conjunctions():

@@ -48,6 +48,27 @@ async def _collect(brain, utterance):
     return "".join(chunks)
 
 
+def _mock_verified_app_launch(monkeypatch):
+    opened = set()
+    start_calls = []
+
+    def resolve(name):
+        if name in opened:
+            return desktop_apps.AppResolution(name=name, window_title=f"{name} test window", source="test")
+        return desktop_apps.AppResolution(name=name, launch_target=f"mock-app://{name}", source="test")
+
+    def startfile(target):
+        name = target.removeprefix("mock-app://")
+        start_calls.append(name)
+        opened.add(name)
+
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr(desktop_apps, "is_process_running", lambda _name: False)
+    monkeypatch.setattr(desktop_apps, "resolve_local_app", resolve)
+    monkeypatch.setattr(desktop_apps.os, "startfile", startfile, raising=False)
+    return start_calls
+
+
 class TestMachineEventWriters:
     @pytest.mark.asyncio
     async def test_gated_tool_error_recorded(self, monkeypatch, brain_config):
@@ -62,21 +83,13 @@ class TestMachineEventWriters:
 
     @pytest.mark.asyncio
     async def test_open_app_fast_path_recorded(self, monkeypatch, brain_config):
-        import subprocess
-
         brain = Brain(brain_config)
-        monkeypatch.setattr("sys.platform", "win32")
-        monkeypatch.setattr(desktop_apps, "is_process_running", lambda name: False)
-        monkeypatch.setattr(desktop_apps, "resolve_local_app", lambda _name: None)
+        start_calls = _mock_verified_app_launch(monkeypatch)
         monkeypatch.setattr("charlie.tools._desktop_ready", lambda: True)
-        monkeypatch.setattr(
-            subprocess,
-            "Popen",
-            lambda *a, **kw: type("P", (), {"pid": 1, "poll": lambda self: None})(),
-        )
         await _collect(brain, "open notepad")
         events = brain.world_model.recent_events(event_type="app_open")
         assert len(events) == 1
+        assert start_calls == ["notepad"]
 
 
 class TestOutcomeFeedback:

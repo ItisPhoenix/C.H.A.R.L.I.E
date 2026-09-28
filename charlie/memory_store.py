@@ -4,6 +4,8 @@ Provides semantic search over past assistant/user facts using remote embeddings.
 Falls back to sentence-transformers if the primary embedding endpoint is unavailable.
 """
 
+import hashlib
+import json
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -19,7 +21,6 @@ _DEFAULT_EMBEDDING_MODEL = ""
 _DEFAULT_EMBEDDING_URL = ""
 _DEFAULT_RELEVANCE_THRESHOLD = 0.3
 _FACT_EXTRACT_MAX_CHARS = 2000
-_FACT_EXTRACT_MAX_TOKENS = 512
 _FACT_EXTRACT_MODEL = ""
 # Retries for the primary embedding service before falling back to a local
 # (different-dimension) model while the remote service is starting.
@@ -253,11 +254,16 @@ class MemoryStore:
         documents: List[str] = []
         metadatas: List[Dict[str, str]] = []
         ids: List[str] = []
+        seen_ids = set()
 
-        for i, fact in enumerate(facts):
+        for fact in facts:
             if not fact or len(fact) < 5:
                 continue
-            doc_id = f"{session_id}_{time.time_ns()}_{i}"
+            identity = json.dumps([source, session_id, fact], ensure_ascii=False, separators=(",", ":"))
+            doc_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+            if doc_id in seen_ids:
+                continue
+            seen_ids.add(doc_id)
             documents.append(fact)
             metadatas.append(
                 {
@@ -368,8 +374,6 @@ class MemoryStore:
                     {"role": "system", "content": "You extract facts. Return only JSON."},
                     {"role": "user", "content": prompt},
                 ],
-                "temperature": 0.0,
-                "max_tokens": _FACT_EXTRACT_MAX_TOKENS,
                 "stream": False,
             }
 

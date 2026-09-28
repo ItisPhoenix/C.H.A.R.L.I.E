@@ -16,7 +16,7 @@ class _FakePubSocket:
 
 
 def _producer_bus() -> EventBus:
-    bus = EventBus(is_producer=True)
+    bus = EventBus()
     bus._pub_socket = _FakePubSocket()
     return bus
 

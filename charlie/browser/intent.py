@@ -47,6 +47,7 @@ _MEDIA_CONTROL_RE = re.compile(
     re.IGNORECASE,
 )
 _SEARCH_WORDS_RE = re.compile(r"\b(?:search|find|look\s+up|browse|check)\b", re.IGNORECASE)
+_HTTP_URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)
 _VALUE_RE = re.compile(
     r"(?:(?P<prefix>₹|\$|€|£|rs\.?|usd|inr|eur|gbp)\s*)?"
     r"(?P<number>\d[\d,]*(?:\.\d+)?)\s*(?P<unit>gb|tb|mb|hours?|minutes?|seconds?|percent|%)?",
@@ -357,9 +358,14 @@ def parse_browser_intent(task: str, current_domain: str = "") -> BrowserIntent:
     elif any(term in lowered for term in ("read", "summarize", "inspect")):
         operation = "READ"
 
-    comparisons = _parse_comparison_constraints(original)
+    constraint_text = _HTTP_URL_RE.sub(" ", original)
+    comparisons = _parse_comparison_constraints(constraint_text)
     constraints = _dedupe_constraints(
-        [*comparisons, *_parse_numeric_constraints(original, comparisons), *_parse_textual_constraints(original)]
+        [
+            *comparisons,
+            *_parse_numeric_constraints(constraint_text, comparisons),
+            *_parse_textual_constraints(constraint_text),
+        ]
     )
     if constraints and operation == "OPEN":
         operation = "FILTER"

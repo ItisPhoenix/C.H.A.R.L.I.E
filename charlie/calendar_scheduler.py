@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
 
 from charlie.calendar_runtime import CalendarRuntime
-from charlie.calendar_store import CalendarStore
+from charlie.calendar_store import CalendarStore, normalize_calendar_timestamp
 
 logger = logging.getLogger("charlie.calendar_scheduler")
 ReminderCallback = Callable[[dict], None | Awaitable[None]]
@@ -158,3 +159,165 @@ async def deliver_due_reminders(
         except Exception:
             logger.warning("Calendar reminder scan failed; scheduler will continue", exc_info=True)
             return delivered
+
+
+async def deliver_due_automation_reminders(
+    runtime: CalendarRuntime,
+    now_iso: str,
+    *,
+    alert_callback: ReminderCallback,
+    voice_callback: Optional[ReminderCallback] = None,
+    telegram_callback: Optional[ReminderCallback] = None,
+) -> int:
+    """Process due automation reminders through the durable run claim."""
+    processed = 0
+    while True:
+        schedule = await runtime.execute("claim_due_automation", now_iso, kind="reminder")
+        if schedule is None:
+            return processed
+        schedule_id = schedule["id"]
+        token = schedule["claim_token"]
+        revision = int(schedule["revision"])
+        started = await runtime.execute("start_automation_run", schedule_id, token, revision)
+        if not started:
+            return processed
+
+        outcomes = []
+        try:
+            await _invoke(alert_callback, schedule)
+            outcomes.append("alert accepted")
+            if voice_callback is None:
+                outcomes.append("speech not queued")
+            else:
+                await _invoke(voice_callback, schedule)
+                outcomes.append("speech queued")
+            if telegram_callback is None:
+                outcomes.append("Telegram message not configured")
+            else:
+                await _invoke(telegram_callback, schedule)
+                outcomes.append("Telegram message accepted")
+        except asyncio.CancelledError:
+            # Leave the started claim for TaskJournal reconciliation after restart.
+            raise
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            finished_at = max(normalize_calendar_timestamp(now_iso, "now"), _now_iso())
+            await runtime.execute(
+                "finalize_automation_claim", schedule_id, token, revision,
+                succeeded=False, result="; ".join(outcomes), error=error,
+                completed_at=finished_at,
+            )
+            processed += 1
+            continue
+
+        finished_at = max(normalize_calendar_timestamp(now_iso, "now"), _now_iso())
+        finalized = await runtime.execute(
+            "finalize_automation_claim", schedule_id, token, revision,
+            succeeded=True, result="; ".join(outcomes), completed_at=finished_at,
+        )
+        processed += int(bool(finalized))
+
+
+async def deliver_due_automation_tasks(
+    runtime: CalendarRuntime,
+    now_iso: str,
+    *,
+    dispatch_callback: ReminderCallback,
+    task_journal,
+) -> int:
+    """Dispatch scheduled tasks and settle claims only from canonical TaskJournal state."""
+    from charlie.background_task import RESTART_ERROR
+
+    processed = 0
+    while True:
+        schedules = await runtime.execute("list_automations")
+        for schedule in schedules:
+            if schedule["kind"] != "task" or schedule["active_run_status"] not in {"running", "interrupted"}:
+                continue
+            task_id = schedule.get("active_task_id")
+            if not task_id:
+                continue
+            try:
+                record = task_journal.get(task_id)
+            except KeyError:
+                record = None
+
+            if record is None:
+                continue
+            status = getattr(record.status, "value", record.status)
+            if status not in {"completed", "failed", "cancelled"}:
+                continue
+            if schedule["active_run_status"] == "interrupted":
+                if status == "failed" and record.error_summary == RESTART_ERROR:
+                    continue
+                token = uuid.uuid4().hex
+                resumed = await runtime.execute(
+                    "resume_interrupted_automation_run",
+                    schedule["id"], task_id, int(schedule["active_run_revision"]), token,
+                )
+                if not resumed:
+                    continue
+            else:
+                token = schedule.get("claim_token")
+                if not token:
+                    continue
+
+            finished_at = _now_iso()
+            await runtime.execute(
+                "finalize_automation_claim",
+                schedule["id"], token, int(schedule["active_run_revision"]),
+                succeeded=status == "completed",
+                result=record.result_reference or f"Task {task_id} {status}",
+                error=record.error_summary if status != "completed" else None,
+                completed_at=finished_at,
+            )
+            processed += 1
+
+        schedules = await runtime.execute("list_automations")
+        interrupted_without_record = None
+        for schedule in schedules:
+            if (
+                schedule["kind"] != "task"
+                or schedule["active_run_status"] != "interrupted"
+                or schedule["next_run_at"] > normalize_calendar_timestamp(now_iso, "now")
+                or not schedule.get("active_task_id")
+            ):
+                continue
+            try:
+                task_journal.get(schedule["active_task_id"])
+            except KeyError:
+                interrupted_without_record = schedule
+                break
+
+        claim = None
+        if interrupted_without_record is not None:
+            claim = await runtime.execute(
+                "claim_due_automation", now_iso, kind="task", retry_interrupted=True,
+                schedule_id=interrupted_without_record["id"],
+            )
+        if claim is None:
+            claim = await runtime.execute("claim_due_automation", now_iso, kind="task")
+        if claim is None:
+            return processed
+
+        schedule_id = claim["id"]
+        token = claim["claim_token"]
+        revision = int(claim["revision"])
+        started = await runtime.execute("start_automation_run", schedule_id, token, revision)
+        if not started:
+            continue
+        try:
+            await _invoke(dispatch_callback, claim)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            try:
+                task_journal.get(claim["active_task_id"])
+            except KeyError:
+                error = f"{type(exc).__name__}: {exc}"
+                await runtime.execute(
+                    "finalize_automation_claim", schedule_id, token, revision,
+                    succeeded=False, error=error, completed_at=_now_iso(),
+                )
+            logger.warning("Scheduled task dispatch failed for %s: %s", schedule_id, exc)
+        processed += 1

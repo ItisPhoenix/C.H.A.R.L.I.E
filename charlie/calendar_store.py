@@ -8,11 +8,14 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 REMINDER_NONE = "none"
 REMINDER_PENDING = "pending"
 REMINDER_DELIVERING = "delivering"
 REMINDER_DELIVERED = "delivered"
+_AUTOMATION_KINDS = frozenset({"reminder", "task"})
+_AUTOMATION_RECURRENCES = frozenset({"once", "daily", "weekly"})
 
 
 def normalize_calendar_timestamp(value: str, field_name: str) -> str:
@@ -40,8 +43,110 @@ def normalize_calendar_day(value: str) -> str:
         raise ValueError("day must be an ISO date") from exc
 
 
+def _automation_zone(value: str) -> ZoneInfo:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("timezone must be a valid IANA timezone")
+    try:
+        return ZoneInfo(value.strip())
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError("timezone must be a valid IANA timezone") from exc
+
+
+def _normalize_automation_schedule(
+    kind: str,
+    text: str,
+    first_run_at: str,
+    recurrence: str,
+    timezone_name: str,
+) -> dict[str, str]:
+    if not isinstance(kind, str) or kind not in _AUTOMATION_KINDS:
+        raise ValueError("kind must be reminder or task")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("text must be non-empty")
+    if not isinstance(recurrence, str) or recurrence not in _AUTOMATION_RECURRENCES:
+        raise ValueError("recurrence must be once, daily, or weekly")
+    zone = _automation_zone(timezone_name)
+    normalized_first_run = normalize_calendar_timestamp(first_run_at, "first_run_at")
+    parsed_first_run = datetime.fromisoformat(normalized_first_run.replace("Z", "+00:00"))
+    # Resolve the configured zone before persisting so bad timezone names never
+    # leave a schedule that a future dispatcher cannot interpret.
+    parsed_first_run.astimezone(zone)
+    return {
+        "kind": kind,
+        "text": text.strip(),
+        "first_run_at": normalized_first_run,
+        "recurrence": recurrence,
+        "timezone": zone.key,
+    }
+
+
+def _local_wall_time(value: datetime, zone: ZoneInfo) -> datetime:
+    """Resolve local wall time; gaps advance to their first valid instant, folds use fold=0."""
+    candidate = value.replace(tzinfo=zone, fold=0)
+    round_trip = candidate.astimezone(timezone.utc).astimezone(zone)
+    round_trip_wall = round_trip.replace(tzinfo=None)
+    if round_trip_wall == value:
+        return candidate
+    if round_trip_wall < value:
+        raise ValueError("could not resolve local schedule time")
+
+    # ZoneInfo maps a nonexistent time forward by the gap. Binary search that
+    # interval to land on the transition itself, rather than shifting by gap size.
+    lower = value
+    upper = round_trip_wall
+    while upper - lower > timedelta(microseconds=1):
+        middle = lower + (upper - lower) / 2
+        if middle <= lower or middle >= upper:
+            break
+        probe = middle.replace(tzinfo=zone, fold=0)
+        if probe.astimezone(timezone.utc).astimezone(zone).replace(tzinfo=None) == middle:
+            upper = middle
+        else:
+            lower = middle
+    return upper.replace(tzinfo=zone, fold=0)
+
+
+def next_automation_occurrence(
+    first_run_at: str,
+    recurrence: str,
+    timezone_name: str,
+    *,
+    after: Optional[str] = None,
+) -> Optional[str]:
+    """Return next due instant from the first-run local clock and weekday anchor."""
+    if not isinstance(recurrence, str) or recurrence not in _AUTOMATION_RECURRENCES:
+        raise ValueError("recurrence must be once, daily, or weekly")
+    if recurrence == "once":
+        _automation_zone(timezone_name)
+        normalize_calendar_timestamp(first_run_at, "first_run_at")
+        if after is not None:
+            normalize_calendar_timestamp(after, "after")
+        return None
+    zone = _automation_zone(timezone_name)
+    anchor = datetime.fromisoformat(
+        normalize_calendar_timestamp(first_run_at, "first_run_at").replace("Z", "+00:00")
+    )
+    after_utc = datetime.fromisoformat(
+        normalize_calendar_timestamp(after or first_run_at, "after").replace("Z", "+00:00")
+    )
+    anchor_local = anchor.astimezone(zone)
+    after_local = after_utc.astimezone(zone)
+    interval_days = 1 if recurrence == "daily" else 7
+    elapsed_days = (after_local.date() - anchor_local.date()).days
+    steps = max(1, elapsed_days // interval_days)
+    wall_time = anchor_local.timetz().replace(tzinfo=None)
+
+    while True:
+        local_date = anchor_local.date() + timedelta(days=steps * interval_days)
+        next_local = _local_wall_time(datetime.combine(local_date, wall_time), zone)
+        next_utc = next_local.astimezone(timezone.utc)
+        if next_utc > after_utc:
+            return normalize_calendar_timestamp(next_utc.isoformat(), "next_run_at")
+        steps += 1
+
+
 class CalendarStore:
-    """Thread-confined SQLite calendar store with claim-safe reminder state."""
+    """Thread-confined SQLite store for calendar and durable automation records."""
 
     _RETRY_LIMIT = 3
     _RETRY_DELAY_SECONDS = 0.05
@@ -157,6 +262,56 @@ class CalendarStore:
                 self._connection.execute(
                     "CREATE INDEX IF NOT EXISTS idx_calendar_reminder_due "
                     "ON calendar_events(reminder_state, reminder_at)"
+                )
+                self._connection.execute(
+                    """CREATE TABLE IF NOT EXISTS automation_schedules (
+                        id TEXT PRIMARY KEY,
+                        kind TEXT NOT NULL CHECK(kind IN ('reminder', 'task')),
+                        text TEXT NOT NULL,
+                        first_run_at TEXT NOT NULL,
+                        recurrence TEXT NOT NULL CHECK(recurrence IN ('once', 'daily', 'weekly')),
+                        timezone TEXT NOT NULL,
+                        next_run_at TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'cancelled', 'completed')),
+                        revision INTEGER NOT NULL DEFAULT 1,
+                        claim_token TEXT,
+                        claimed_at TEXT,
+                        last_run_at TEXT,
+                        last_run_status TEXT,
+                        active_run_id TEXT,
+                        active_task_id TEXT,
+                        active_run_scheduled_at TEXT,
+                        active_run_revision INTEGER,
+                        active_run_status TEXT,
+                        active_run_result TEXT,
+                        active_run_error TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )"""
+                )
+                automation_columns = {
+                    row[1] for row in self._connection.execute(
+                        "PRAGMA table_info(automation_schedules)"
+                    ).fetchall()
+                }
+                automation_additions = {
+                    "active_run_id": "TEXT",
+                    "active_task_id": "TEXT",
+                    "active_run_scheduled_at": "TEXT",
+                    "active_run_revision": "INTEGER",
+                    "active_run_status": "TEXT",
+                    "active_run_result": "TEXT",
+                    "active_run_error": "TEXT",
+                    "last_run_status": "TEXT",
+                }
+                for name, declaration in automation_additions.items():
+                    if name not in automation_columns:
+                        self._connection.execute(
+                            f"ALTER TABLE automation_schedules ADD COLUMN {name} {declaration}"
+                        )
+                self._connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_automation_schedule_due "
+                    "ON automation_schedules(status, next_run_at)"
                 )
 
         self._run("migrate calendar schema", migrate)
@@ -436,6 +591,314 @@ class CalendarStore:
                 ).fetchall()
             ],
         )
+
+    def _automation_row(self, schedule_id: str) -> dict:
+        row = self._connection.execute(
+            "SELECT * FROM automation_schedules WHERE id = ?", (schedule_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(schedule_id)
+        return dict(row)
+
+    @staticmethod
+    def _now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+    def create_automation(
+        self,
+        kind: str,
+        text: str,
+        first_run_at: str,
+        recurrence: str,
+        timezone_name: str = "Asia/Kolkata",
+    ) -> dict:
+        values = _normalize_automation_schedule(kind, text, first_run_at, recurrence, timezone_name)
+        schedule_id = uuid.uuid4().hex
+        now = self._now_iso()
+
+        def create() -> dict:
+            with self._connection:
+                self._connection.execute(
+                    """INSERT INTO automation_schedules
+                       (id, kind, text, first_run_at, recurrence, timezone, next_run_at,
+                        status, revision, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?)""",
+                    (
+                        schedule_id,
+                        values["kind"],
+                        values["text"],
+                        values["first_run_at"],
+                        values["recurrence"],
+                        values["timezone"],
+                        values["first_run_at"],
+                        now,
+                        now,
+                    ),
+                )
+            return self._automation_row(schedule_id)
+
+        return self._run("create automation schedule", create)
+
+    def get_automation(self, schedule_id: str) -> dict:
+        return self._run("get automation schedule", lambda: self._automation_row(schedule_id))
+
+    def list_automations(self) -> list[dict]:
+        return self._run(
+            "list automation schedules",
+            lambda: [
+                dict(row)
+                for row in self._connection.execute(
+                    "SELECT * FROM automation_schedules ORDER BY next_run_at, created_at, id"
+                ).fetchall()
+            ],
+        )
+
+    def update_automation(self, schedule_id: str, values: dict[str, Any]) -> dict:
+        allowed_names = {"kind", "text", "first_run_at", "recurrence", "timezone"}
+        if not isinstance(values, dict):
+            raise ValueError("automation update must be an object")
+        unknown = set(values) - allowed_names
+        if unknown:
+            raise ValueError(f"unknown automation fields: {', '.join(sorted(unknown))}")
+        if not values:
+            return self.get_automation(schedule_id)
+
+        def update() -> dict:
+            with self._connection:
+                current = self._automation_row(schedule_id)
+                if current["status"] != "active":
+                    raise ValueError(f"cannot update {current['status']} automation schedule")
+                merged = {key: current[key] for key in allowed_names}
+                merged.update(values)
+                normalized = _normalize_automation_schedule(
+                    merged["kind"],
+                    merged["text"],
+                    merged["first_run_at"],
+                    merged["recurrence"],
+                    merged["timezone"],
+                )
+                changed = {key: value for key, value in normalized.items() if value != current[key]}
+                if not changed:
+                    return current
+                changed["updated_at"] = self._now_iso()
+                changed["revision"] = int(current["revision"]) + 1
+                if current["active_run_status"] != "running":
+                    changed["claim_token"] = None
+                    changed["claimed_at"] = None
+                    changed["active_run_status"] = "invalidated"
+                if "first_run_at" in changed:
+                    changed["next_run_at"] = changed["first_run_at"]
+                    changed["last_run_at"] = None
+                elif {"recurrence", "timezone"} & changed.keys() and current["last_run_at"]:
+                    if changed.get("recurrence", current["recurrence"]) != "once":
+                        changed["next_run_at"] = next_automation_occurrence(
+                            current["first_run_at"],
+                            changed.get("recurrence", current["recurrence"]),
+                            changed.get("timezone", current["timezone"]),
+                            after=current["last_run_at"],
+                        )
+                assignments = ", ".join(f"{key} = ?" for key in changed)
+                self._connection.execute(
+                    f"UPDATE automation_schedules SET {assignments} WHERE id = ?",
+                    (*changed.values(), schedule_id),
+                )
+            return self._automation_row(schedule_id)
+
+        return self._run("update automation schedule", update)
+
+    def cancel_automation(self, schedule_id: str) -> dict:
+        def cancel() -> dict:
+            with self._connection:
+                current = self._automation_row(schedule_id)
+                if current["status"] == "active":
+                    running = current["active_run_status"] == "running"
+                    self._connection.execute(
+                        """UPDATE automation_schedules SET status = 'cancelled', revision = ?,
+                           claim_token = ?, claimed_at = ?, active_run_status = ?,
+                           updated_at = ? WHERE id = ?""",
+                        (
+                            int(current["revision"]) + 1,
+                            current["claim_token"] if running else None,
+                            current["claimed_at"] if running else None,
+                            "running" if running else "invalidated",
+                            self._now_iso(),
+                            schedule_id,
+                        ),
+                    )
+            return self._automation_row(schedule_id)
+
+        return self._run("cancel automation schedule", cancel)
+
+    @staticmethod
+    def _automation_occurrence_ids(schedule_id: str, scheduled_at: str) -> tuple[str, str]:
+        identity = f"charlie-automation:{schedule_id}:{scheduled_at}"
+        return (
+            uuid.uuid5(uuid.NAMESPACE_URL, f"{identity}:run").hex,
+            uuid.uuid5(uuid.NAMESPACE_URL, f"{identity}:task").hex,
+        )
+
+    def claim_due_automation(
+        self,
+        now: str,
+        kind: Optional[str] = None,
+        *,
+        retry_interrupted: bool = False,
+        schedule_id: Optional[str] = None,
+    ) -> Optional[dict]:
+        due_at = normalize_calendar_timestamp(now, "now")
+        if kind is not None and (not isinstance(kind, str) or kind not in _AUTOMATION_KINDS):
+            raise ValueError("kind must be reminder or task")
+        if not isinstance(retry_interrupted, bool):
+            raise ValueError("retry_interrupted must be a boolean")
+        if schedule_id is not None and (not isinstance(schedule_id, str) or not schedule_id):
+            raise ValueError("schedule_id must be a non-empty string or null")
+
+        def claim() -> Optional[dict]:
+            with self._connection:
+                self._connection.execute("BEGIN IMMEDIATE")
+                row = self._connection.execute(
+                    """SELECT * FROM automation_schedules
+                       WHERE status = 'active' AND next_run_at <= ? AND claim_token IS NULL
+                       AND (active_run_status IS NULL OR active_run_status IN ('succeeded', 'failed', 'invalidated')
+                            OR (? = 1 AND active_run_status = 'interrupted'))
+                       AND (? IS NULL OR id = ?)
+                       AND (? IS NULL OR kind = ?)
+                       ORDER BY next_run_at, created_at, id LIMIT 1""",
+                    (due_at, int(retry_interrupted), schedule_id, schedule_id, kind, kind),
+                ).fetchone()
+                if row is None:
+                    return None
+                schedule = dict(row)
+                scheduled_at = schedule["next_run_at"]
+                run_id, task_id = self._automation_occurrence_ids(schedule["id"], scheduled_at)
+                token = uuid.uuid4().hex
+                self._connection.execute(
+                    """UPDATE automation_schedules SET claim_token = ?, claimed_at = ?,
+                       active_run_id = ?, active_task_id = ?, active_run_scheduled_at = ?,
+                       active_run_status = 'claimed', active_run_result = NULL,
+                       active_run_error = NULL WHERE id = ? AND status = 'active'
+                       AND revision = ? AND claim_token IS NULL""",
+                    (token, due_at, run_id, task_id, scheduled_at, schedule["id"], schedule["revision"]),
+                )
+                self._connection.execute(
+                    "UPDATE automation_schedules SET active_run_revision = ? WHERE id = ?",
+                    (schedule["revision"], schedule["id"]),
+                )
+                return self._automation_row(schedule["id"])
+
+        return self._run("claim due automation schedule", claim)
+
+    def start_automation_run(self, schedule_id: str, claim_token: str, revision: int) -> bool:
+        def start() -> bool:
+            with self._connection:
+                self._connection.execute("BEGIN IMMEDIATE")
+                result = self._connection.execute(
+                    """UPDATE automation_schedules SET active_run_status = 'running'
+                       WHERE id = ? AND status = 'active' AND revision = ?
+                       AND active_run_revision = ? AND claim_token = ?
+                       AND active_run_status = 'claimed'""",
+                    (schedule_id, revision, revision, claim_token),
+                )
+                return result.rowcount == 1
+
+        return self._run("start automation schedule run", start)
+
+    def resume_interrupted_automation_run(
+        self,
+        schedule_id: str,
+        task_id: str,
+        revision: int,
+        claim_token: str,
+    ) -> bool:
+        """Reacquire an interrupted claim only to settle its known terminal task."""
+        def resume() -> bool:
+            with self._connection:
+                self._connection.execute("BEGIN IMMEDIATE")
+                result = self._connection.execute(
+                    """UPDATE automation_schedules SET claim_token = ?, claimed_at = ?,
+                       active_run_status = 'running' WHERE id = ? AND status IN ('active', 'cancelled')
+                       AND active_run_status = 'interrupted' AND active_task_id = ?
+                       AND active_run_revision = ? AND claim_token IS NULL""",
+                    (claim_token, self._now_iso(), schedule_id, task_id, revision),
+                )
+                return result.rowcount == 1
+
+        return self._run("resume interrupted automation task", resume)
+
+    def finalize_automation_claim(
+        self,
+        schedule_id: str,
+        claim_token: str,
+        revision: int,
+        *,
+        succeeded: bool,
+        result: Optional[str] = None,
+        error: Optional[str] = None,
+        completed_at: Optional[str] = None,
+    ) -> bool:
+        if not isinstance(succeeded, bool):
+            raise ValueError("succeeded must be a boolean")
+        if result is not None and not isinstance(result, str):
+            raise ValueError("result must be a string or null")
+        if error is not None and not isinstance(error, str):
+            raise ValueError("error must be a string or null")
+        finished = normalize_calendar_timestamp(completed_at or self._now_iso(), "completed_at")
+
+        def finalize() -> bool:
+            with self._connection:
+                self._connection.execute("BEGIN IMMEDIATE")
+                row = self._connection.execute(
+                    """SELECT * FROM automation_schedules WHERE id = ?
+                       AND status IN ('active', 'cancelled') AND claim_token = ?
+                       AND active_run_revision = ? AND active_run_status = 'running'""",
+                    (schedule_id, claim_token, revision),
+                ).fetchone()
+                if row is None:
+                    return False
+                schedule = dict(row)
+                scheduled_at = schedule["active_run_scheduled_at"]
+                changes: dict[str, Any] = {
+                    "claim_token": None,
+                    "claimed_at": None,
+                    "active_run_status": "succeeded" if succeeded else "failed",
+                    "active_run_result": result,
+                    "active_run_error": error,
+                    "updated_at": finished,
+                    "last_run_at": finished,
+                    "last_run_status": "succeeded" if succeeded else "failed",
+                }
+                if schedule["status"] == "active" and schedule["recurrence"] == "once":
+                    changes["status"] = "completed"
+                elif schedule["status"] == "active" and schedule["next_run_at"] <= finished:
+                    threshold = max(scheduled_at, finished)
+                    changes["next_run_at"] = next_automation_occurrence(
+                        schedule["first_run_at"], schedule["recurrence"], schedule["timezone"],
+                        after=threshold,
+                    )
+                assignments = ", ".join(f"{name} = ?" for name in changes)
+                updated = self._connection.execute(
+                    f"UPDATE automation_schedules SET {assignments} "
+                    "WHERE id = ? AND active_run_revision = ? AND claim_token = ?",
+                    (*changes.values(), schedule_id, revision, claim_token),
+                )
+                return updated.rowcount == 1
+
+        return self._run("finalize automation schedule claim", finalize)
+
+    def reconcile_automation_claims(self) -> int:
+        """Release interrupted claims after restart; deterministic IDs make retries deduplicable."""
+        def reconcile() -> int:
+            with self._connection:
+                result = self._connection.execute(
+                    """UPDATE automation_schedules SET claim_token = NULL, claimed_at = NULL,
+                       active_run_status = 'interrupted', active_run_error = COALESCE(
+                           active_run_error, 'recovered interrupted automation claim'),
+                       updated_at = ? WHERE status IN ('active', 'cancelled') AND claim_token IS NOT NULL""",
+                    (self._now_iso(),),
+                )
+                return result.rowcount
+
+        return self._run("reconcile automation schedule claims", reconcile)
 
     def close(self) -> None:
         self._connection.close()

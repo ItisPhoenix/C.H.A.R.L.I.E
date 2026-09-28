@@ -7,11 +7,12 @@ from typing import Any
 
 import pytest
 
+import main
 from charlie import core, router
 from charlie.autonomy import Requirement, RiskClass
 from charlie.config import Config
 from charlie.fastpaths import FastPathResult
-from charlie.research.models import ResearchMode, ResearchReport
+from charlie.research.models import ResearchMode, ResearchReport, SourceDocument
 from charlie.research.router import ResearchDecision
 from charlie.turn_contracts import IntentDecision, ResultEnvelope, TurnContractError, TurnRequest
 
@@ -39,6 +40,162 @@ def _request(text: str, *, channel: str = "web") -> TurnRequest:
         input=text,
         channel=channel,
     )
+
+
+def test_tool_scope_accepts_requested_facts_and_suppresses_shell_detours() -> None:
+    request = "Tell me the Python version here and the first heading in Windows taskkill help. Don't stop anything."
+    calls = [
+        {"id": "version", "name": "shell_execute", "arguments": {"command": "python --version"}},
+        {"id": "help", "name": "shell_execute", "arguments": {"command": "taskkill /?"}},
+        {"id": "path", "name": "shell_execute", "arguments": {"command": "where python"}},
+        {
+            "id": "absolute-path",
+            "name": "shell_execute",
+            "arguments": {"command": '"C:\\Python314\\python.exe" --version'},
+        },
+        {"id": "echo", "name": "shell_execute", "arguments": {"command": "echo test"}},
+        {"id": "list", "name": "shell_execute", "arguments": {"command": "dir"}},
+        {"id": "kill", "name": "shell_execute", "arguments": {"command": "taskkill /IM notepad.exe /F"}},
+    ]
+
+    allowed, suppressed = core._filter_tool_calls_to_request_scope(calls, request)
+
+    assert [call["id"] for call in allowed] == ["version", "help"]
+    assert suppressed == 5
+    assert not core._tool_call_matches_request_scope(
+        request,
+        {"name": "automation_cancel", "arguments": {"schedule_id": "old-reminder"}},
+    )
+    assert not core._tool_call_matches_request_scope(
+        "How do I close Notepad?",
+        {"name": "desktop_close_app", "arguments": {"app": "notepad"}},
+    )
+
+
+def test_tool_scope_uses_verified_result_provenance_for_a_navigation_target() -> None:
+    request = "Open the official report page and summarize it."
+    call = {
+        "name": "browser_task",
+        "arguments": {"task": "Open https://example.com/official-report"},
+    }
+    assert not core._tool_call_matches_request_scope(request, call)
+
+    fetched = ResultEnvelope(
+        status="completed",
+        verification_status="verified_success",
+        result="Official report: https://example.com/official-report",
+    )
+    assert core._tool_call_matches_request_scope(request, call, verified_results=[({}, fetched)])
+
+    report = ResearchReport(
+        query="official report",
+        mode=ResearchMode.STANDARD,
+        sources=[
+            SourceDocument(
+                url="https://example.com/official-report",
+                title="Official report",
+                content="Fetched body",
+            )
+        ],
+    )
+    research_result = ResultEnvelope(status="completed", data={"research_report": report})
+    assert core._tool_call_matches_request_scope(request, call, verified_results=[({}, research_result)])
+
+
+def test_requested_shell_facts_stop_only_after_all_requested_facts_are_verified() -> None:
+    request = "Tell me the Python version and first heading in taskkill help."
+    version_call = {"name": "shell_execute", "arguments": {"command": "python --version"}}
+    version = ResultEnvelope(
+        status="completed",
+        verification_status="verified_success",
+        result="Python 3.14.6",
+    )
+    assert not core._verified_requested_shell_facts_complete(request, [(version_call, version)])
+
+    help_call = {"name": "shell_execute", "arguments": {"command": "taskkill /?"}}
+    help_result = ResultEnvelope(
+        status="completed",
+        verification_status="verified_success",
+        result="TASKKILL help\n\nDescription:\nTerminates processes.",
+    )
+    assert core._verified_requested_shell_facts_complete(request, [(version_call, version), (help_call, help_result)])
+
+
+def test_interrupted_turn_reports_verified_partial_results_first() -> None:
+    request = "Tell me the Python version and first heading in taskkill help."
+    call = {"name": "shell_execute", "arguments": {"command": "python --version"}}
+    result = ResultEnvelope(
+        status="completed",
+        verification_status="verified_success",
+        result="Python 3.14.6",
+    )
+
+    reply = core._verified_partial_result_reply(request, [(call, result)], "The next step failed.")
+
+    assert reply.startswith("Python version: 3.14.6.")
+    assert "Status: The next step failed." in reply
+    assert "I didn't attempt the remaining steps." in reply
+
+
+@pytest.mark.asyncio
+async def test_verified_shell_answers_stop_followup_detours(
+    monkeypatch: pytest.MonkeyPatch,
+    brain_config: Config,
+) -> None:
+    request = _request(
+        "Tell me the Python version here and the first heading in Windows taskkill help. Don't stop anything.",
+        channel="telegram",
+    )
+    brain = core.Brain(brain_config, register_panic_hotkey=False)
+    executed: list[str] = []
+
+    async def fake_completion(_payload: dict[str, Any], _generation: int) -> tuple[str, list[dict[str, Any]]]:
+        return "", [
+            {"id": "version", "name": "shell_execute", "arguments": {"command": "python --version"}},
+            {"id": "help", "name": "shell_execute", "arguments": {"command": "taskkill /?"}},
+        ]
+
+    async def fake_followup(
+        _client: Any,
+        _model: str,
+        _payload: dict[str, Any],
+        _generation: int,
+        state: Any,
+    ) -> Any:
+        state.accumulated = "I should check some other commands too."
+        state.tc_by_index = {
+            0: {"id": "detour", "name": "shell_execute", "arguments": '{"command":"echo test"}'}
+        }
+        if False:
+            yield ""
+
+    def fake_execute_tool(_name: str, arguments: dict[str, Any]) -> core.ToolExecutionResult:
+        command = arguments["command"]
+        executed.append(command)
+        if command == "python --version":
+            stdout = "Python 3.14.6\n"
+        elif command == "taskkill /?":
+            stdout = "TASKKILL help\n\nDescription:\nHelp text"
+        else:
+            raise AssertionError(f"out-of-scope command executed: {command}")
+        return core.ToolExecutionResult(
+            stdout,
+            {"exit_code": 0, "stdout": stdout, "stderr": ""},
+            "terminal_result",
+        )
+
+    monkeypatch.setattr(brain, "_stream_completion", fake_completion)
+    monkeypatch.setattr(brain, "_stream_followup_once", fake_followup)
+    monkeypatch.setattr(core.tool_registry, "execute_tool_structured", fake_execute_tool)
+    try:
+        chunks = await _run_turn(brain, request)
+    finally:
+        await brain.close()
+
+    assert executed == ["python --version", "taskkill /?"]
+    reply = "".join(chunks)
+    assert "Python version: 3.14.6." in reply
+    assert "First heading in Windows taskkill help: Description." in reply
 
 
 async def _run_turn(brain: core.Brain, request: TurnRequest, *, skip_pre_search: bool = True) -> list[str]:
@@ -141,7 +298,7 @@ async def test_research_turn_records_research_and_live_freshness(
     assert decisions[0].intent == "research"
     assert decisions[0].capabilities == ("research",)
     assert decisions[0].freshness_requirement == "live"
-    assert getattr(decisions[0], "execution_policy", None) == "research"
+    assert getattr(decisions[0], "execution_policy", None) == "grounded_answer"
     assert getattr(decisions[0], "durable_work_required", False) is False
     assert decisions[0].routing_source == "research_router"
     assert decisions[0].confidence == 1.0
@@ -328,6 +485,61 @@ async def test_background_tool_selection_is_work_without_a_second_router(
     assert getattr(decisions[0], "external_action_required", False) is False
 
 
+@pytest.mark.asyncio
+async def test_explicit_background_request_dispatches_only_the_work_capability(
+    monkeypatch: pytest.MonkeyPatch, brain_config: Config
+) -> None:
+    request = _request(
+        "Charlie, start a background task with two steps: run python --version, then taskkill /? for help only.",
+        channel="telegram",
+    )
+    decisions: list[IntentDecision] = []
+    operation_names: list[str] = []
+    started: list[dict[str, Any]] = []
+    brain = core.Brain(
+        brain_config,
+        on_intent_decision=decisions.append,
+        on_tool_call=lambda name, *_args, **_kwargs: operation_names.append(name),
+        register_panic_hotkey=False,
+    )
+
+    async def fake_start(arguments: dict[str, Any], **kwargs: Any) -> str:
+        started.append({"arguments": arguments, **kwargs})
+        return "Background task started (id=task-test, status=running)."
+
+    async def unexpected_completion(*_args: Any, **_kwargs: Any) -> tuple[str, list[dict[str, Any]]]:
+        raise AssertionError("explicit background dispatch must not ask the foreground model to act")
+
+    monkeypatch.setattr(brain, "_handle_start_background_task", fake_start)
+    monkeypatch.setattr(brain, "_stream_completion", unexpected_completion)
+    try:
+        chunks = await _run_turn(brain, request)
+    finally:
+        await brain.close()
+
+    assert chunks == ["Background task started (id=task-test, status=running)."]
+    assert [entry["arguments"] for entry in started] == [{"text": request.input}]
+    assert started[0]["platform"] == "telegram"
+    assert operation_names == ["start_background_task"]
+    assert len(decisions) == 1
+    assert decisions[0].execution_policy == "work"
+    assert decisions[0].capabilities == ("task",)
+    assert decisions[0].durable_work_required is True
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("Charlie, start a background task to check the report", True),
+        ("Please create a background job to check the report", True),
+        ("Please do not start a background task", False),
+        ("How do I start a background task in Python?", False),
+    ],
+)
+def test_background_task_start_matcher_is_explicit(query: str, expected: bool) -> None:
+    assert core.router.is_explicit_background_task_start(query) is expected
+
+
 def test_calendar_capability_selects_automation_policy() -> None:
     policy, capabilities, freshness, external, durable, _rationale = core._execution_policy_from_tool_calls(
         [{"name": "calendar_create", "arguments": {"title": "Daily check"}}]
@@ -467,7 +679,6 @@ def test_intent_decision_contract_serializes_only_routing_metadata() -> None:
         "routing_source": "research_router",
         "confidence": 1.0,
         "rationale": "freshness signal",
-        "presentation_expectation": None,
     }
 
 
@@ -630,17 +841,47 @@ async def test_live_metadata_does_not_force_research(
 
 def test_control_paths_remain_outside_ordinary_brain_routing() -> None:
     process_source = _function_source("_process")
-    command_source = _function_source("consume_web_commands")
 
-    assert "pending_approval_id = get_active_voice_approval()" in process_source
+    assert "pending_approval = get_active_tool_approval()" in process_source
     assert "record_primary_decision(" in process_source
     assert "brain.cancel_chat()" in process_source
     assert "voice.stop_tts()" in process_source
     assert "barge-in lifecycle command interrupted active speech" in process_source
     assert "speech echo cooldown suppressed the incoming utterance" in process_source
-    assert "elif cmd_type == \"stop\":" in command_source
-    assert "elif cmd_type == \"tool_approve\":" in command_source
-    assert "elif cmd_type == \"tool_reject\":" in command_source
+
+
+@pytest.mark.parametrize(
+    ("turn_active", "approval_pending", "channel", "expected"),
+    [
+        (False, True, "telegram", False),
+        (True, False, "telegram", True),
+        (True, True, "telegram", True),
+        (True, True, "voice", False),
+    ],
+)
+def test_telegram_turns_queue_behind_active_approval(
+    turn_active: bool, approval_pending: bool, channel: str, expected: bool
+) -> None:
+    assert main._should_queue_active_turn(turn_active, approval_pending, channel) is expected
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "risk_class", "expected"),
+    [
+        (
+            "shell_execute",
+            "security_sensitive",
+            "I can't confirm this command is read-only. Please review it before approving.",
+        ),
+        (
+            "desktop_click",
+            "destructive",
+            "This action may change something on your PC. Please review it before approving.",
+        ),
+    ],
+)
+def test_telegram_approval_reason_is_human_readable(tool_name, risk_class, expected) -> None:
+    assert main._telegram_approval_reason(tool_name, risk_class) == expected
 
 
 def test_existing_matcher_order_and_outputs_are_unchanged() -> None:

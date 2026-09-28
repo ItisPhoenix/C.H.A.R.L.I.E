@@ -1,7 +1,6 @@
 import json
 import zipfile
 
-import charlie.web_server as web_server
 from charlie.backup_service import decrypt_snapshot, export_snapshot
 
 
@@ -30,14 +29,3 @@ def test_export_snapshot_can_be_decrypted_with_explicit_passphrase(tmp_path):
     assert result["encrypted"] is True
     decrypted = decrypt_snapshot(target.read_bytes(), "correct horse battery staple")
     assert decrypted["sessions.sqlite3"] == b"private"
-
-
-def test_backup_status_describes_explicit_encryption():
-    import asyncio
-
-    status = asyncio.run(web_server.backup_status())
-
-    assert status["encrypted"] is False
-    assert status["default_encrypted"] is False
-    assert status["encryption"] == "scrypt-aesgcm-passphrase"
-    assert "explicit passphrase" in status["message"]

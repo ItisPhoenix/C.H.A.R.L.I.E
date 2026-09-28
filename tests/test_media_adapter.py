@@ -23,7 +23,7 @@ async def test_media_adapter_reports_unavailable_without_a_session(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_thumbnail_is_encoded_for_the_dashboard():
+async def test_thumbnail_is_encoded_for_media_results():
     class Stream:
         size = 3
 

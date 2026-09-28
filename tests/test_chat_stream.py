@@ -9,6 +9,7 @@ from charlie import router
 from charlie.config import Config
 from charlie.core import Brain
 from charlie.desktop import apps as desktop_apps
+from charlie.session_store import SessionStore
 from charlie.streaming import FollowupStreamState
 
 
@@ -25,6 +26,31 @@ def _detect_open_app(query: str) -> Optional[Tuple[str, Optional[str]]]:
         return None
     apps, commands, leftover = matched
     return desktop_apps.launch_apps(apps, commands), leftover
+
+
+def _mock_verified_app_launch(monkeypatch, *, fail_apps=(), running_processes=()):
+    opened = set()
+    start_calls = []
+    failures = {name.casefold() for name in fail_apps}
+    running = {name.casefold() for name in running_processes}
+
+    def resolve(name):
+        if name in opened:
+            return desktop_apps.AppResolution(name=name, window_title=f"{name} test window", source="test")
+        return desktop_apps.AppResolution(name=name, launch_target=f"mock-app://{name}", source="test")
+
+    def startfile(target):
+        name = target.removeprefix("mock-app://")
+        start_calls.append(name)
+        if name.casefold() in failures:
+            raise OSError("Mock startfile failure")
+        opened.add(name)
+
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr(desktop_apps, "is_process_running", lambda name: name.casefold() in running)
+    monkeypatch.setattr(desktop_apps, "resolve_local_app", resolve)
+    monkeypatch.setattr(desktop_apps.os, "startfile", startfile, raising=False)
+    return start_calls
 
 
 def test_social_freshness_phrase_does_not_trigger_core_research():
@@ -113,7 +139,33 @@ async def test_explicit_recall_bypasses_model_tool_calling(monkeypatch, brain_co
     result = [chunk async for chunk in brain.chat_stream("Do you remember my name?")]
 
     assert result == ["- my name is Alex"]
-    assert calls == [("vector_memory", {"action": "recall", "content": "my name"})]
+    assert calls == [(
+        "memory",
+        {"action": "search", "target": "all", "query": "my name"},
+    )]
+
+
+@pytest.mark.asyncio
+async def test_owner_prefixed_natural_recall_searches_saved_memory_without_model(monkeypatch, brain_config):
+    brain = Brain(brain_config)
+    calls = []
+    monkeypatch.setattr(
+        "charlie.tools.registry.execute_tool",
+        lambda name, args: calls.append((name, args)) or "Saved memories:\n- [structured] test marker",
+    )
+
+    result = [
+        chunk
+        async for chunk in brain.chat_stream(
+            "Charlie, what temporary marker did I ask you to remember for my next check?"
+        )
+    ]
+
+    assert result == ["Saved memories:\n- [structured] test marker"]
+    assert calls == [(
+        "memory",
+        {"action": "search", "target": "all", "query": "temporary marker"},
+    )]
 
 
 @pytest.mark.asyncio
@@ -739,50 +791,30 @@ def test_detect_background_task_status_terminal_task_falls_through(monkeypatch):
 
 
 def test_detect_open_app(monkeypatch):
-    import subprocess
-
-
-    called_cmds = []
-
-    def mock_popen(cmd, *args, **kwargs):
-        called_cmds.append(cmd)
-
-        class MockProcess:
-            pid = 12345
-
-            def poll(self):
-                return None
-
-        return MockProcess()
-
-    monkeypatch.setattr(subprocess, "Popen", mock_popen)
-    monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.desktop.apps.is_process_running", lambda name: False)
-    monkeypatch.setattr("charlie.desktop.apps.resolve_local_app", lambda _name: None)
+    start_calls = _mock_verified_app_launch(monkeypatch)
 
     # 1. Test opening single app
     res = _detect_open_app("open calculator")
     msg, remaining = res
     assert msg == "I've opened Calculator for you."
     assert remaining is None
-    assert ["calc"] in called_cmds
-    called_cmds.clear()
+    assert start_calls == ["calculator"]
+    start_calls = _mock_verified_app_launch(monkeypatch)
     res = _detect_open_app("open chrome and calculator")
     msg, remaining = res
     assert "Calculator and Chrome" in msg
     assert remaining is None
-    assert ["chrome"] in called_cmds
-    assert ["calc"] in called_cmds
+    assert set(start_calls) == {"chrome", "calculator"}
 
     # Bare websites belong to Charlie BrowserSession, not external OS launch.
-    called_cmds.clear()
+    start_calls.clear()
     assert router.match_open_app("open youtube and github") == (
         [], [], "open youtube and github"
     )
     assert router.match_open_app("open reddit.com, wikipedia.org and https://neon.tech") == (
         [], [], "open reddit.com, wikipedia.org and https://neon.tech"
     )
-    assert called_cmds == []
+    assert start_calls == []
 
     # 5. Test float/version number exclusion (must not match as domain)
     res = _detect_open_app("open version 3.5")
@@ -795,46 +827,18 @@ def test_detect_open_app(monkeypatch):
     # 7. Compound instruction: the app still opens as a side effect (no more
     # full bypass), and the leftover instruction comes back for the caller
     # to hand to the LLM instead of the fast-path silently doing nothing extra.
-    called_cmds.clear()
+    start_calls.clear()
     res = _detect_open_app("open notepad and write hello")
     assert res is not None
     msg, remaining = res
     assert "Notepad" in msg
     assert remaining == "and write hello"
-    assert ["notepad"] in called_cmds
+    assert "notepad" in start_calls
 
 
 def test_detect_open_app_partial_failure(monkeypatch):
     """Partial launch failures must not crash and must format correctly."""
-    import os
-    import subprocess
-
-
-    call_count = 0
-
-    def mock_popen(cmd, *args, **kwargs):
-        nonlocal call_count
-        call_count += 1
-
-        class MockProcess:
-            pid = 12345
-
-            def poll(self):
-                return None
-
-        # First call succeeds, second call fails
-        if call_count == 1:
-            return MockProcess()
-        raise OSError("Mock launch failure")
-
-    def mock_startfile(_cmd, *_a, **_kw):
-        raise OSError("Mock startfile failure")
-
-    monkeypatch.setattr(subprocess, "Popen", mock_popen)
-    monkeypatch.setattr(os, "startfile", mock_startfile, raising=False)
-    monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.desktop.apps.is_process_running", lambda name: False)
-    monkeypatch.setattr("charlie.desktop.apps.resolve_local_app", lambda _name: None)
+    start_calls = _mock_verified_app_launch(monkeypatch, fail_apps={"notepad"})
 
     # Test: open two apps, one fails
     res = _detect_open_app("open chrome notepad")
@@ -842,6 +846,7 @@ def test_detect_open_app_partial_failure(monkeypatch):
     assert remaining is None
     assert "Chrome" in msg  # First app succeeds
     assert "Notepad" in msg  # Second app should appear in failed list
+    assert set(start_calls) == {"chrome", "notepad"}
     assert "Failed to open" in msg
     # Ensure no raw tuple syntax leaks (the old bug)
     assert "(" not in msg or msg.count("(") == msg.count(")")
@@ -852,25 +857,43 @@ def test_detect_open_app_partial_failure(monkeypatch):
 
 def test_detect_open_app_all_failures(monkeypatch):
     """All apps failing must return a graceful error, not a crash."""
-    import os
-    import subprocess
-
-
-    def mock_fail(*_a, **_kw):
-        raise OSError("Mock failure")
-
-    monkeypatch.setattr(subprocess, "Popen", mock_fail)
-    monkeypatch.setattr(os, "startfile", mock_fail, raising=False)
-    monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.desktop.apps.is_process_running", lambda name: False)
-    monkeypatch.setattr("charlie.desktop.apps.resolve_local_app", lambda _name: None)
+    start_calls = _mock_verified_app_launch(monkeypatch, fail_apps={"chrome", "notepad"})
 
     res = _detect_open_app("open chrome notepad")
     assert res is not None
     msg, remaining = res
     assert remaining is None
     assert "chrome" in msg.lower() or "Chrome" in msg
+    assert set(start_calls) == {"chrome", "notepad"}
     # Must not crash with AttributeError on tuples
+
+
+def test_app_startfile_acceptance_without_observed_window_stays_failure(monkeypatch):
+    from charlie.desktop.apps import AppResolution
+
+    start_calls = []
+    resolve_calls = []
+
+    def resolve(name):
+        resolve_calls.append(name)
+        if start_calls:
+            return None
+        return AppResolution(name=name, launch_target="mock-app://Notepad", source="test")
+
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr(desktop_apps, "is_process_running", lambda _name: False)
+    monkeypatch.setattr(desktop_apps, "resolve_local_app", resolve)
+    monkeypatch.setattr(desktop_apps.os, "startfile", lambda target: start_calls.append(target), raising=False)
+    ticks = iter((0.0, 1.0, 4.0))
+    monkeypatch.setattr(desktop_apps.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(desktop_apps.time, "sleep", lambda _delay: None)
+
+    message = desktop_apps.launch_apps(["Notepad"])
+
+    assert start_calls == ["mock-app://Notepad"]
+    assert resolve_calls == ["Notepad", "Notepad"]
+    assert "could not open" in message.lower()
+    assert "opened" not in message.lower()
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="process name ends in .exe on Windows only")
@@ -888,21 +911,7 @@ def test_detect_open_app_focuses_already_running_instead_of_relaunching(monkeypa
     live during Phase 3 background-task testing (4+ Notepad windows from
     repeated "open notepad" calls). An already-running app gets focused via
     the same native focus_window() the desktop_focus tool uses, not relaunched."""
-    import subprocess
-
-
-    monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.desktop.apps.is_process_running", lambda name: name == "notepad.exe")
-
-    popen_calls = []
-
-    class MockProcess:
-        def poll(self):
-            return None
-
-    monkeypatch.setattr(
-        subprocess, "Popen", lambda cmd, *a, **kw: (popen_calls.append(cmd) or MockProcess())
-    )
+    start_calls = _mock_verified_app_launch(monkeypatch, running_processes={"notepad.exe"})
 
     focus_calls = []
     monkeypatch.setattr(
@@ -916,27 +925,13 @@ def test_detect_open_app_focuses_already_running_instead_of_relaunching(monkeypa
     assert remaining is None
     assert "already open" in msg
     assert focus_calls == ["notepad"]
-    assert popen_calls == []
+    assert start_calls == []
 
 
 def test_detect_open_app_mixed_running_and_not_running(monkeypatch):
     """One app already running (focused) and one not (launched) in a single
     multi-app request are handled independently."""
-    import subprocess
-
-
-    monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.desktop.apps.is_process_running", lambda name: name == "notepad.exe")
-
-    popen_calls = []
-    class MockProcess:
-        def poll(self):
-            return None
-
-    monkeypatch.setattr(
-        subprocess, "Popen", lambda cmd, *a, **kw: (popen_calls.append(cmd) or MockProcess())
-    )
-    monkeypatch.setattr("charlie.desktop.apps.resolve_local_app", lambda _name: None)
+    start_calls = _mock_verified_app_launch(monkeypatch, running_processes={"notepad.exe"})
 
     focus_calls = []
     monkeypatch.setattr(
@@ -951,7 +946,7 @@ def test_detect_open_app_mixed_running_and_not_running(monkeypatch):
     assert "already open" in msg
     assert "opened" in msg.lower()
     assert focus_calls == ["notepad"]
-    assert ["calc"] in popen_calls
+    assert start_calls == ["calculator"]
 
 
 def test_detect_open_app_does_not_open_filename_as_website(monkeypatch):
@@ -959,18 +954,13 @@ def test_detect_open_app_does_not_open_filename_as_website(monkeypatch):
     "test.txt" as a probable domain (".txt" looks exactly like a TLD-shaped
     suffix) and opened https://test.txt in a browser instead of treating it
     as a filename."""
-    import subprocess
-
-
-    monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.desktop.apps.is_process_running", lambda name: False)
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: type("P", (), {"poll": lambda self: None})())
-    monkeypatch.setattr("charlie.desktop.apps.resolve_local_app", lambda _name: None)
+    start_calls = _mock_verified_app_launch(monkeypatch)
 
     res = _detect_open_app("open notepad and write this is a test and save it as test.txt")
     assert res is not None
     msg, _remaining = res
     assert "test.txt" not in msg
+    assert "notepad" in start_calls
 
 
 @pytest.mark.asyncio
@@ -987,19 +977,8 @@ async def test_chat_stream_fast_path_close_open(monkeypatch, brain_config):
 
         return MockResult()
 
-    def mock_popen(cmd, *args, **kwargs):
-        class MockProcess:
-            pid = 12345
-
-            def poll(self):
-                return None
-        return MockProcess()
-
     monkeypatch.setattr(subprocess, "run", mock_run)
-    monkeypatch.setattr(subprocess, "Popen", mock_popen)
-    monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.desktop.apps.is_process_running", lambda name: False)
-    monkeypatch.setattr("charlie.desktop.apps.resolve_local_app", lambda _name: None)
+    start_calls = _mock_verified_app_launch(monkeypatch)
     monkeypatch.setattr("charlie.tools._desktop_ready", lambda: True)
 
     called_stream = False
@@ -1028,6 +1007,7 @@ async def test_chat_stream_fast_path_close_open(monkeypatch, brain_config):
         results.append(chunk)
     assert results == ["I've opened Calculator for you."]
     assert not called_stream
+    assert start_calls == ["calculator"]
 
 
 @pytest.mark.asyncio
@@ -1070,18 +1050,9 @@ async def test_chat_stream_compound_open_app_continues_with_llm(monkeypatch, bra
     instruction, instead of the old all-or-nothing bypass that sent the
     whole compound sentence to the LLM (re-discovering how to open the app
     via slow, flaky tool calls -- the exact pattern observed live)."""
-    import subprocess
-
     from charlie.core import Brain
 
-    monkeypatch.setattr(
-        subprocess,
-        "Popen",
-        lambda *a, **kw: type("P", (), {"pid": 1, "poll": lambda self: None})(),
-    )
-    monkeypatch.setattr("sys.platform", "win32")
-    monkeypatch.setattr("charlie.desktop.apps.is_process_running", lambda name: False)
-    monkeypatch.setattr("charlie.desktop.apps.resolve_local_app", lambda _name: None)
+    start_calls = _mock_verified_app_launch(monkeypatch)
     monkeypatch.setattr("charlie.tools._desktop_ready", lambda: True)
 
     brain = Brain(brain_config)
@@ -1100,6 +1071,7 @@ async def test_chat_stream_compound_open_app_continues_with_llm(monkeypatch, bra
 
     joined = "".join(results)
     assert "Notepad" in joined  # fast-path confirmation streamed first
+    assert start_calls == ["notepad"]
     assert "Sure, writing that now." in joined  # then the LLM continuation
 
     # The LLM only saw the leftover instruction, not the app-open part it
@@ -1481,8 +1453,6 @@ async def test_interactive_vision_timeout_surfaces_partial_or_existing_fallback(
 
 @pytest.mark.asyncio
 async def test_interactive_vision_payload_uses_160_tokens(monkeypatch):
-    from charlie import core
-
     config = Config(
         llm_url="https://cloud.example/v1",
         llm_key="test-key",
@@ -1501,7 +1471,7 @@ async def test_interactive_vision_payload_uses_160_tokens(monkeypatch):
 
     assert payload["max_tokens"] == 160
     assert payload["stream"] is True
-    assert payload["temperature"] == core._LLM_TEMPERATURE
+    assert "temperature" not in payload
     assert "Answer in 1-3 concise sentences." in payload["messages"][0]["content"]
     assert "Prioritize the user's specific question." in payload["messages"][0]["content"]
 
@@ -1535,6 +1505,9 @@ async def test_browser_image_description_keeps_300_token_budget(brain_config):
 
     assert result == "browser description"
     assert captured["json"]["max_tokens"] == 300
+    prompt = captured["json"]["messages"][0]["content"][0]["text"]
+    assert "Screenshot appearance alone cannot confirm interactivity" in prompt
+    assert "DOM or accessibility evidence must confirm clickability" in prompt
 
 
 @pytest.mark.asyncio
@@ -1723,6 +1696,503 @@ async def test_chat_stream_skip_tools(monkeypatch, brain_config):
     assert "Hello world" in "".join(results)
     assert "TOOL: file_write" not in "".join(results)
     assert not called_tool
+
+
+@pytest.mark.asyncio
+async def test_background_chat_keeps_memory_history_while_foreground_reloads_store(
+    monkeypatch, brain_config, tmp_path
+):
+    store = SessionStore(str(tmp_path / "chat_history.db"))
+    store.create_session("foreground-session", source="test")
+    store.create_session("background-session", source="background")
+    store.append_tool(
+        turn_id="persisted-turn",
+        tool_name="file_read",
+        args={"path": "note.txt"},
+        result="orphan result",
+        session_id="foreground-session",
+    )
+    store.append_tool(
+        turn_id="persisted-turn",
+        tool_name="file_read",
+        args={"path": "note.txt"},
+        result="orphan result",
+        session_id="background-session",
+    )
+    foreground = Brain(brain_config, session_store=store, register_panic_hotkey=False)
+    background = Brain(
+        brain_config, session_store=store, register_panic_hotkey=False, is_background=True
+    )
+    captured = {}
+
+    async def mock_stream_completion(payload, _generation):
+        user_input = payload["messages"][-1]["content"]
+        captured[user_input] = payload["messages"]
+        return ("Plan response" if user_input == "Background task plan" else "Answer", [])
+
+    monkeypatch.setattr(foreground, "_stream_completion", mock_stream_completion)
+    monkeypatch.setattr(background, "_stream_completion", mock_stream_completion)
+    try:
+        foreground.history = [{"role": "assistant", "content": "stale foreground memory"}]
+        _ = [
+            chunk
+            async for chunk in foreground.chat_stream(
+                "Foreground question", session_id="foreground-session", skip_tools=True
+            )
+        ]
+        foreground_messages = captured["Foreground question"]
+        assert any(
+            "[file_read args={\"path\": \"note.txt\"}] result: orphan result"
+            in (message.get("content") or "")
+            for message in foreground_messages
+        )
+        assert not any(
+            "stale foreground memory" in (message.get("content") or "")
+            for message in foreground_messages
+        )
+
+        _ = [
+            chunk
+            async for chunk in background.chat_stream(
+                "Background task plan", session_id="background-session", skip_tools=True
+            )
+        ]
+        _ = [
+            chunk
+            async for chunk in background.chat_stream(
+                "Background task next step", session_id="background-session", skip_tools=True
+            )
+        ]
+        background_messages = captured["Background task next step"]
+        assert {"role": "user", "content": "Background task plan"} in background_messages
+        assert {"role": "assistant", "content": "Plan response"} in background_messages
+        assert not any(
+            "orphan result" in (message.get("content") or "") for message in background_messages
+        )
+    finally:
+        await foreground.close()
+        await background.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_native_tool_result_returns_with_matching_id_and_final_answer(monkeypatch):
+    """Exercise the complete native call -> tool result -> model answer loop."""
+    from charlie.core import Brain
+    from charlie.turn_contracts import TurnRequest
+
+    config = Config(
+        llm_url="https://provider.example/v1",
+        llm_key="test-key",
+        llm_model="test-model",
+        native_tool_calling=True,
+        vision_enabled=False,
+        iteration_budget_max=2,
+    )
+    decisions = []
+    brain = Brain(config, on_intent_decision=decisions.append, register_panic_hotkey=False)
+    primary_payloads = []
+    followup_payloads = []
+    tool_call = {
+        "id": "call_gate1_search",
+        "name": "web_search",
+        "arguments": {"query": "Charlie test query"},
+    }
+
+    async def mock_stream_completion(payload, _generation):
+        primary_payloads.append(payload)
+        return "", [tool_call]
+
+    async def mock_followup(_client, _model, payload, _generation, state):
+        followup_payloads.append(payload)
+        state.accumulated = "The source says the Charlie test query is confirmed by an observed result."
+        yield state.accumulated
+
+    monkeypatch.setattr(brain, "_stream_completion", mock_stream_completion)
+    monkeypatch.setattr(brain, "_stream_followup_once", mock_followup)
+    monkeypatch.setattr(
+        "charlie.tools.registry.execute_tool_structured",
+        lambda _name, _args: "Observed source result is sufficiently detailed and relevant for a grounded answer.",
+    )
+
+    request = TurnRequest(
+        turn_id="turn-gate1-native-tool",
+        session_id="session-gate1-native-tool",
+        input="Search for the Charlie test query and summarize it.",
+        channel="voice",
+    )
+    try:
+        chunks = [
+            chunk
+            async for chunk in brain.chat_stream(
+                request.input,
+                platform=request.channel,
+                session_id=request.session_id,
+                turn_request=request,
+            )
+        ]
+    finally:
+        await brain.close()
+
+    assert len(primary_payloads) == 1
+    assert primary_payloads[0]["model"] == "test-model"
+    assert primary_payloads[0]["stream"] is True
+    assert primary_payloads[0]["tool_choice"] == "auto"
+    assert len(followup_payloads) == 1
+    messages = followup_payloads[0]["messages"]
+    assistant_call = next(message for message in messages if message.get("tool_calls"))
+    tool_result = next(message for message in messages if message.get("role") == "tool")
+    assert assistant_call["tool_calls"][0]["id"] == tool_call["id"]
+    assert tool_result["tool_call_id"] == tool_call["id"]
+    assert tool_result["content"] == (
+        "Observed source result is sufficiently detailed and relevant for a grounded answer."
+    )
+    assert chunks == ["The source says the Charlie test query is confirmed by an observed result."]
+    assert len(decisions) == 1
+    assert decisions[0].turn_id == request.turn_id
+
+
+@pytest.mark.asyncio
+async def test_native_tool_empty_followup_reports_unverified_result_without_retry(monkeypatch):
+    config = Config(
+        llm_url="https://provider.example/v1",
+        llm_key="test-key",
+        llm_model="test-model",
+        native_tool_calling=True,
+        vision_enabled=False,
+        iteration_budget_max=2,
+    )
+    brain = Brain(config, register_panic_hotkey=False)
+    tool_calls = 0
+    tool_call = {
+        "id": "call_empty_followup",
+        "name": "web_search",
+        "arguments": {"query": "Charlie test query"},
+    }
+
+    async def mock_stream_completion(_payload, _generation):
+        return "", [tool_call]
+
+    async def mock_empty_followup(_client, _model, _payload, _generation, state):
+        state.accumulated = ""
+        if state.accumulated:
+            yield state.accumulated
+
+    def execute_tool(_name, _args):
+        nonlocal tool_calls
+        tool_calls += 1
+        return "Observed source result is sufficiently detailed and relevant for a grounded answer."
+
+    monkeypatch.setattr(brain, "_stream_completion", mock_stream_completion)
+    monkeypatch.setattr(brain, "_stream_followup_once", mock_empty_followup)
+    monkeypatch.setattr("charlie.tools.registry.execute_tool_structured", execute_tool)
+
+    try:
+        chunks = [chunk async for chunk in brain.chat_stream("Search for the Charlie test query.")]
+    finally:
+        await brain.close()
+
+    assert chunks == [
+        "I couldn't get a final response after the tool call, so I can't confirm the requested result."
+    ]
+    assert tool_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_approval_denial_stops_remaining_tools_and_model_followup(monkeypatch):
+    from charlie.tools import registry
+    from charlie.turn_contracts import ResultEnvelope, ResultStatus, VerificationStatus
+
+    brain = Brain(
+        Config(
+            llm_url="https://provider.example/v1",
+            llm_key="test-key",
+            llm_model="test-model",
+            native_tool_calling=True,
+            vision_enabled=False,
+            iteration_budget_max=10,
+        ),
+        register_panic_hotkey=False,
+    )
+    calls = []
+    followup_rounds = []
+    tool_calls = [
+        {"id": "call_search", "name": "web_search", "arguments": {"query": "official release"}},
+        {"id": "call_calendar", "name": "calendar_list", "arguments": {}},
+        {"id": "call_file", "name": "file_read", "arguments": {"path": "notes.txt"}},
+    ]
+
+    async def mock_stream_completion(_payload, _generation):
+        return "", tool_calls
+
+    async def mock_followup(_client, _model, _payload, _generation, state):
+        followup_rounds.append(True)
+        if len(followup_rounds) == 1:
+            state.tc_by_index = {
+                0: {
+                    "id": "call_denied_shell",
+                    "name": "shell_execute",
+                    "arguments": json.dumps({"command": "whoami"}),
+                },
+                1: {
+                    "id": "call_followup_shell",
+                    "name": "shell_execute",
+                    "arguments": json.dumps({"command": "echo done"}),
+                },
+            }
+        if False:
+            yield ""
+
+    async def execute(tool_name, _arguments, **kwargs):
+        calls.append(tool_name)
+        if tool_name == "web_search":
+            result = ResultEnvelope(
+                operation=tool_name,
+                result="Official release page: version 3.14.1. " + "x" * 2200,
+                verification_status=VerificationStatus.VERIFIED_SUCCESS.value,
+            )
+        elif tool_name == "calendar_list":
+            result = ResultEnvelope(
+                operation=tool_name,
+                result="One event is scheduled for Friday.",
+                verification_status=VerificationStatus.VERIFIED_SUCCESS.value,
+            )
+        elif tool_name == "file_read":
+            result = ResultEnvelope(
+                operation=tool_name,
+                result="Unverified file fragment should stay hidden.",
+                verification_status=VerificationStatus.EXECUTED_UNVERIFIED.value,
+            )
+        elif tool_name == "shell_execute":
+            result = ResultEnvelope(
+                operation=tool_name,
+                status=ResultStatus.CANCELLED.value,
+                result="Error: Command approval timed out before execution.",
+                data={"failure_kind": "approval_denied", "approval_status": "timed_out"},
+            )
+        else:
+            result = ResultEnvelope(operation=tool_name, result="unexpected desktop input")
+        kwargs["before_finalize"](result)
+        return result
+
+    monkeypatch.setattr(brain, "_stream_completion", mock_stream_completion)
+    monkeypatch.setattr(brain, "_stream_followup_once", mock_followup)
+    monkeypatch.setattr(registry, "is_interactive", lambda _name: True)
+    monkeypatch.setattr(brain, "_execute_operation_primitive", execute)
+    try:
+        chunks = [
+            chunk
+            async for chunk in brain.chat_stream(
+                "Run `whoami` then `echo done` and report both results.",
+                platform="telegram",
+            )
+        ]
+    finally:
+        await brain.close()
+
+    assert calls == ["web_search", "calendar_list", "file_read", "shell_execute"]
+    assert len(followup_rounds) == 1
+    response = " ".join(chunks).casefold()
+    assert "requested approval was not given" in response
+    assert "version 3.14.1" in response
+    assert "scheduled for friday" in response
+    assert "remaining steps" in response
+    assert "unverified file fragment" not in response
+    assert "x" * 100 in response
+    assert "x" * 2001 not in response
+    assert not any(name in response for name in ("shell_execute", "calendar_list", "web_search", "desktop_key"))
+    assert not any(status in response for status in ("timed_out", "verified_success", "completed", "cancelled"))
+
+
+@pytest.mark.asyncio
+async def test_verified_shell_help_result_survives_app_action_grounding(monkeypatch):
+    from charlie.tools import registry
+    from charlie.turn_contracts import ResultEnvelope, ResultStatus, VerificationStatus
+
+    user_input = "Charlie, run taskkill /? and report the first help heading. Do not stop any process."
+    assert router.is_explicit_app_action(user_input) is True
+    brain = Brain(
+        Config(
+            llm_url="https://provider.example/v1",
+            llm_key="test-key",
+            llm_model="test-model",
+            native_tool_calling=True,
+            vision_enabled=False,
+            iteration_budget_max=2,
+        ),
+        register_panic_hotkey=False,
+    )
+    tool_call = {
+        "id": "call_taskkill_help",
+        "name": "shell_execute",
+        "arguments": {"command": "taskkill /?"},
+    }
+
+    async def mock_stream_completion(_payload, _generation):
+        return "", [tool_call]
+
+    async def mock_followup(_client, _model, _payload, _generation, state):
+        state.accumulated = "The first help section heading is Description."
+        yield state.accumulated
+
+    async def execute(tool_name, _arguments, **kwargs):
+        result = ResultEnvelope(
+            operation=tool_name,
+            status=ResultStatus.COMPLETED.value,
+            result="STDOUT:\nTASKKILL [/S system ...]\n\nDescription:",
+            verification_status=VerificationStatus.VERIFIED_SUCCESS.value,
+        )
+        kwargs["before_finalize"](result)
+        return result
+
+    monkeypatch.setattr(brain, "_stream_completion", mock_stream_completion)
+    monkeypatch.setattr(brain, "_stream_followup_once", mock_followup)
+    monkeypatch.setattr(registry, "is_interactive", lambda _name: True)
+    monkeypatch.setattr(brain, "_execute_operation_primitive", execute)
+    try:
+        chunks = [
+            chunk
+            async for chunk in brain.chat_stream(user_input, platform="telegram")
+        ]
+    finally:
+        await brain.close()
+
+    assert chunks == ["The first help section heading is Description."]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("user_input", "tools_expected"),
+    [
+        (
+            "Charlie, research the latest stable Python documentation version. Cite only sources you fetched.",
+            False,
+        ),
+        (
+            "Charlie, research the latest stable Python documentation version and open the official page.",
+            True,
+        ),
+    ],
+)
+async def test_research_turn_synthesizes_once_and_keeps_tools_only_for_requested_actions(
+    monkeypatch, user_input, tools_expected
+):
+    from charlie.research.citations import assign_citations
+    from charlie.research.models import EvidenceItem, ResearchMode, ResearchReport, SourceDocument
+    from charlie.turn_contracts import TurnRequest
+
+    decisions = []
+    payloads = []
+    research_calls = []
+    brain = Brain(
+        Config(
+            llm_url="https://provider.example/v1",
+            llm_key="test-key",
+            llm_model="test-model",
+            native_tool_calling=True,
+            vision_enabled=False,
+            iteration_budget_max=2,
+        ),
+        on_intent_decision=decisions.append,
+        register_panic_hotkey=False,
+    )
+    source = SourceDocument(
+        source_id="S1",
+        url="https://docs.python.org/3/",
+        title="Python Documentation",
+        domain="docs.python.org",
+        content="Python 3.14.7 is the latest stable release.",
+    )
+    report = ResearchReport(
+        query="latest stable Python documentation version",
+        mode=ResearchMode.STANDARD,
+        sources=[source],
+        evidence=[EvidenceItem("S1", "Python 3.14.7 is the latest stable release.")],
+        stop_reason="evidence-sufficient",
+    )
+    report.citations = assign_citations(report.sources)
+    request = TurnRequest(
+        turn_id="turn-research-tools-policy",
+        session_id="session-research-tools-policy",
+        input=user_input,
+        channel="telegram",
+    )
+
+    async def mock_research(query, _session_id, turn_id=None):
+        research_calls.append((query, turn_id))
+        return report
+
+    async def mock_stream(payload, _generation):
+        payloads.append(payload)
+        return "The latest stable Python version is 3.14.7 [S1] [S99].", []
+
+    monkeypatch.setattr(brain, "_run_research", mock_research)
+    monkeypatch.setattr(brain, "_stream_completion", mock_stream)
+    monkeypatch.setattr(
+        brain,
+        "_stream_followup_once",
+        lambda *_args, **_kwargs: pytest.fail("research synthesis must not run a tool follow-up"),
+    )
+    try:
+        chunks = [
+            chunk
+            async for chunk in brain.chat_stream(
+                user_input,
+                platform="telegram",
+                session_id=request.session_id,
+                turn_request=request,
+            )
+        ]
+    finally:
+        await brain.close()
+
+    assert len(research_calls) == 1
+    assert len(payloads) == 1
+    assert ("tools" in payloads[0]) is tools_expected
+    assert ("tool_choice" in payloads[0]) is tools_expected
+    assert "[S1]" in chunks[0] and "[S99]" not in chunks[0]
+    assert len(decisions) == 1
+
+
+@pytest.mark.asyncio
+async def test_research_without_provider_results_returns_insufficient_evidence(monkeypatch):
+    from charlie.research.models import ResearchMode, ResearchReport
+
+    brain = Brain(
+        Config(
+            llm_url="https://provider.example/v1",
+            llm_key="test-key",
+            llm_model="test-model",
+            native_tool_calling=True,
+            vision_enabled=False,
+            iteration_budget_max=2,
+        ),
+        register_panic_hotkey=False,
+    )
+    payloads = []
+
+    async def no_results(query, _session_id, turn_id=None):
+        return ResearchReport(query=query, mode=ResearchMode.STANDARD, stop_reason="no-results")
+
+    async def unsupported_answer(payload, _generation):
+        payloads.append(payload)
+        return "The phrase is true from general knowledge [S99].", []
+
+    monkeypatch.setattr(brain, "_run_research", no_results)
+    monkeypatch.setattr(brain, "_stream_completion", unsupported_answer)
+    try:
+        chunks = [
+            chunk
+            async for chunk in brain.chat_stream(
+                "Charlie, research the exact phrase CHARLIE-G5-EMPTY-20260923-7F6C on example.invalid."
+            )
+        ]
+    finally:
+        await brain.close()
+
+    assert chunks == ["I couldn't find sufficient reliable evidence to answer that research question."]
+    assert len(payloads) == 1
+    assert "tools" not in payloads[0]
 
 
 def test_build_native_tool_results_truncates_oversized_content():

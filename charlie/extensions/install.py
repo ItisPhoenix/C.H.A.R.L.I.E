@@ -1,10 +1,7 @@
-"""Shared extension-install logic (adapters: mcp/skill/openapi/plugin).
+"""Shared extension-install logic for MCP, skill, OpenAPI, and plugin adapters.
 
-Extracted from charlie/web_server.py so adapter parsing and registration stay
-in one place. Runtime lifecycle mutations are applied by main against its
-authoritative ToolRegistry/MCPClient/PluginManager owners; the web server
-keeps only proposal and read/UI mirror state. These remain plain functions
-for focused adapter tests and the main runtime seam.
+Runtime lifecycle mutations are applied by main against its authoritative
+ToolRegistry, MCPClient, and PluginManager owners.
 """
 
 from __future__ import annotations
@@ -65,8 +62,7 @@ def parsed_mcp_config(name: str, source: str, raw_text: str) -> Any:
 def declared_tools_for(
     kind: str, name: str, source: str, raw_text: str, plugin_allow_dirs: List[str]
 ) -> List[str]:
-    """Parse (without registering) so propose() can show real declared
-    tools in the SkillCard before anything activates."""
+    """Parse without registering so the approval record lists declared tools."""
     if kind == "mcp":
         parsed_mcp_config(name, source, raw_text)
         return []  # MCP tools aren't known until the server is actually started

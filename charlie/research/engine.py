@@ -82,13 +82,19 @@ class ResearchEngine:
             return ResearchDecision(False, None, "research disabled")
         return route(query, requested_mode)
 
-    def plan(self, query: str, mode: ResearchMode) -> ResearchPlan:
+    def plan(
+        self,
+        query: str,
+        mode: ResearchMode,
+        domain_filters: Optional[List[str]] = None,
+    ) -> ResearchPlan:
         return build_plan(
             query,
             mode,
             max_queries=int(getattr(self.config, "research_max_search_queries", 6)),
             market=str(getattr(self.config, "research_market", "IN")),
             locale=str(getattr(self.config, "research_locale", "en-IN")),
+            domain_filters=domain_filters,
         )
 
     async def _search(self, plan: ResearchPlan) -> List[SearchResult]:
@@ -96,7 +102,12 @@ class ResearchEngine:
         if not providers:
             return []
         limit = max(1, int(getattr(self.config, "research_max_sources", 12)))
-        cache_key = "|".join(item.text for item in plan.queries)
+        cache_key = repr(
+            (
+                tuple(plan.domain_filters),
+                tuple((item.text, tuple(item.domain_filters)) for item in plan.queries),
+            )
+        )
         cached = self.search_cache.get(cache_key)
         if cached is not None:
             logger.info("Research search cache hit: mode=%s queries=%d", plan.mode.value, len(plan.queries))
@@ -176,9 +187,15 @@ class ResearchEngine:
         documents = await asyncio.gather(*(fetch_one(item) for item in selected))
         return [item for item in documents if item is not None]
 
-    async def _run_inner(self, query: str, mode: ResearchMode, cancel_event: Optional[asyncio.Event]) -> ResearchReport:
+    async def _run_inner(
+        self,
+        query: str,
+        mode: ResearchMode,
+        cancel_event: Optional[asyncio.Event],
+        domain_filters: Optional[List[str]] = None,
+    ) -> ResearchReport:
         started = time.perf_counter()
-        plan = self.plan(query, mode)
+        plan = self.plan(query, mode, domain_filters=domain_filters)
         report = ResearchReport(query=query, mode=mode, plan=plan)
         await self._notify(ResearchProgress("planning", f"Planning {mode.value} research", mode=mode))
         if cancel_event and cancel_event.is_set():
@@ -231,8 +248,15 @@ class ResearchEngine:
             followup = ResearchPlan(
                 goal=plan.goal,
                 mode=mode,
-                queries=[type(plan.queries[0])(f"{plan.goal} primary source", "follow-up")],
+                queries=[
+                    type(plan.queries[0])(
+                        f"{plan.goal} primary source",
+                        "follow-up",
+                        list(plan.domain_filters),
+                    )
+                ],
                 constraints=plan.constraints,
+                domain_filters=list(plan.domain_filters),
             )
             extra = await search_plan(
                 followup,
@@ -307,6 +331,7 @@ class ResearchEngine:
         mode: str = "auto",
         *,
         cancel_event: Optional[asyncio.Event] = None,
+        domain_filters: Optional[List[str]] = None,
     ) -> ResearchReport:
         decision = self.decide(query, mode)
         if not decision.should_research or decision.mode is None:
@@ -319,7 +344,10 @@ class ResearchEngine:
             )
         )
         try:
-            return await asyncio.wait_for(self._run_inner(query, decision.mode, cancel_event), timeout=timeout)
+            return await asyncio.wait_for(
+                self._run_inner(query, decision.mode, cancel_event, domain_filters=domain_filters),
+                timeout=timeout,
+            )
         except asyncio.TimeoutError:
             logger.warning("Research timed out: mode=%s query=%r", decision.mode.value, query)
             return ResearchReport(
@@ -334,5 +362,11 @@ class ResearchEngine:
             logger.warning("Research failed: mode=%s query=%r", decision.mode.value, query, exc_info=True)
             return ResearchReport(query=query, mode=decision.mode, stop_reason="error", errors=[type(exc).__name__])
 
-    def run_sync(self, query: str, mode: str = "auto") -> ResearchReport:
-        return asyncio.run(self.run(query, mode))
+    def run_sync(
+        self,
+        query: str,
+        mode: str = "auto",
+        *,
+        domain_filters: Optional[List[str]] = None,
+    ) -> ResearchReport:
+        return asyncio.run(self.run(query, mode, domain_filters=domain_filters))

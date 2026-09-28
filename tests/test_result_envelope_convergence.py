@@ -14,7 +14,6 @@ from charlie.core import (
     _RepeatToolCallGuard,
     _result_envelope_to_model_text,
 )
-from charlie.presentation import PresentationContext, PresentationKind, PresentationResolver
 from charlie.research.models import ResearchMode, ResearchReport
 from charlie.tools import ToolExecutionResult
 from charlie.turn_contracts import ResultEnvelope, ResultStatus
@@ -178,25 +177,6 @@ def test_repeat_guard_consumes_structured_failure_state():
     guard.record_result("shell_execute({})", failed)
 
     assert guard.before("shell_execute({})") is True
-
-
-def test_presentation_resolver_keeps_envelope_correlation():
-    envelope = ResultEnvelope(
-        request="read the file",
-        turn_id="turn-envelope",
-        task_id="task-envelope",
-        session_id="session-envelope",
-        capability="file",
-        operation="file.system.read",
-        result="The file was read.",
-    )
-
-    intent = PresentationResolver().resolve(envelope, PresentationContext())
-
-    assert intent.kind == PresentationKind.CAPTION
-    assert intent.turn_id == envelope.turn_id
-    assert intent.task_id == envelope.task_id
-    assert intent.session_id == envelope.session_id
 
 
 def _mock_tool_stream(call_count: list[int]):
@@ -438,7 +418,13 @@ async def test_parallel_and_sequential_tool_results_are_envelopes(monkeypatch):
     monkeypatch.setattr(core, "autonomy_evaluate", lambda *_args, **_kwargs: (core.Requirement.ALLOW, "safe", ""))
     monkeypatch.setattr("charlie.tools.registry.execute_tool", lambda name, _args: f"{name} completed")
 
-    chunks = [chunk async for chunk in brain.chat_stream("read notes and run echo", platform="text")]
+    chunks = [
+        chunk
+        async for chunk in brain.chat_stream(
+            "Read notes.txt and run `echo ok`.",
+            platform="text",
+        )
+    ]
 
     assert chunks == ["Finished both operations."]
     assert [name for name, _ in envelopes] == ["file_read", "shell_execute"]
@@ -474,9 +460,3 @@ async def test_conversational_prose_does_not_emit_an_operation_envelope(monkeypa
 
     assert chunks == ["Just a conversational answer."]
     assert envelopes == []
-
-
-def test_legacy_execution_outcome_alias_remains_compatible():
-    from charlie.presentation import ExecutionOutcome
-
-    assert ExecutionOutcome is ResultEnvelope

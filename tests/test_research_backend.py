@@ -19,6 +19,155 @@ def test_duckduckgo_parser_extracts_structured_results():
     assert parser.results == [("Example title", "https://example.com/a", "Useful snippet")]
 
 
+def test_duckduckgo_parser_unwraps_redirect_links_and_rejects_invalid_targets():
+    parser = _DuckDuckGoParser()
+    parser.feed(
+        '<a class="result__a" href="//duckduckgo.com/l/?uddg='
+        'https%3A%2F%2Fexample.com%2Farticle%3Fx%3D1%26y%3D2&amp;rut=abc">'
+        'Example article</a>'
+        '<a class="result__a" href="//duckduckgo.com/l/?uddg=javascript%3Aalert%281%29">'
+        'Unsafe target</a>'
+        '<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2F">'
+        'Malformed target</a>'
+    )
+
+    assert parser.results == [("Example article", "https://example.com/article?x=1&y=2", "")]
+
+
+@pytest.mark.asyncio
+async def test_duckduckgo_provider_prefixes_domain_filter(monkeypatch):
+    from charlie.research.providers import DuckDuckGoProvider
+
+    requests = []
+
+    class FakeResponse:
+        text = '<a class="result__a" href="https://docs.python.org/3/tutorial/index.html">Python</a>'
+
+        def raise_for_status(self):
+            pass
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def get(self, url, **kwargs):
+            requests.append((url, kwargs["params"]))
+            return FakeResponse()
+
+    monkeypatch.setattr("charlie.research.providers.httpx.AsyncClient", FakeClient)
+    results = await DuckDuckGoProvider().search(
+        "Python list comprehensions", limit=3, domain_filters=["docs.python.org"]
+    )
+
+    assert requests == [
+        ("https://html.duckduckgo.com/html/", {"q": "site:docs.python.org Python list comprehensions"})
+    ]
+    assert [result.url for result in results] == ["https://docs.python.org/3/tutorial/index.html"]
+
+
+def test_web_research_converts_comma_domains_to_filters_without_rewriting_query(monkeypatch):
+    import charlie.research.engine as engine_module
+    import charlie.tools as tools_module
+
+    calls = []
+
+    class FakeEngine:
+        def __init__(self, _config):
+            pass
+
+        def run_sync(self, query, mode, *, domain_filters=None):
+            calls.append((query, mode, domain_filters))
+            return SimpleNamespace(legacy_text=lambda: "ok")
+
+    monkeypatch.setattr(engine_module, "ResearchEngine", FakeEngine)
+    report = tools_module._run_research_report(
+        "web_research",
+        {"query": "Python list comprehensions", "mode": "standard", "domain": "docs.python.org, example.com"},
+    )
+
+    assert report.legacy_text() == "ok"
+    assert calls == [
+        ("Python list comprehensions", "standard", ["docs.python.org", "example.com"])
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deep_research_propagates_domain_filters_to_all_queries_and_followup(monkeypatch):
+    import charlie.research.engine as engine_module
+
+    config = SimpleNamespace(
+        research_enabled=True,
+        research_max_search_queries=3,
+        research_max_sources=3,
+        research_max_concurrency=1,
+        research_fetch_timeout_s=1,
+        research_crawl_enabled=False,
+        research_total_timeout_deep_s=5,
+        research_currency="INR",
+    )
+    engine = ResearchEngine(config)
+    result = SearchResult("Python docs", "https://docs.python.org/3/tutorial/", "Python documentation")
+    followups = []
+
+    async def initial_search(plan):
+        assert all(item.domain_filters == ["docs.python.org"] for item in plan.queries)
+        return [result]
+
+    async def no_sources(_results, _mode):
+        return []
+
+    async def capture_followup(plan, _providers, **_kwargs):
+        followups.append(plan)
+        return []
+
+    monkeypatch.setattr(engine, "_search", initial_search)
+    monkeypatch.setattr(engine, "_fetch_sources", no_sources)
+    monkeypatch.setattr(engine, "_providers", lambda: [])
+    monkeypatch.setattr(engine_module, "search_plan", capture_followup)
+
+    report = await engine.run(
+        "Python list comprehensions",
+        "deep",
+        domain_filters=["docs.python.org"],
+    )
+
+    assert report.plan.domain_filters == ["docs.python.org"]
+    assert followups[0].domain_filters == ["docs.python.org"]
+    assert followups[0].queries[0].domain_filters == ["docs.python.org"]
+
+
+@pytest.mark.asyncio
+async def test_search_cache_is_scoped_to_domain_filters(monkeypatch):
+    config = SimpleNamespace(research_max_sources=3, research_max_concurrency=1)
+    engine = ResearchEngine(config)
+    calls = []
+
+    class FilteredProvider:
+        name = "filtered"
+
+        async def search(self, query, *, limit, domain_filters=None):
+            calls.append(tuple(domain_filters or []))
+            domain = (domain_filters or ["example.com"])[0]
+            return [SearchResult(domain, f"https://{domain}/", f"Found {query}")]
+
+    monkeypatch.setattr(engine, "_providers", lambda: [FilteredProvider()])
+    first = engine.plan("Python docs", ResearchMode.QUICK, domain_filters=["docs.python.org"])
+    second = engine.plan("Python docs", ResearchMode.QUICK, domain_filters=["docs.example.com"])
+
+    first_results = await engine._search(first)
+    second_results = await engine._search(second)
+
+    assert calls == [("docs.python.org",), ("docs.example.com",)]
+    assert first_results[0].domain == "docs.python.org"
+    assert second_results[0].domain == "docs.example.com"
+
+
 @pytest.mark.asyncio
 async def test_provider_fallback_continues_after_failure():
     class BrokenProvider:

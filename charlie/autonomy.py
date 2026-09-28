@@ -13,7 +13,11 @@ from enum import StrEnum
 from typing import Any, Dict, List, Optional, Tuple
 
 from charlie.security import policy as security_policy
-from charlie.tools import is_shell_command_blocked, is_shell_command_gated
+from charlie.tools import (
+    is_acceptance_safe_shell_command,
+    is_shell_command_blocked,
+    is_shell_command_gated,
+)
 from charlie.tools import registry as _tool_registry
 
 
@@ -59,7 +63,6 @@ _DESKTOP_EFFECTOR_TOOLS = frozenset({
     "desktop_move_window",
 })
 
-
 def classify_action(
     tool_name: str,
     arguments: Dict[str, Any],
@@ -80,6 +83,11 @@ def classify_action(
         gated = is_shell_command_gated(command)
         if gated:
             return RiskClass.DESTRUCTIVE, gated
+        policy_result = security_policy.check_tool_call(tool_name, arguments, recent_external_texts)
+        if policy_result.needs_approval:
+            return RiskClass.SECURITY_SENSITIVE, policy_result.reason or ""
+        if is_acceptance_safe_shell_command(command):
+            return RiskClass.SAFE, ""
         return RiskClass.SECURITY_SENSITIVE, "arbitrary shell commands require explicit approval"
 
     if tool_name == "desktop_window" and str(arguments.get("action", "")).casefold() == "close":

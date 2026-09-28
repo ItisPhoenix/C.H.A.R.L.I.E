@@ -1,7 +1,7 @@
-"""Structured contracts for Charlie's web research pipeline.
+"""Structured contracts for Charlie's public-web research pipeline.
 
 Research data stays typed until the final prompt boundary.  This keeps search,
-fetching, evidence handling, citations, and widgets from passing fragile
+fetching, evidence handling, and citations from passing fragile
 formatted strings between one another.
 """
 
@@ -148,25 +148,6 @@ class ResearchReport:
     def successful(self) -> bool:
         return bool(self.search_results or self.sources or self.evidence)
 
-    def structured_payload(self, max_items: int = 8) -> dict:
-        """Return canonical bounded presentation data; prompt text stays model-only."""
-        from charlie.research.presentation import build_research_workspace_payload
-
-        payload = build_research_workspace_payload(self)
-        if max_items < 12:
-            payload["sources"] = payload["sources"][:max_items]
-            valid = {item["id"] for item in payload["sources"]}
-            payload["findings"] = [
-                item for item in payload["findings"] if set(item["source_ids"]).issubset(valid)
-            ][: max_items * 4]
-        return payload
-
-    def presentation_payload(self) -> dict:
-        """Explicit name for the presentation-safe research representation."""
-        from charlie.research.presentation import build_research_workspace_payload
-
-        return build_research_workspace_payload(self)
-
     def prompt_context(self, max_chars: int = 12000) -> str:
         """Build bounded, clearly untrusted evidence for the synthesis model."""
         blocks: List[str] = []
@@ -201,7 +182,7 @@ class ResearchReport:
         return "\n\n".join(blocks)[:max_chars]
 
     def legacy_text(self, max_chars: int = 12000) -> str:
-        """Compatibility representation for existing string-based tool calls."""
+        """Compatibility text form for existing string-based tool calls."""
         context = self.prompt_context(max_chars=max_chars)
         if not context:
             return "No useful research results found."

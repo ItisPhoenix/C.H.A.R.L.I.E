@@ -157,6 +157,69 @@ def test_main_composition_does_not_fallback_when_graph_construction_fails(monkey
     assert store_calls == []
 
 
+def test_semantic_memory_requires_explicit_user_write_without_extraction():
+    class RecordingStore:
+        is_available = True
+
+        def __init__(self):
+            self.calls = []
+
+        def add_memory(self, **kwargs):
+            self.calls.append(kwargs)
+            return 1
+
+    store = RecordingStore()
+    service = MemoryService(memory_store=store)
+
+    assert service.remember_semantic("assistant answer", "assistant", "auto") == 0
+    assert service.remember_semantic(
+        "User requested memory extraction", "user", "explicit", auto_extract=True
+    ) == 0
+    assert store.calls == []
+
+    assert service.remember_semantic("My preferred answer length is concise.", "user", "explicit") == 1
+    assert store.calls == [
+        {
+            "text": "My preferred answer length is concise.",
+            "source": "user",
+            "session_id": "explicit",
+            "auto_extract": False,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_periodic_graph_maintenance_does_not_send_transient_turns_to_llm(monkeypatch, tmp_path):
+    graph = MemoryGraph(":memory:")
+    service = MemoryService(graph=graph, semantic_expected=False)
+    brain = Brain(
+        _config(tmp_path),
+        memory_graph=graph,
+        memory_service=service,
+        register_panic_hotkey=False,
+    )
+    brain.history = [
+        {"role": "user", "content": "Charlie, run taskkill /? and report the first help heading."},
+        {"role": "assistant", "content": "The first help heading is Description:."},
+    ]
+    brain._reflect_turn_counter = 15
+    llm_calls = []
+
+    async def unexpected_llm_call(*args, **kwargs):
+        llm_calls.append((args, kwargs))
+        raise AssertionError("graph maintenance must not submit conversation text to the LLM")
+
+    monkeypatch.setattr(brain.client, "post", unexpected_llm_call)
+
+    try:
+        await brain._consolidate_memory_graph()
+        assert service.list_facts() == []
+        assert llm_calls == []
+    finally:
+        await brain.close()
+        graph.close()
+
+
 @pytest.mark.asyncio
 async def test_injected_brain_memory_dependencies_keep_exact_identity_and_graph_open(tmp_path):
     graph = _TrackingGraph()

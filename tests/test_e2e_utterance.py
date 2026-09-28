@@ -78,6 +78,27 @@ async def _collect(brain, utterance, **kwargs):
     return "".join(chunks)
 
 
+def _mock_verified_app_launch(monkeypatch):
+    opened = set()
+    start_calls = []
+
+    def resolve(name):
+        if name in opened:
+            return desktop_apps.AppResolution(name=name, window_title=f"{name} test window", source="test")
+        return desktop_apps.AppResolution(name=name, launch_target=f"mock-app://{name}", source="test")
+
+    def startfile(target):
+        name = target.removeprefix("mock-app://")
+        start_calls.append(name)
+        opened.add(name)
+
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr(desktop_apps, "is_process_running", lambda _name: False)
+    monkeypatch.setattr(desktop_apps, "resolve_local_app", resolve)
+    monkeypatch.setattr(desktop_apps.os, "startfile", startfile, raising=False)
+    return start_calls
+
+
 def _structured_research_report(query: str = "explicit research") -> ResearchReport:
     source = SourceDocument(
         source_id="S1",
@@ -301,15 +322,8 @@ class TestFastPathsBypassLlm:
     @pytest.mark.asyncio
     async def test_open_known_app_never_calls_llm(self, monkeypatch, brain_config):
         brain = Brain(brain_config)
-        monkeypatch.setattr("sys.platform", "win32")
-        monkeypatch.setattr(desktop_apps, "is_process_running", lambda name: False)
-        monkeypatch.setattr(desktop_apps, "resolve_local_app", lambda _name: None)
+        start_calls = _mock_verified_app_launch(monkeypatch)
         monkeypatch.setattr("charlie.tools._desktop_ready", lambda: True)
-        monkeypatch.setattr(
-            subprocess,
-            "Popen",
-            lambda *a, **kw: type("P", (), {"pid": 1, "poll": lambda self: None})(),
-        )
 
         def fail_if_called(*a, **kw):
             raise AssertionError("LLM should not be called for a fast-path open-app query")
@@ -317,6 +331,7 @@ class TestFastPathsBypassLlm:
         monkeypatch.setattr(brain.client, "stream", fail_if_called)
         result = await _collect(brain, "open notepad")
         assert "opened" in result.lower()
+        assert start_calls == ["notepad"]
 
     @pytest.mark.asyncio
     async def test_close_known_app_never_calls_llm(self, monkeypatch, brain_config):
@@ -646,7 +661,10 @@ class TestNormalRoundTrips:
 
         result = await _collect(brain, "close the mystery utility", skip_pre_search=True)
 
-        assert result == "I couldn't complete that requested app action."
+        assert result.startswith("I stopped because the requested approval was not given.")
+        assert "desktop_window" not in result
+        assert "I didn't attempt the remaining steps." in result
+        assert "I've closed the mystery utility." not in result
 
     @pytest.mark.asyncio
     async def test_tool_call_round_trip_produces_final_answer(self, monkeypatch, brain_config):
@@ -662,7 +680,7 @@ class TestNormalRoundTrips:
         monkeypatch.setattr(brain.client, "stream", mock_stream)
         search_result = "Weather: sunny, 75F, more text to pass the relevance-length gate."
         monkeypatch.setattr("charlie.tools.registry.execute_tool", lambda name, args: search_result)
-        result = await _collect(brain, "what's the weather")
+        result = await _collect(brain, "what's the weather", skip_pre_search=True)
         assert "sunny" in result.lower()
         assert calls["n"] == 2
 
@@ -909,15 +927,8 @@ class TestRouterClassifierFallback:
         """
         brain_config.router_classifier_enabled = True
         brain = Brain(brain_config)
-        monkeypatch.setattr("sys.platform", "win32")
-        monkeypatch.setattr(desktop_apps, "is_process_running", lambda name: False)
-        monkeypatch.setattr(desktop_apps, "resolve_local_app", lambda _name: None)
+        start_calls = _mock_verified_app_launch(monkeypatch)
         monkeypatch.setattr("charlie.tools._desktop_ready", lambda: True)
-        monkeypatch.setattr(
-            subprocess,
-            "Popen",
-            lambda *a, **kw: type("P", (), {"pid": 1, "poll": lambda self: None})(),
-        )
 
         def fail_if_called(*a, **kw):
             raise AssertionError("Normal tool-calling LLM stream should not fire when classifier resolves it")
@@ -944,3 +955,4 @@ class TestRouterClassifierFallback:
         monkeypatch.setattr("charlie.core.httpx.AsyncClient", lambda *a, **kw: _FakeClassifierClient())
         result = await _collect(brain, "fire up spotify")
         assert "opened" in result.lower()
+        assert start_calls == ["spotify"]

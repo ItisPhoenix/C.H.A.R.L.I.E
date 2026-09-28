@@ -148,6 +148,9 @@ class MCPAdapter:
             for t in tool_names:
                 op_id = f"mcp.{name}.{t}"
                 _t = t
+                policy = _client.tool_policy(f"{_name}:{t}") if _client is not None else "ask"
+                if policy == "deny":
+                    continue
 
                 def _invoke(_t: str = _t, **kwargs: Any) -> Any:
                     if _client is None:
@@ -162,7 +165,7 @@ class MCPAdapter:
                     name=t,
                     description=f"[{name}] MCP tool",
                     parameters_schema={"type": "object"},
-                    risk_class="reversible",
+                    risk_class="safe" if policy == "allow" else "security_sensitive",
                     func=_invoke,
                 )
 

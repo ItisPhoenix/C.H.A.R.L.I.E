@@ -41,7 +41,6 @@ def _make_brain(use_native_tools: bool) -> Brain:
     cfg.opinions_file = "/dev/null"
     cfg.prompt_memory_max = 2200
     cfg.native_tool_calling = use_native_tools
-    cfg.llm_disable_reasoning = True
     cfg.iteration_budget_max = 12
 
     brain = Brain.__new__(Brain)
@@ -169,6 +168,16 @@ class TestGroundingRules:
         assert "TOOL-RESULT TRUST" in _TOOL_RULES
         assert "ground truth" in _TOOL_RULES
 
+    def test_sufficient_requested_facts_stop_additional_tool_calls(self):
+        from charlie.prompt_builder import _TOOL_RULES
+        assert "When the user's requested facts are verified, stop calling tools and answer." in _TOOL_RULES
+
+    def test_multifact_requests_avoid_python_alias_probes(self):
+        from charlie.prompt_builder import _TOOL_RULES
+        assert "advances an unanswered request part" in _TOOL_RULES
+        assert "`python --version` is Charlie's active version" in _TOOL_RULES
+        assert "use `where python` once" in _TOOL_RULES
+
     def test_memory_humility_in_tool_rules(self):
         from charlie.prompt_builder import _TOOL_RULES
         assert "MEMORY HUMILITY" in _TOOL_RULES
@@ -246,7 +255,7 @@ class TestGroundingRules:
 
 
 class TestInstalledSkillBlocks:
-    """A "skill" kind extension installed via the web dashboard is mirrored
+    """A "skill" kind extension installed by the runtime is mirrored
     into the voice process over the EventBus (see main.py's
     "extension_installed" handler) -- add_installed_skill_block() is how its
     instructions actually reach the context tier the chat loop uses."""
@@ -391,7 +400,7 @@ class TestCapabilitiesBlock:
 
 
 class TestRebuildStableTier:
-    """Task A4b fix 2: the dashboard's system_restart reload flow mutates
+    """Task A4b fix 2: a runtime reload flow mutates
     config in place but only rebuilt _context_tier -- capability claims baked
     into _stable_tier kept describing the OLD config until process restart."""
 

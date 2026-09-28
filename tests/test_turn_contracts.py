@@ -4,7 +4,6 @@ from dataclasses import replace
 
 import pytest
 
-from charlie.presentation import ExecutionOutcome, PresentationResolver
 from charlie.turn_contracts import (
     IntentDecision,
     ResultEnvelope,
@@ -20,7 +19,7 @@ def _turn_chain() -> tuple[TurnRequest, TurnContext, IntentDecision, ResultEnvel
         turn_id="turn-1",
         session_id="session-1",
         input="show current system status",
-        channel="web",
+        channel="voice",
         task_id="task-1",
     )
     context = TurnContext.for_request(
@@ -36,7 +35,6 @@ def _turn_chain() -> tuple[TurnRequest, TurnContext, IntentDecision, ResultEnvel
         capabilities=("system",),
         freshness_requirement="live",
         rationale="deterministic system-status matcher",
-        presentation_expectation="widget_or_workspace",
     )
     result = ResultEnvelope(
         request=request.input,
@@ -51,10 +49,6 @@ def _turn_chain() -> tuple[TurnRequest, TurnContext, IntentDecision, ResultEnvel
         verification={"verified": True, "status": "completed"},
     )
     return request, context, decision, result
-
-
-def test_existing_execution_outcome_name_is_a_compatibility_alias() -> None:
-    assert ExecutionOutcome is ResultEnvelope
 
 
 def test_turn_chain_keeps_one_identity_across_context_decision_and_result() -> None:
@@ -107,12 +101,3 @@ def test_executable_turn_requires_a_task_identity() -> None:
 
     with pytest.raises(TurnContractError, match="task_id"):
         validate_turn_chain(request, executable=True)
-
-
-def test_presentation_resolver_preserves_result_turn_identity() -> None:
-    _request, _context, _decision, result = _turn_chain()
-
-    intent = PresentationResolver().resolve(result)
-
-    assert intent.turn_id == result.turn_id
-    assert intent.to_event()["turn_id"] == result.turn_id

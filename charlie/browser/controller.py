@@ -30,6 +30,7 @@ _NAV_HOST_COOLDOWN_S = 1.0
 _playwright = None
 _context = None
 _page = None
+_headless_mode: Optional[bool] = None
 _last_used_at = 0.0
 _resources_blocked = True
 _idle_timer: Optional[threading.Timer] = None
@@ -56,7 +57,7 @@ def _page_is_alive() -> bool:
 
 def _dispose_stale() -> None:
     """Best-effort disposal for dead Playwright objects, always on browser thread."""
-    global _playwright, _context, _page
+    global _playwright, _context, _page, _headless_mode
     from charlie.browser.session import reset_session
     reset_session()
     for resource in (_context, _playwright):
@@ -69,6 +70,7 @@ def _dispose_stale() -> None:
     _playwright = None
     _context = None
     _page = None
+    _headless_mode = None
 
 
 def _block_heavy_resources(route: Any) -> None:
@@ -78,9 +80,9 @@ def _block_heavy_resources(route: Any) -> None:
         route.continue_()
 
 
-def _launch() -> None:
+def _launch(*, headless: Optional[bool] = None) -> None:
     """Start Playwright and open the one persistent page. Must run on the browser thread."""
-    global _playwright, _context, _page
+    global _playwright, _context, _page, _headless_mode
     if not BROWSER_EXECUTOR:
         raise BrowserUnavailable("playwright is not installed")
     import asyncio
@@ -96,9 +98,10 @@ def _launch() -> None:
                 asyncio.set_event_loop_policy(prior_policy)
     else:
         _playwright = sync_playwright().start()
+    headless_mode = config.browser_headless if headless is None else headless
     launch_kwargs = dict(
         user_data_dir=config.browser_profile_path,
-        headless=config.browser_headless,
+        headless=headless_mode,
         viewport={"width": 1280, "height": 900},
     )
     launch_mode = "bundled Chromium"
@@ -110,6 +113,7 @@ def _launch() -> None:
         launch_mode = "installed Chrome fallback"
     _context.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
     _page = _context.new_page()
+    _headless_mode = headless_mode
     _page.route("**/*", _block_heavy_resources)
     try:
         import importlib.metadata
@@ -138,6 +142,44 @@ def _ensure_launched() -> Any:
     return _page
 
 
+def _prepare_user_visible_on_thread() -> Dict[str, Any]:
+    """Expose the same Playwright page used by an interactive browser task."""
+    from charlie.browser.session import get_session
+
+    if _page is None:
+        _launch(headless=False)
+    elif not _page_is_alive():
+        _dispose_stale()
+        _launch(headless=False)
+    elif _headless_mode is not False:
+        current = get_session()
+        page_url = str(getattr(_page, "url", ""))
+        if (
+            current.visited_urls
+            or current.current_url not in {None, "", "about:blank"}
+            or page_url not in {"", "about:blank"}
+        ):
+            raise BrowserUnavailable(
+                "The existing Charlie browser is headless and already has state; "
+                "it cannot be made visible without creating a second browser."
+            )
+        _shutdown_on_thread()
+        _launch(headless=False)
+
+    try:
+        _page.bring_to_front()
+    except Exception as exc:
+        raise BrowserUnavailable("Charlie could not expose its Playwright browser window.") from exc
+    return runtime_identity(_page)
+
+
+def prepare_user_visible(timeout: float = 10.0) -> Dict[str, Any]:
+    """Make the controller's existing page the user-visible browser surface."""
+    if not BROWSER_EXECUTOR:
+        raise BrowserUnavailable("playwright is not installed")
+    return BROWSER_EXECUTOR.submit(_prepare_user_visible_on_thread).result(timeout=timeout)
+
+
 def _windows_session_id(pid: Optional[int]) -> Optional[int]:
     if pid is None or sys.platform != "win32":
         return None
@@ -155,25 +197,74 @@ def _windows_session_id(pid: Optional[int]) -> Optional[int]:
 def _browser_process_pid() -> Optional[int]:
     """Find the browser process tied to Charlie's persistent profile, if exposed by the host."""
     profile = os.path.abspath(str(config.browser_profile_path)).casefold()
-    headless_candidates: list[tuple[float, int]] = []
+    browser_names = {"chrome.exe", "chromium.exe", "msedge.exe", "chrome-headless-shell.exe"}
     try:
         import psutil
 
-        for process in psutil.process_iter(["pid", "name", "cmdline", "create_time"]):
+        processes: list[dict[str, Any]] = []
+        for process in psutil.process_iter(["pid", "ppid", "name", "cmdline", "create_time"]):
             try:
                 name = str(process.info.get("name") or "").casefold()
-                command_line = " ".join(process.info.get("cmdline") or []).casefold()
-                browser_names = {"chrome.exe", "chromium.exe", "msedge.exe", "chrome-headless-shell.exe"}
-                if name in browser_names and profile in command_line:
-                    return int(process.info["pid"])
-                if name == "chrome-headless-shell.exe":
-                    headless_candidates.append(
-                        (float(process.info.get("create_time") or 0.0), int(process.info["pid"]))
-                    )
+                command_args = [str(arg) for arg in (process.info.get("cmdline") or [])]
+                command_line = " ".join(command_args).casefold()
+                if name not in browser_names or profile not in command_line:
+                    continue
+                role = next(
+                    (arg.casefold() for arg in command_args if arg.casefold().startswith("--type=")),
+                    None,
+                )
+                processes.append(
+                    {
+                        "pid": int(process.info["pid"]),
+                        "ppid": int(process.info.get("ppid") or 0),
+                        "role": role,
+                        "create_time": float(process.info.get("create_time") or 0.0),
+                        "remote_debugging_pipe": "--remote-debugging-pipe" in {arg.casefold() for arg in command_args},
+                    }
+                )
             except (OSError, psutil.Error, TypeError, ValueError):
                 continue
-        if headless_candidates:
-            return min(headless_candidates)[1]
+
+        roots = [item for item in processes if item["role"] is None]
+        pipe_roots = [item for item in roots if item["remote_debugging_pipe"]]
+        if pipe_roots:
+            roots = pipe_roots
+        by_pid = {item["pid"]: item for item in processes}
+
+        def descendants(root_pid: int) -> set[int]:
+            found: set[int] = set()
+            pending = [root_pid]
+            while pending:
+                parent_pid = pending.pop()
+                for item in processes:
+                    if item["ppid"] == parent_pid and item["pid"] not in found:
+                        found.add(item["pid"])
+                        pending.append(item["pid"])
+            return found
+
+        root_of_tree = []
+        for root in roots:
+            child_pids = descendants(root["pid"])
+            if not all(pid == root["pid"] or pid in child_pids for pid in by_pid):
+                continue
+            if any(root["create_time"] > by_pid[pid]["create_time"] for pid in child_pids):
+                continue
+            root_of_tree.append(root)
+
+        if len(root_of_tree) == 1:
+            return root_of_tree[0]["pid"]
+        if len(roots) == 1:
+            root = roots[0]
+            child_pids = descendants(root["pid"])
+            if any(root["create_time"] > by_pid[pid]["create_time"] for pid in child_pids):
+                logger.warning("Browser root creation order is invalid; refusing PID correlation")
+                return None
+            return root["pid"]
+        logger.warning(
+            "Unable to identify a unique Charlie browser root: candidates=%s profile=%s",
+            [item["pid"] for item in roots],
+            profile,
+        )
     except Exception:
         logger.debug("Unable to resolve browser process provenance", exc_info=True)
     return None
@@ -200,6 +291,7 @@ def runtime_identity(page: Any) -> Dict[str, Any]:
         "target_id": guid(page),
         "browser_version": browser_version,
         "profile_path": os.path.abspath(str(config.browser_profile_path)),
+        "headless": _headless_mode,
     }
 
 
@@ -265,7 +357,7 @@ def warm() -> None:
 
 
 def _shutdown_on_thread() -> None:
-    global _playwright, _context, _page
+    global _playwright, _context, _page, _headless_mode
     from charlie.browser.session import reset_session
     reset_session()
     if _context is not None:
@@ -281,6 +373,7 @@ def _shutdown_on_thread() -> None:
     _playwright = None
     _context = None
     _page = None
+    _headless_mode = None
     logger.info("Browser controller shut down (idle)")
 
 

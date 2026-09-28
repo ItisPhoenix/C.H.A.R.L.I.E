@@ -1,3 +1,5 @@
+import pytest
+
 from charlie.autonomy import ActionClass, Requirement, RiskClass, classify_action, evaluate
 
 
@@ -20,6 +22,105 @@ class TestClassifyActionShell:
         risk, reason = classify_action("shell_execute", {"command": "echo hello"})
         assert risk == RiskClass.SECURITY_SENSITIVE
         assert "shell" in reason.lower()
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "python --version",
+            "python -V",
+            "python3 --version",
+            "where python",
+            "git rev-parse HEAD",
+            "exit 1",
+            "exit 255",
+            "taskkill /?",
+        ],
+    )
+    def test_acceptance_safe_shell_commands_are_allowed(self, command):
+        requirement, risk, reason = evaluate("shell_execute", {"command": command})
+        assert requirement == Requirement.ALLOW
+        assert risk == RiskClass.SAFE
+        assert reason == ""
+
+    @pytest.mark.parametrize(
+        "command",
+        ['python -c "import os"', "python3 -V", "python3 --version extra", "exit 0", "exit 256"],
+    )
+    def test_non_allowlisted_python_and_exit_commands_require_approval(self, command):
+        requirement, risk, reason = evaluate("shell_execute", {"command": command})
+        assert requirement == Requirement.APPROVE
+        assert risk == RiskClass.SECURITY_SENSITIVE
+        assert reason
+
+    @pytest.mark.parametrize(
+        "command", ["taskkill", "taskkill /IM notepad.exe /F", "taskkill /? /F"]
+    )
+    def test_taskkill_actions_and_non_exact_help_still_require_approval(self, command):
+        requirement, risk, reason = evaluate("shell_execute", {"command": command})
+        assert requirement == Requirement.APPROVE
+        assert risk == RiskClass.DESTRUCTIVE
+        assert reason
+
+    def test_safe_shell_command_matching_external_text_still_requires_approval(self):
+        command = "python --version"
+        requirement, risk, reason = evaluate(
+            "shell_execute",
+            {"command": command},
+            recent_external_texts=[command],
+        )
+        assert requirement == Requirement.APPROVE
+        assert risk == RiskClass.SECURITY_SENSITIVE
+        assert "closely matches" in reason
+
+
+@pytest.mark.asyncio
+async def test_nonzero_structured_shell_exit_is_failed_and_verified_failure(monkeypatch):
+    import charlie.core as core
+    import charlie.recovery as recovery
+    from charlie.config import Config
+    from charlie.tools import ToolExecutionResult
+    from charlie.turn_contracts import ResultStatus
+
+    config = Config(
+        llm_url="http://localhost:11434",
+        llm_key="no-key",
+        llm_model="dummy",
+        iteration_budget_max=3,
+    )
+    brain = core.Brain(config)
+    structured_calls = []
+
+    def execute_structured(name, arguments):
+        structured_calls.append((name, arguments))
+        return ToolExecutionResult(
+            "Terminal command exited with code 7.",
+            {"ok": False, "exit_code": 7, "stdout": "", "stderr": ""},
+            "terminal_result",
+        )
+
+    async def no_recovery(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(core.tool_registry, "execute_tool", lambda *_args: "legacy result")
+    monkeypatch.setattr(core.tool_registry, "execute_tool_structured", execute_structured)
+    monkeypatch.setattr(recovery, "recover_tool", no_recovery)
+    try:
+        result = await brain.execute_tool_operation(
+            "shell_execute",
+            {"command": "exit 7"},
+            request="exit 7",
+            task_id="task-terminal-structured",
+            session_id="session-terminal-structured",
+            turn_id="turn-terminal-structured",
+            platform="text",
+            execution_owner_id="turn:turn-terminal-structured",
+        )
+    finally:
+        await brain.close()
+
+    assert result.status == ResultStatus.FAILED.value
+    assert result.verification_status == "verified_failure"
+    assert structured_calls == [("shell_execute", {"command": "exit 7", "voice_mode": False})]
 
 
 class TestClassifyActionPath:

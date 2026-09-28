@@ -10,7 +10,7 @@ from charlie.code_index import CodeIndex
 
 @pytest.fixture
 def temp_repo():
-    """Create a temporary sandbox repo with Python and TypeScript files."""
+    """Create a temporary sandbox repo with Python and typed source files."""
     with tempfile.TemporaryDirectory() as tmpdir:
         repo_path = Path(tmpdir).resolve()
 
@@ -33,21 +33,18 @@ def temp_repo():
             encoding="utf-8",
         )
 
-        # 2. Create TypeScript / React source
+        # 2. Create typed source
         ts_dir = repo_path / "client" / "src"
         ts_dir.mkdir(parents=True, exist_ok=True)
-        ts_file = ts_dir / "SampleComponent.tsx"
+        ts_file = ts_dir / "SampleTypes.ts"
         ts_file.write_text(
-            '/** Sample component for HUD */\n'
-            'import React from "react";\n\n'
+            '/** Sample typed declarations */\n'
             'export interface SampleProps {\n'
             '    title: string;\n'
             '    count: number;\n'
             '}\n\n'
             'export type StatusType = "idle" | "active";\n\n'
-            'export const SampleComponent: React.FC<SampleProps> = ({ title }) => {\n'
-            '    return <div className="sample">{title}</div>;\n'
-            '};\n\n'
+            'export const SampleFactory = (title: string) => title;\n\n'
             'export function computeSampleValue(x: number): number {\n'
             '    return x + 42;\n'
             '}\n',
@@ -88,7 +85,7 @@ def temp_repo():
 
 
 def test_code_index_initial_scan(temp_repo):
-    """Test initial repository indexing of Python and TS files."""
+    """Test initial repository indexing of Python and typed source files."""
     index = CodeIndex(temp_repo)
     res = index.refresh()
 
@@ -116,16 +113,16 @@ def test_code_index_initial_scan(temp_repo):
     assert func_syms[0]["kind"] == "function"
 
 
-def test_code_index_typescript_and_react(temp_repo):
-    """Test TypeScript/React component, interface, and store symbol extraction."""
+def test_code_index_typed_source(temp_repo):
+    """Test typed interface, type, and function symbol extraction."""
     index = CodeIndex(temp_repo)
     index.refresh()
 
-    # React component
-    comp_syms = index.get_symbol("SampleComponent")
+    # Exported factory
+    comp_syms = index.get_symbol("SampleFactory")
     assert len(comp_syms) == 1
     assert comp_syms[0]["kind"] in ("component", "function", "const")
-    assert comp_syms[0]["file_path"] == "client/src/SampleComponent.tsx"
+    assert comp_syms[0]["file_path"] == "client/src/SampleTypes.ts"
 
     # TypeScript interface
     iface_syms = index.get_symbol("SampleProps")
@@ -137,10 +134,7 @@ def test_code_index_typescript_and_react(temp_repo):
     assert len(type_syms) == 1
     assert type_syms[0]["kind"] == "type"
 
-    # Zustand store
-    store_syms = index.get_symbol("useSampleStore")
-    assert len(store_syms) == 1
-    assert store_syms[0]["kind"] in ("store", "const", "hook")
+    assert index.get_symbol("SampleFactory")[0]["kind"] in ("component", "function", "const")
 
 
 def test_code_index_incremental_modification(temp_repo):
@@ -171,15 +165,15 @@ def test_code_index_deletion(temp_repo):
     """Test that deleting a file removes all its symbols from index."""
     index = CodeIndex(temp_repo)
     index.refresh()
-    assert len(index.get_symbol("useSampleStore")) == 1
+    assert len(index.get_symbol("SampleFactory")) == 1
 
     # Delete sampleStore.ts
-    store_file = temp_repo / "client" / "src" / "sampleStore.ts"
-    store_file.unlink()
+    typed_file = temp_repo / "client" / "src" / "SampleTypes.ts"
+    typed_file.unlink()
 
     r = index.refresh()
     assert r["removed_files"] == 1
-    assert len(index.get_symbol("useSampleStore")) == 0
+    assert len(index.get_symbol("SampleFactory")) == 0
 
 
 def test_code_index_rename(temp_repo):
@@ -299,7 +293,7 @@ def test_code_index_stats_and_kinds(temp_repo):
     assert any(c["name"] == "SampleService" for c in classes)
 
     components = index.search_symbols("", kind="component")
-    assert any(c["name"] == "SampleComponent" for c in components)
+    assert any(c["name"] == "SampleFactory" for c in components)
 
 
 def test_code_index_live_repo_sanity():

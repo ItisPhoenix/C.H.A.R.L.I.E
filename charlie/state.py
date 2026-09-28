@@ -1,7 +1,6 @@
 """Authoritative CoreState machine for the voice process.
 
-Single instance lives in main.py. web_server.py and pet_window.py stop re-deriving
-state from raw events and become consumers of the charlie_state event this emits.
+Single instance lives in main.py and derives canonical state from runtime events.
 """
 
 import time

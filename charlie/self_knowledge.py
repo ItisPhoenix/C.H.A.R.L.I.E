@@ -18,13 +18,12 @@ from charlie.runtime_introspector import RuntimeIntrospector
 logger = logging.getLogger("charlie.self_knowledge")
 
 _SUBSYSTEM_STATUS_PATTERN = re.compile(
-    r"\b(is|are)\s+(mcp(?: servers?)?|eventbus|terminal|browser|desktop|vision|pet)\s+"
+    r"\b(is|are)\s+(mcp(?: servers?)?|eventbus|browser|desktop|vision)\s+"
     r"(running|connected|available|healthy|working)\b",
     re.IGNORECASE,
 )
 
-# Self-question detection patterns. Presentation entity names stay in
-# PresentationRegistry; these patterns only describe semantic query shapes.
+# Self-question detection patterns describe semantic runtime query shapes.
 _SELF_PATTERNS = [
     re.compile(r"\b(who are you|what is charlie|what are you)\b", re.IGNORECASE),
     re.compile(r"\b(what|which)\s+(model|llm|provider|ai model|vision model|embedding model)\b", re.IGNORECASE),
@@ -35,15 +34,6 @@ _SELF_PATTERNS = [
     ),
     re.compile(r"\b(what|which)\s+(tools|capabilities|skills|commands)\b", re.IGNORECASE),
     _SUBSYSTEM_STATUS_PATTERN,
-    re.compile(
-        r"\b(what|which|how|where)\b.*\b(hud|ui|workspace|widget|overlay|presentation|visual|surface|core|ring|surfacecomposer)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"\b(can you|do you have|are you able to|is there)\b.*\b("
-        r"show|render|display|open|support|workspace|widget|overlay|hud|ui|surface)\b",
-        re.IGNORECASE,
-    ),
     re.compile(
         r"\b(where is|which file|which module|what file|which code|how is)\b.*?"
         r"\b(implemented|implements|defined|defines|located|coded|built|lives|handles)\b",
@@ -56,7 +46,7 @@ _SELF_PATTERNS = [
     ),
     re.compile(
         r"\b(how does|how do you)\s+(your\s+)?"
-        r"(browser|desktop|memory|vision|voice|map|terminal|subagent|task|planner|core|hud)\s+"
+        r"(browser|desktop|memory|vision|voice|map|subagent|task|planner|core)\s+"
         r"(work|function|operate|behave)\b",
         re.IGNORECASE,
     ),
@@ -68,23 +58,6 @@ _SELF_PATTERNS = [
     re.compile(r"\b(what memory|how does memory|where is memory|memory systems?)\b", re.IGNORECASE),
     re.compile(r"\b(what tasks|any running tasks|what are you doing)\b", re.IGNORECASE),
 ]
-
-_PRESENTATION_TERMS = (
-    "hud",
-    "ui",
-    "widget",
-    "workspace",
-    "overlay",
-    "presentation",
-    "visual",
-    "surface",
-    "primitive",
-    "layout",
-    "core",
-    "ring",
-    "surfacecomposer",
-)
-
 
 @dataclass
 class SelfKnowledgeEvidence:
@@ -111,12 +84,10 @@ class SelfKnowledgeService:
         code_index: Optional[CodeIndex] = None,
         capability_index: Optional[Any] = None,
         config: Optional[Any] = None,
-        presentation_registry: Optional[Any] = None,
     ) -> None:
         self._introspector = runtime_introspector or RuntimeIntrospector(
             config=config,
             capability_index=capability_index,
-            presentation_registry=presentation_registry,
         )
         self._code_index = code_index
         if capability_index is None:
@@ -127,20 +98,6 @@ class SelfKnowledgeService:
             capability_index = get_capability_index()
         self._capability_index = capability_index
         self._config = config
-        self._presentation_registry = presentation_registry
-
-    def _get_presentation_registry(self) -> Any:
-        if self._presentation_registry is not None:
-            return self._presentation_registry
-        if hasattr(self._introspector, "_get_presentation_registry"):
-            return self._introspector._get_presentation_registry()
-        try:
-            from charlie.presentation_registry import get_presentation_registry
-
-            return get_presentation_registry()
-        except Exception:
-            return None
-
     def _get_code_index(self) -> CodeIndex:
         if self._code_index is None:
             self._code_index = CodeIndex()
@@ -158,58 +115,6 @@ class SelfKnowledgeService:
             except Exception:
                 return None
         return None
-
-    @staticmethod
-    def _query_tokens(query: str) -> List[str]:
-        """Return safe natural-language tokens used for registry lookup."""
-        return [token.lower() for token in re.findall(r"[A-Za-z0-9_]+", query)]
-
-    def _resolve_presentation_entity(
-        self, query: str, registry: Optional[Any] = None
-    ) -> Optional[Dict[str, str]]:
-        """Resolve one canonical presentation entity or alias mentioned in query."""
-        registry = registry or self._get_presentation_registry()
-        if registry is None:
-            return None
-
-        for token in self._query_tokens(query):
-            for kind, resolver in (
-                ("workspace", registry.resolve_workspace_type),
-                ("widget", registry.resolve_widget_type),
-                ("overlay", registry.resolve_overlay_type),
-            ):
-                canonical = resolver(token)
-                if canonical:
-                    return {"kind": kind, "canonical": canonical, "queried": token}
-        return None
-
-    def _is_presentation_query(self, query: str) -> bool:
-        """Recognize presentation questions without owning presentation names."""
-        q_lower = query.lower()
-        if _SUBSYSTEM_STATUS_PATTERN.search(q_lower):
-            return False
-        if any(re.search(rf"\b{re.escape(term)}s?\b", q_lower) for term in _PRESENTATION_TERMS):
-            return True
-        has_surface_context = bool(
-            re.search(
-                r"\b(show|render|display|open|support|hud|ui|workspace|widget|overlay|presentation|visual|surface)\b"
-                r"|\b(can you|are you able to|is there)\b",
-                q_lower,
-            )
-        )
-        entity = self._resolve_presentation_entity(query)
-        if entity is not None:
-            # Canonical names are safe on their own. Aliases require a
-            # presentation cue so ordinary words such as "file" do not win.
-            if entity["queried"] == entity["canonical"] or has_surface_context:
-                return True
-        registry = self._get_presentation_registry()
-        if registry is not None:
-            tokens = self._query_tokens(query)
-            for primitive in registry.list_surface_primitives():
-                if primitive in tokens or f"{primitive}s" in tokens:
-                    return True
-        return False
 
     # -------------------------------------------------------------------------
     # Classification
@@ -230,9 +135,6 @@ class SelfKnowledgeService:
             term in q_lower
             for term in ("your code", "your implementation", "your capabilities", "your model", "your tools")
         ):
-            return True
-
-        if self._is_presentation_query(q):
             return True
 
         return False
@@ -299,30 +201,16 @@ class SelfKnowledgeService:
             sources.append("runtime.health")
 
         # 7. Direct subsystem-status queries. These are semantic SelfKnowledge
-        # domains, not presentation entities.
+        # runtime subsystem domains.
         if _SUBSYSTEM_STATUS_PATTERN.search(q_lower):
-            if not re.search(r"\b(mcp|eventbus|pet)\b", q_lower):
+            if not re.search(r"\b(mcp|eventbus)\b", q_lower):
                 runtime_facts["subsystems"] = self._introspector.get_subsystem_info()
                 sources.append("runtime.subsystems")
             if "vision" in q_lower:
                 vision_caps = self._introspector.get_capabilities_info()
                 cap_facts = vision_caps.get("by_id", {})
                 sources.append("capability.registry")
-            if "pet" in q_lower:
-                config = self._get_runtime_config()
-                runtime_facts["config"] = {
-                    "pet_enabled": getattr(config, "pet_enabled", "unknown") if config else "unknown"
-                }
-                sources.append("runtime.config")
-
-        # 8. Presentation & HUD surfaces queries. RuntimeIntrospector owns the
-        # inventory; SelfKnowledge only decides when to request that evidence.
-        if self._is_presentation_query(query):
-            pres_info = self._introspector.get_presentation_info()
-            runtime_facts["presentation"] = pres_info
-            sources.append("runtime.presentation")
-
-        # 8. Code Index symbol / file search
+        # 7. Code Index symbol / file search
         code_idx = self._get_code_index()
         # Extract keywords
         cleaned_words = [
@@ -379,172 +267,8 @@ class SelfKnowledgeService:
     # Deterministic Grounded Answering
     # -------------------------------------------------------------------------
 
-    def _answer_presentation_question(self, query: str, evidence: SelfKnowledgeEvidence) -> Optional[str]:
-        """Answer presentation questions from RuntimeIntrospector evidence."""
-        q_lower = query.lower()
-        pres_info = evidence.runtime_facts.get("presentation")
-        if not self._is_presentation_query(query) and "runtime.presentation" not in evidence.evidence_sources:
-            return None
-        if not pres_info:
-            pres_info = self._introspector.get_presentation_info()
-        if not isinstance(pres_info, dict):
-            return "I couldn't inspect my presentation registry right now."
-        if pres_info.get("status") == "error":
-            message = pres_info.get("message", "presentation registry error")
-            return f"I couldn't inspect my presentation registry right now ({message})."
-        if pres_info.get("status") != "available":
-            return "I couldn't inspect my presentation registry right now."
-
-        def section(name: str) -> Dict[str, Any]:
-            value = pres_info.get(name, {})
-            return value if isinstance(value, dict) else {}
-
-        def definitions(name: str) -> Dict[str, Dict[str, Any]]:
-            value = section(name).get("definitions", {})
-            return value if isinstance(value, dict) else {}
-
-        def activity_note() -> str:
-            activity = section("runtime").get("hud_runtime_active", "unknown")
-            if activity == "unknown":
-                return " I can't currently verify whether a HUD client is connected."
-            return " A HUD client is currently connected." if activity else " No HUD client is currently connected."
-
-        def alias_note(entity: Dict[str, str]) -> str:
-            if entity["queried"] == entity["canonical"]:
-                return ""
-            return f" (the alias '{entity['queried']}' resolves to '{entity['canonical']}')"
-
-        def widget_support_labels(supports: Any) -> List[str]:
-            if not isinstance(supports, dict):
-                return []
-            labels = {"drag": "dragging", "resize": "resizing", "pin": "pinning", "auto_dismiss": "auto-dismiss"}
-            return [labels.get(name, name.replace("_", "-")) for name, enabled in supports.items() if enabled]
-
-        # Pet is intentionally outside the presentation registry contract.
-        if "pet" in q_lower and any(term in q_lower for term in ("hud", "workspace", "part of", "separate")):
-            return "The native floating Pet is a separate companion surface outside the HUD workspace system."
-
-        # Settings must remain an overlay/modal, never be described as a workspace.
-        if "settings" in q_lower and "workspace" in q_lower and any(
-            word in q_lower for word in ("is", "type", "kind")
-        ):
-            settings = definitions("overlays").get("settings", {})
-            dismiss = settings.get("dismiss_policy", "manual")
-            anchor = settings.get("anchor", "screen")
-            return (
-                f"Settings is an implemented overlay modal (anchor: {anchor}, dismiss policy: {dismiss}), "
-                "not a workspace."
-            )
-
-        rules = section("core").get("rules", {})
-        if not isinstance(rules, dict):
-            rules = {}
-        if any(term in q_lower for term in ("core", "ring", "dock", "docking", "workspace opens")):
-            idle = rules.get("no_workspace", {})
-            active = rules.get("active_workspace", {})
-            idle_pos = idle.get("position", "unknown")
-            active_pos = active.get("position", "unknown")
-            visible_flags = [key for key, value in active.items() if key.startswith("show_") and value]
-            mode = "core-only mode" if not visible_flags else f"with {', '.join(visible_flags)}"
-            return (
-                f"With no workspace, the core is at **{idle_pos}**. "
-                f"When a workspace opens, it docks to **{active_pos}** in {mode}."
-            )
-
-        entity = self._resolve_presentation_entity(query)
-        asks_widgets = bool(re.search(r"\b(what|which|list)\b.*\bwidgets?\b|\bwidgets?\s+do you have\b", q_lower))
-        asks_workspaces = bool(re.search(r"\b(what|which|list)\b.*\bworkspaces?\b|\bworkspaces?\s+(can|do)\b", q_lower))
-        asks_overlays = bool(re.search(r"\b(what|which|list)\b.*\b(overlays?|modals?)\b", q_lower))
-        query_tokens = self._query_tokens(query)
-        known_primitives = [str(item) for item in pres_info.get("surface_primitives", [])]
-        mentions_primitive = any(item in query_tokens or f"{item}s" in query_tokens for item in known_primitives)
-        asks_primitives = bool(re.search(r"\b(primitives?|surfacecomposer|layout)\b", q_lower)) or mentions_primitive
-
-        # Resolve canonical entity names and aliases through PresentationRegistry.
-        if entity and not (asks_widgets or asks_workspaces or asks_overlays or asks_primitives):
-            kind = entity["kind"]
-            descriptor = definitions(f"{kind}s").get(entity["canonical"], {})
-            implemented = bool(descriptor.get("implemented", True))
-            status = "implemented" if implemented else "planned"
-            description = descriptor.get("description", "")
-            if kind == "workspace":
-                spatial_note = " with spatial rendering" if descriptor.get("spatial") else ""
-                return (
-                    f"Yes, I have an **{status}** **{entity['canonical']}** workspace"
-                    f"{alias_note(entity)}{spatial_note}: {description}."
-                )
-            if kind == "widget":
-                supported = widget_support_labels(descriptor.get("supports", {}))
-                behavior = f" Supports: {', '.join(supported)}." if supported else ""
-                return (
-                    f"Yes, I have an **{status}** **{entity['canonical']}** contextual widget"
-                    f"{alias_note(entity)}: {description}.{behavior}"
-                )
-            return f"Yes, I have an **{status}** **{entity['canonical']}** overlay modal: {description}."
-
-        if asks_widgets:
-            widget_data = section("widgets")
-            canonical = widget_data.get("canonical", [])
-            widget_defs = definitions("widgets")
-            entries = []
-            for name in canonical:
-                supported = widget_support_labels(widget_defs.get(name, {}).get("supports", {}))
-                entries.append(f"{name} (supports: {', '.join(supported)})" if supported else str(name))
-            count = widget_data.get("count", len(canonical))
-            return f"I have **{count}** contextual HUD widgets: **{', '.join(entries)}**."
-
-        if asks_workspaces:
-            workspace_data = section("workspaces")
-            canonical = workspace_data.get("canonical", [])
-            count = workspace_data.get("count", len(canonical))
-            return f"I support **{count}** canonical workspaces: **{', '.join(canonical)}**."
-
-        if asks_overlays:
-            overlay_data = section("overlays")
-            canonical = overlay_data.get("canonical", [])
-            count = overlay_data.get("count", len(canonical))
-            return f"I support **{count}** overlay modals: **{', '.join(canonical)}**."
-
-        if asks_primitives:
-            primitives = known_primitives
-            layouts = [str(item) for item in pres_info.get("layout_types", [])]
-            requested = next(
-                (primitive for primitive in primitives if primitive in query_tokens or f"{primitive}s" in query_tokens),
-                None,
-            )
-            if requested and any(word in q_lower for word in ("render", "show", "display")):
-                return (
-                    f"Yes, SurfaceComposer supports **{requested}** primitives in these layout types: "
-                    f"{', '.join(layouts)}."
-                )
-            return (
-                f"SurfaceComposer supports **{len(primitives)}** visual primitives: {', '.join(primitives)}; "
-                f"layout types: {', '.join(layouts)}."
-            )
-
-        overview = any(
-            term in q_lower for term in ("hud", "presentation capabilities", "visual interface", "visual surface")
-        )
-        if overview:
-            workspaces = section("workspaces").get("canonical", [])
-            widgets = section("widgets").get("canonical", [])
-            overlays = section("overlays").get("canonical", [])
-            primitive_count = len(pres_info.get("surface_primitives", []))
-            idle_position = rules.get("no_workspace", {}).get("position", "unknown")
-            workspace_position = rules.get("active_workspace", {}).get("position", "unknown")
-            return (
-                f"HUD presentation supports **{len(workspaces)}** workspaces ({', '.join(workspaces)}), "
-                f"**{len(widgets)}** widgets ({', '.join(widgets)}), "
-                f"**{len(overlays)}** overlays ({', '.join(overlays)}), "
-                f"and SurfaceComposer with **{primitive_count}** primitives."
-                f" The core is at **{idle_position}** when idle and docks to **{workspace_position}** for a workspace."
-                f"{activity_note()}"
-            )
-
-        return None
-
     def _answer_subsystem_status(self, query: str, evidence: SelfKnowledgeEvidence) -> Optional[str]:
-        """Answer semantic subsystem status without confusing it with presentation."""
+        """Answer semantic subsystem status from live evidence."""
         if not _SUBSYSTEM_STATUS_PATTERN.search(query):
             return None
         q_lower = query.lower()
@@ -556,21 +280,8 @@ class SelfKnowledgeService:
                 f"**{mcp.get('connected_servers', 0)}** currently connected."
             )
 
-        if "pet" in q_lower:
-            configured = evidence.runtime_facts.get("config", {}).get("pet_enabled", "unknown")
-            if configured is True:
-                config_text = "configured enabled"
-            elif configured is False:
-                config_text = "configured disabled"
-            else:
-                config_text = "configuration unknown"
-            return (
-                f"The native Pet companion is implemented and {config_text}; "
-                "active process/window status is unknown."
-            )
-
         subsystem = next(
-            (name for name in ("browser", "desktop", "terminal", "vision") if name in q_lower),
+            (name for name in ("browser", "desktop", "vision") if name in q_lower),
             None,
         )
         if subsystem is None:
@@ -593,14 +304,8 @@ class SelfKnowledgeService:
         q_lower = query.lower()
         parts: List[str] = []
 
-        # 1. Presentation & HUD Questions (checked early for specialized presentation queries)
-        pres_ans = self._answer_presentation_question(query, evidence)
         subsystem_ans = self._answer_subsystem_status(query, evidence)
-        if pres_ans:
-            parts.append(pres_ans)
-
-        # 2. Semantic subsystem status query
-        elif subsystem_ans:
+        if subsystem_ans:
             parts.append(subsystem_ans)
 
         # 3. Model Query

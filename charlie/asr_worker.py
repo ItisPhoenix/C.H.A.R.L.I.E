@@ -244,7 +244,10 @@ def _build_transcribe_kwargs(
             vad_filter=False,
         )
     else:
-        _ac = asr_config or {}
+        _ac = dict(asr_config or {})
+        capture_fields = flags.get("capture")
+        if isinstance(capture_fields, dict) and capture_fields.get("vad_threshold") is not None:
+            _ac["vad_threshold"] = capture_fields["vad_threshold"]
         kwargs.update(
             condition_on_previous_text=True,
             beam_size=_ac.get("beam_size", 6),

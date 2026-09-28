@@ -45,7 +45,10 @@ def _score(query: str, result: SearchResult) -> float:
     primary = 0.12 if any(hint in result.domain for hint in _PRIMARY_HINTS) else 0.0
     freshness = 0.0
     if _fresh_query(query) and _freshness_timestamp(result.published_at):
-        age_days = max(0.0, (datetime.now(timezone.utc).timestamp() - _freshness_timestamp(result.published_at)) / 86400)
+        age_days = max(
+            0.0,
+            (datetime.now(timezone.utc).timestamp() - _freshness_timestamp(result.published_at)) / 86400,
+        )
         freshness = max(-0.35, 0.35 - min(age_days, 30) * 0.02)
     return overlap + primary + freshness + max(0.0, 0.04 - (result.rank * 0.005))
 
@@ -61,7 +64,12 @@ def rank_search_results(results: Iterable[SearchResult], plan: ResearchPlan, lim
         dated = [item for item in candidates if _freshness_timestamp(item.published_at)]
         if dated:
             newest = max(_freshness_timestamp(item.published_at) for item in dated)
-            candidates = [item for item in candidates if not _freshness_timestamp(item.published_at) or newest - _freshness_timestamp(item.published_at) <= 45 * 86400]
+            candidates = [
+                item
+                for item in candidates
+                if not _freshness_timestamp(item.published_at)
+                or newest - _freshness_timestamp(item.published_at) <= 45 * 86400
+            ]
     ranked = sorted(candidates, key=lambda item: _score(plan.goal, item), reverse=True)
     return ranked[: max(1, limit)]
 

@@ -17,7 +17,6 @@ class FailureClass(enum.Enum):
     UNKNOWN = "UNKNOWN"
 
 from charlie.config import config
-from charlie.events import EventMeta, EventSource
 
 system_root: str = config.system_root
 _BLOCKED_RECOVERY_PATHS: List[str] = [
@@ -139,29 +138,7 @@ def run_command_safe(command: str) -> subprocess.CompletedProcess:
         timeout=15.0
     )
 
-import asyncio
-
-from charlie.utils import make_id
-
 _event_bus: Any = None
-_active_ws_count: int = 0
-_active_session_id: str = "default"
-pending_proposals: Dict[str, asyncio.Future] = {}
-
-def set_active_ws_count(count: int) -> None:
-    global _active_ws_count
-    _active_ws_count = count
-    logger.info("Active WS connection count updated to: %d", _active_ws_count)
-
-def get_active_ws_count() -> int:
-    return _active_ws_count
-
-def set_active_session_id(session_id: str) -> None:
-    global _active_session_id
-    _active_session_id = session_id
-
-def get_active_session_id() -> str:
-    return _active_session_id
 
 async def request_recovery_approval(
     original_command: str,
@@ -171,115 +148,21 @@ async def request_recovery_approval(
     source: str,
     execution_context: Optional[Any] = None,
 ) -> Optional[str]:
-    """Helper to request approval for a proposed command replacement.
+    """Fail closed when recovery lacks an owner approval callback.
 
-    If the dashboard is disconnected, returns None (fail safely).
-    If approved, runs the command (after verifying safety) and returns output.
-    If rejected, returns a descriptive error message indicating rejection.
+    Normal tool calls use Brain's voice or owner-channel approval flow. This
+    lower-level helper has no Brain reference, so it must not create a second
+    approval authority or wait for a removed client.
     """
     if execution_context is not None and execution_context.cancellation_requested:
         return None
-    if get_active_ws_count() == 0:
-        logger.warning("No active WebSocket connections. Failing recovery proposal safely.")
-        return None
-
-    # Preserve safety checks before displaying
-    passed_safeguard = is_safe_to_recover(proposed_command)
-
-    proposal_id = f"prop_{make_id(6)}"
-
-    proposal = {
-        "proposal_id": proposal_id,
-        "original_command": original_command,
-        "proposed_command": proposed_command,
-        "failure_class": failure_class,
-        "explanation": explanation,
-        "source": source,
-        "safeguard_passed": passed_safeguard,
-        "session_id": get_active_session_id()
-    }
-
-    logger.info("Generating recovery proposal: %s", proposal)
-
-    # Broadcast proposal to active dashboard
-    if _event_bus:
-        await _event_bus.emit(
-            "recovery_proposal", proposal,
-            meta=EventMeta(source=EventSource.BRAIN, rationale=explanation),
-        )
-
-    # Create future to wait for client action
-    loop = asyncio.get_running_loop()
-    fut = loop.create_future()
-    pending_proposals[proposal_id] = fut
-
-    try:
-        # Wait up to 30 seconds for user action
-        approved = await asyncio.wait_for(fut, timeout=30.0)
-    except asyncio.TimeoutError:
-        logger.warning("Recovery proposal %s timed out waiting for approval", proposal_id)
-        pending_proposals.pop(proposal_id, None)
-        return None
-    except Exception as fut_exc:
-        logger.error("Future waiting failed: %s", fut_exc)
-        pending_proposals.pop(proposal_id, None)
-        return None
-
-    pending_proposals.pop(proposal_id, None)
-
-    if execution_context is not None and execution_context.cancellation_requested:
-        return None
-
-    if not approved:
-        logger.info(
-            "Proposal Log: ID=%s | Source=%s | Decision=REJECTED | Proposed=%s",
-            proposal_id, source, proposed_command
-        )
-        return (
-            "Error: Command execution rejected by user. Original failure: [winerror 2] "
-            f"The system cannot find the file specified. Proposed but rejected fix: {proposed_command}."
-        )
-
-    logger.info(
-        "Proposal Log: ID=%s | Source=%s | Decision=APPROVED | Proposed=%s",
-        proposal_id, source, proposed_command
+    logger.warning(
+        "Recovery approval unavailable; no owner-channel callback is wired for the lower-level recovery helper. "
+        "Failing closed for source=%s command=%s",
+        source,
+        original_command,
     )
-
-    # Preserve safety checks again before execution
-    if not is_safe_to_recover(proposed_command):
-        logger.warning("Safety Guardrail: Approved command failed safety checks before execution: %s", proposed_command)
-        return "Error: Recovery command blocked by safety guardrails before execution."
-
-    try:
-        if execution_context is not None and execution_context.cancellation_requested:
-            return None
-        # Execute the approved command
-        logger.info("Executing approved recovery command: %s", proposed_command)
-        if failure_class == FailureClass.TIMEOUT.value:
-            subprocess.Popen(
-                f'start "" {proposed_command}', shell=True,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                creationflags=subprocess.DETACHED_PROCESS if sys.platform == "win32" else 0,
-                close_fds=True
-            )
-            res_msg = "Command succeeded (exit code 0). launched in background via recovery."
-            logger.info("Approved command execution result: %s", res_msg)
-            return res_msg
-
-        res = run_command_safe(proposed_command)
-        logger.info("Approved command execution result code: %d", res.returncode)
-        if res.returncode == 0:
-            parts = []
-            if res.stdout:
-                parts.append(res.stdout.strip())
-            if res.stderr:
-                parts.append(res.stderr.strip())
-            return "\n".join(parts) if parts else "Command succeeded (exit code 0)."
-        else:
-            return f"Error: Command failed with code {res.returncode}. Output:\n{res.stderr.strip()}"
-    except Exception as exec_exc:
-        logger.error("Failed to execute approved command: %s", exec_exc)
-        return f"Error: Failed to execute recovery command: {exec_exc}"
+    return None
 
 async def recover_tool(
     brain: Any,
@@ -337,10 +220,6 @@ async def recover_tool(
     if tool_name == "shell_execute":
         command = arguments.get("command", "")
         if not command:
-            return None
-
-        if get_active_ws_count() == 0:
-            logger.info("Dashboard disconnected. Failing dynamic recovery safely.")
             return None
 
         # Check local cache

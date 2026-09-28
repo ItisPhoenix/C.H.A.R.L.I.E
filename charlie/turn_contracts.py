@@ -3,7 +3,7 @@
 These types define the boundary between channel ingress, orchestration, and
 execution results.  They deliberately contain no routing, persistence, or
 renderer behavior.  Existing runtime callers can adopt them incrementally;
-``ResultEnvelope`` retains the fields used by the current presentation rules.
+    ``ResultEnvelope`` retains the fields used by runtime result and verification rules.
 """
 
 from __future__ import annotations
@@ -168,7 +168,6 @@ class IntentDecision:
     routing_source: str = RoutingSource.DETERMINISTIC.value
     confidence: Optional[float] = None
     rationale: str = ""
-    presentation_expectation: Optional[str] = None
     execution_policy: str = ExecutionPolicy.CONVERSATION.value
     external_action_required: bool = False
     durable_work_required: bool = False
@@ -224,7 +223,7 @@ class IntentDecision:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the metadata-safe representation used by runtime observers."""
+        """Return the metadata-safe form used by runtime observers."""
 
         return {
             "turn_id": self.turn_id,
@@ -239,17 +238,15 @@ class IntentDecision:
             "routing_source": self.routing_source,
             "confidence": self.confidence,
             "rationale": self.rationale,
-            "presentation_expectation": self.presentation_expectation,
         }
 
 
 @dataclass
 class ResultEnvelope:
-    """Execution/lifecycle result shared by presentation and future channels.
+    """Execution/lifecycle result shared by runtime channels.
 
-    The first fields preserve the existing ``ExecutionOutcome`` constructor
-    shape.  ``turn_id``, evidence, artifacts, and errors are additive so the
-    current resolver can be reused while the runtime adopts explicit turns.
+    ``turn_id``, evidence, artifacts, and errors are part of the canonical
+    runtime result contract.
     """
 
     request: str = ""

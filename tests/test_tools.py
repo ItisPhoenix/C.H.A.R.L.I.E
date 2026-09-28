@@ -29,6 +29,10 @@ from charlie.tools import (
 )
 
 
+def _text(value):
+    return value.model_text if hasattr(value, "model_text") else value
+
+
 def test_registry_registration_and_schema():
     definitions = registry.get_tool_definitions()
     names = {d["function"]["name"] for d in definitions}
@@ -40,11 +44,11 @@ def test_registry_registration_and_schema():
     assert names == {
         "web_search",
         "web_research",
-        "presentation_request",
         "shell_execute",
         "system_diagnostics",
         "file_read",
         "file_write",
+        "download_public_pdf",
         "memory",
         "propose_new_tool",
         "start_background_task",
@@ -83,6 +87,11 @@ def test_registry_registration_and_schema():
         "calendar_update",
         "calendar_delete",
         "calendar_get",
+        "automation_create",
+        "automation_update",
+        "automation_get",
+        "automation_list",
+        "automation_cancel",
         "charlie_self_query",
         "charlie_doctor_diagnose",
         "charlie_self_extension_propose",
@@ -98,6 +107,19 @@ def test_list_metadata_covers_every_registered_tool():
     web_search_meta = next(m for m in metadata if m["name"] == "web_search")
     assert web_search_meta["description"]
     assert "owner" in web_search_meta and "risk_class" in web_search_meta
+
+
+def test_self_extension_description_allows_reusable_correction_candidates():
+    definition = next(
+        entry["function"]
+        for entry in registry.get_tool_definitions()
+        if entry["function"]["name"] == "charlie_self_extension_propose"
+    )
+
+    assert "main runtime stages an instructions-only candidate" in definition["description"]
+    assert "durable owner correction" in definition["description"]
+    assert "one-off facts or sensitive content" in definition["description"]
+    assert "inactive until the owner approves the exact content hash" in definition["description"]
 
 
 def test_get_tool_param_names_covers_every_registered_tool():
@@ -141,10 +163,279 @@ def test_system_control_is_compatibility_only():
 def test_file_write_and_file_read(tmp_path):
     target = tmp_path / "notes.txt"
     message = file_write(str(target), "hello tools")
-    assert "Successfully wrote to" in message
+    assert "Successfully wrote to" in _text(message)
     assert target.exists()
     content = file_read(str(target))
     assert content.strip() == "hello tools"
+
+
+class _FakePdfResponse:
+    def __init__(self, body=b"", *, status=200, headers=None):
+        from io import BytesIO
+
+        self.status = status
+        self.headers = headers or {}
+        self._body = BytesIO(body)
+
+    def getheader(self, name):
+        return self.headers.get(name)
+
+    def read(self, size=-1):
+        return self._body.read(size)
+
+
+def _public_pdf_dns(monkeypatch, *, private_hosts=()):
+    import socket
+
+    private_hosts = set(private_hosts)
+    lookups = []
+
+    def getaddrinfo(host, port, *args, **kwargs):
+        lookups.append(host)
+        address = "127.0.0.1" if host in private_hosts else "93.184.216.34"
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    return lookups
+
+
+def test_download_public_pdf_verifies_disk_content_and_replaces_atomically(tmp_path, monkeypatch):
+    import hashlib
+    from contextlib import contextmanager
+
+    body = b"%PDF-1.7\nvalidated fixture"
+    target = tmp_path / "report.pdf"
+    target.write_bytes(b"previous file")
+    _public_pdf_dns(monkeypatch)
+
+    @contextmanager
+    def fake_open(*args):
+        yield _FakePdfResponse(body, headers={"Content-Length": str(len(body))})
+
+    monkeypatch.setattr(tools_module, "_open_public_pdf_response", fake_open, raising=False)
+    result = tools_module.download_public_pdf("https://example.org/report.pdf", str(target))
+
+    assert isinstance(result, tools_module.ToolExecutionResult)
+    assert target.read_bytes() == body
+    assert result.structured_data == {
+        "ok": True,
+        "verified": True,
+        "path": str(target.resolve()),
+        "byte_count": len(body),
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "url": "https://example.org/report.pdf",
+    }
+    assert not list(tmp_path.glob(".report.pdf.*.tmp"))
+
+
+def test_download_public_pdf_uses_file_lease_and_verified_result_envelope(monkeypatch):
+    from charlie.capabilities import capability_index
+    from charlie.core import _normalize_tool_result
+
+    operation = capability_index.get_operation("download_public_pdf")
+    assert operation.required_leases == ("file",)
+
+    result = tools_module.ToolExecutionResult(
+        "Downloaded and verified PDF.",
+        {"ok": True, "verified": True, "byte_count": 9, "sha256": "a" * 64},
+        "public_pdf_download",
+    )
+    monkeypatch.setitem(
+        registry._tools["download_public_pdf"],
+        "func",
+        lambda **_arguments: result,
+    )
+    raw_result = registry.execute_tool_structured("download_public_pdf", {})
+    envelope = _normalize_tool_result(
+        "download_public_pdf",
+        raw_result,
+        request="download the NIST PDF",
+        turn_id="turn-pdf",
+        task_id="task-pdf",
+        session_id="session-pdf",
+    )
+
+    assert envelope.operation == "file.public_pdf.download"
+    assert envelope.status == "completed"
+    assert envelope.verification_status == "verified_success"
+    assert envelope.data["structured_data"] == result.structured_data
+
+
+def test_download_public_pdf_revalidates_redirect_destination(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    lookups = _public_pdf_dns(monkeypatch, private_hosts={"private.example"})
+    opened_hosts = []
+    responses = [
+        _FakePdfResponse(status=302, headers={"Location": "https://private.example/report.pdf"}),
+    ]
+
+    @contextmanager
+    def fake_open(host, *_args):
+        opened_hosts.append(host)
+        yield responses.pop(0)
+
+    monkeypatch.setattr(tools_module, "_open_public_pdf_response", fake_open, raising=False)
+    result = tools_module.download_public_pdf("https://public.example/start", str(tmp_path / "report.pdf"))
+
+    assert result.structured_data["ok"] is False
+    assert opened_hosts == ["public.example"]
+    assert lookups == ["public.example", "private.example"]
+    assert not list(tmp_path.glob(".report.pdf.*.tmp"))
+
+
+def test_download_public_pdf_rejects_non_public_dns_result_before_request(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    lookups = _public_pdf_dns(monkeypatch, private_hosts={"private.example"})
+    requests = []
+
+    @contextmanager
+    def fake_open(*args):
+        requests.append(args)
+        yield _FakePdfResponse(b"%PDF-1.7\n")
+
+    monkeypatch.setattr(tools_module, "_open_public_pdf_response", fake_open, raising=False)
+    result = tools_module.download_public_pdf("https://private.example/report.pdf", str(tmp_path / "report.pdf"))
+
+    assert result.structured_data["ok"] is False
+    assert requests == []
+    assert lookups == ["private.example"]
+
+
+def test_download_public_pdf_rejects_nat64_private_ipv4_before_request(tmp_path, monkeypatch):
+    import socket
+
+    requests = []
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda _host, port, **_kwargs: [
+            (socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("64:ff9b::7f00:1", port, 0, 0))
+        ],
+    )
+    monkeypatch.setattr(
+        tools_module,
+        "_open_public_pdf_response",
+        lambda *args: requests.append(args),
+        raising=False,
+    )
+
+    result = tools_module.download_public_pdf("https://nat64.example/report.pdf", str(tmp_path / "report.pdf"))
+
+    assert result.structured_data["ok"] is False
+    assert requests == []
+
+
+def test_download_public_pdf_rejects_credentials_and_non_https_before_request(tmp_path, monkeypatch):
+    requests = []
+    monkeypatch.setattr(tools_module, "_open_public_pdf_response", lambda *args: requests.append(args), raising=False)
+    lookups = _public_pdf_dns(monkeypatch)
+
+    credentialed = tools_module.download_public_pdf(
+        "https://user:secret@example.org/report.pdf", str(tmp_path / "credentials.pdf")
+    )
+    insecure = tools_module.download_public_pdf("http://example.org/report.pdf", str(tmp_path / "http.pdf"))
+
+    assert credentialed.structured_data["ok"] is False
+    assert insecure.structured_data["ok"] is False
+    assert requests == []
+    assert lookups == []
+
+
+def test_download_public_pdf_stops_after_bounded_redirects(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    _public_pdf_dns(monkeypatch)
+    requests = []
+
+    @contextmanager
+    def fake_open(host, *_args):
+        requests.append(host)
+        yield _FakePdfResponse(status=302, headers={"Location": "/next.pdf"})
+
+    monkeypatch.setattr(tools_module, "_open_public_pdf_response", fake_open, raising=False)
+    result = tools_module.download_public_pdf("https://example.org/start.pdf", str(tmp_path / "report.pdf"))
+
+    assert result.structured_data["ok"] is False
+    assert len(requests) == 6
+
+
+def test_download_public_pdf_rejects_invalid_pdf_and_preserves_destination(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    target = tmp_path / "report.pdf"
+    target.write_bytes(b"previous file")
+    _public_pdf_dns(monkeypatch)
+
+    @contextmanager
+    def fake_open(*args):
+        yield _FakePdfResponse(b"not a PDF")
+
+    monkeypatch.setattr(tools_module, "_open_public_pdf_response", fake_open, raising=False)
+    result = tools_module.download_public_pdf("https://example.org/report.pdf", str(target))
+
+    assert result.structured_data["ok"] is False
+    assert target.read_bytes() == b"previous file"
+    assert not list(tmp_path.glob(".report.pdf.*.tmp"))
+
+
+def test_download_public_pdf_rejects_content_length_mismatch(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    target = tmp_path / "report.pdf"
+    target.write_bytes(b"previous file")
+    _public_pdf_dns(monkeypatch)
+    body = b"%PDF-1.7\nshort"
+
+    @contextmanager
+    def fake_open(*args):
+        yield _FakePdfResponse(body, headers={"Content-Length": str(len(body) + 1)})
+
+    monkeypatch.setattr(tools_module, "_open_public_pdf_response", fake_open, raising=False)
+    result = tools_module.download_public_pdf("https://example.org/report.pdf", str(target))
+
+    assert result.structured_data["ok"] is False
+    assert target.read_bytes() == b"previous file"
+    assert not list(tmp_path.glob(".report.pdf.*.tmp"))
+
+
+def test_download_public_pdf_enforces_stream_size_limit_without_content_length(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    target = tmp_path / "large.pdf"
+    target.write_bytes(b"previous file")
+    _public_pdf_dns(monkeypatch)
+
+    class LargeResponse(_FakePdfResponse):
+        status = 200
+
+        def __init__(self):
+            self.headers = {}
+            self.remaining = 25 * 1024 * 1024 + 1
+            self.first = True
+
+        def read(self, size=-1):
+            if self.remaining <= 0:
+                return b""
+            length = min(size, self.remaining)
+            data = b"%PDF-" if self.first else b"x" * length
+            self.first = False
+            if len(data) > length:
+                data = data[:length]
+            self.remaining -= len(data)
+            return data
+
+    @contextmanager
+    def fake_open(*args):
+        yield LargeResponse()
+
+    monkeypatch.setattr(tools_module, "_open_public_pdf_response", fake_open, raising=False)
+    result = tools_module.download_public_pdf("https://example.org/large.pdf", str(target))
+
+    assert result.structured_data["ok"] is False
+    assert target.read_bytes() == b"previous file"
+    assert not list(tmp_path.glob(".large.pdf.*.tmp"))
 
 
 def test_resolve_user_placeholders():
@@ -197,9 +488,9 @@ def test_shell_execute_lists_env(monkeypatch):
     import os
 
     output = shell_execute("echo OK")
-    assert "OK" in output
+    assert "OK" in _text(output)
     env_output = shell_execute("set" if os.name == "nt" else "env")
-    assert isinstance(env_output, str)
+    assert isinstance(_text(env_output), str)
 
 
 def test_shell_execute_timeout_does_not_report_error(monkeypatch):
@@ -231,7 +522,7 @@ def test_shell_execute_timeout_does_not_report_error(monkeypatch):
         tools_module.subprocess, "Popen", lambda *a, **k: FakeProcess()
     )
     output = shell_execute("notepad")
-    assert "Error" not in output
+    assert "Error" not in _text(output)
 
 
 def test_shell_execute_recovery_communicate_is_bounded(monkeypatch):
@@ -269,8 +560,8 @@ def test_shell_execute_recovery_communicate_is_bounded(monkeypatch):
 
     output = shell_execute("start notepad")
 
-    assert "Error" not in output
-    assert "still running" in output
+    assert "Error" not in _text(output)
+    assert "still running" in _text(output)
     assert all(t is not None for t in calls)
 
 
@@ -301,7 +592,7 @@ def test_shell_execute_voice_mode_allows_bare_command(monkeypatch):
         tools_module.subprocess, "Popen", lambda *a, **k: FakeProcess()
     )
     output = shell_execute("notepad", voice_mode=True)
-    assert "not on the allowed list" not in output
+    assert "not on the allowed list" not in _text(output)
 
 
 def test_shell_execute_voice_mode_allows_move_and_copy(monkeypatch):
@@ -326,8 +617,43 @@ def test_shell_execute_voice_mode_allows_move_and_copy(monkeypatch):
     monkeypatch.setattr(tools_module.subprocess, "Popen", lambda *a, **k: FakeProcess())
     move_output = shell_execute('move "a.txt" "b.txt"', voice_mode=True)
     copy_output = shell_execute('copy "a.txt" "b.txt"', voice_mode=True)
-    assert "not on the allowed list" not in move_output
-    assert "not on the allowed list" not in copy_output
+    assert "not on the allowed list" not in _text(move_output)
+    assert "not on the allowed list" not in _text(copy_output)
+
+
+def test_shell_execute_voice_mode_allows_only_exact_safe_command_extensions(monkeypatch):
+    from charlie.tools import ToolExecutionResult
+
+    executed = []
+    monkeypatch.setattr(tools_module, "get_current_execution_context", lambda: object())
+
+    def fake_execute(command, *, voice_mode, context):
+        executed.append((command, voice_mode, context is not None))
+        return ToolExecutionResult("mock execution", {"ok": True}, "terminal_result")
+
+    monkeypatch.setattr(tools_module, "_shell_execute_owned", fake_execute)
+
+    commands = ["python --version", "python -V", "git rev-parse HEAD", "exit 1", "exit 255"]
+    for command in commands:
+        assert _text(shell_execute(command, voice_mode=True)) == "mock execution"
+
+    assert executed == [(command, True, True) for command in commands]
+
+
+def test_shell_execute_voice_mode_rejects_arbitrary_python_and_hard_blocks(monkeypatch):
+    executed = []
+    monkeypatch.setattr(
+        tools_module,
+        "_shell_execute_owned",
+        lambda *args, **kwargs: executed.append((args, kwargs)),
+    )
+
+    arbitrary = shell_execute('python -c "import os"', voice_mode=True)
+    blocked = shell_execute("shutdown /s", voice_mode=True)
+
+    assert "not on the allowed list" in _text(arbitrary)
+    assert "not on the allowed list" in _text(blocked)
+    assert executed == []
 
 
 def test_detect_app_launch_matches_bare_and_wrapped_forms():
@@ -373,7 +699,7 @@ def test_shell_execute_focuses_already_running_app_instead_of_relaunching(monkey
     )
 
     output = shell_execute("start notepad")
-    assert "Focused window" in output
+    assert "Focused window" in _text(output)
     assert popen_calls == []
 
 
@@ -410,7 +736,7 @@ def test_text_tool_prompt_inherits_shell_contract():
 
 def test_shell_execute_accepts_one_harmless_command():
     output = shell_execute("python --version")
-    assert "Python" in output
+    assert "Python" in _text(output)
 
 
 def test_shell_execute_rejects_compound_commands_and_pipes():
@@ -426,204 +752,6 @@ def test_approval_cannot_override_shell_metacharacter_block():
     requirement, _, reason = evaluate("shell_execute", {"command": "python --version && where python"})
     assert requirement == Requirement.BLOCK
     assert "metacharacters" in reason.lower()
-
-
-# ---------------------------------------------------------------------------
-# Phase 3 dashboard "desktop_frame" event -- downscale + throttle + emit bridge
-# ---------------------------------------------------------------------------
-
-def test_downscale_png_caps_long_edge_and_preserves_aspect():
-    import io
-
-    from PIL import Image
-
-    from charlie.tools import _downscale_png
-
-    src = Image.new("RGB", (2000, 1000), color=(10, 20, 30))
-    buf = io.BytesIO()
-    src.save(buf, format="PNG")
-
-    out_bytes = _downscale_png(buf.getvalue(), max_edge=960)
-    out = Image.open(io.BytesIO(out_bytes))
-
-    assert max(out.size) == 960
-    assert out.size[0] / out.size[1] == 2000 / 1000
-
-
-def _make_png_bytes() -> bytes:
-    import io
-
-    from PIL import Image
-
-    buf = io.BytesIO()
-    Image.new("RGB", (40, 20), color=(1, 2, 3)).save(buf, format="PNG")
-    return buf.getvalue()
-
-
-def test_set_event_bus_stores_bus_and_loop(monkeypatch):
-    from charlie import tools as tools_module
-
-    # monkeypatch.setattr snapshots the current value here and restores it
-    # after the test, even though set_event_bus() below mutates directly.
-    monkeypatch.setattr(tools_module, "_event_bus", None)
-    monkeypatch.setattr(tools_module, "_event_loop", None)
-
-    bus, loop = object(), object()
-    tools_module.set_event_bus(bus, loop)
-
-    assert tools_module._event_bus is bus
-    assert tools_module._event_loop is loop
-
-
-def test_emit_desktop_frame_bridges_to_event_bus_with_shaped_payload(monkeypatch):
-    import asyncio as asyncio_module
-
-    from charlie import tools as tools_module
-    from charlie.desktop.uia import Element
-
-    calls = []
-
-    class FakeBus:
-        async def emit(self, event_type, payload, meta=None):
-            calls.append((event_type, payload))
-
-    monkeypatch.setattr(
-        tools_module.asyncio,
-        "run_coroutine_threadsafe",
-        lambda coro, loop: asyncio_module.new_event_loop().run_until_complete(coro),
-    )
-    monkeypatch.setattr(
-        tools_module.recovery, "get_active_session_id", lambda: "sess-123"
-    )
-    monkeypatch.setattr(tools_module, "_event_bus", FakeBus())
-    monkeypatch.setattr(tools_module, "_event_loop", object())
-    monkeypatch.setattr(tools_module, "_last_frame_emit_at", 0.0)  # past the throttle window
-
-    elements = [
-        Element(
-            mark_id=1, name="Save", control_type="Button",
-            bounds=(0, 0, 10, 10), is_password=False, is_offscreen=False,
-        )
-    ]
-    tools_module._emit_desktop_frame(_make_png_bytes(), elements)
-
-    assert len(calls) == 1
-    etype, payload = calls[0]
-    assert etype == "desktop_frame"
-    assert payload["session_id"] == "sess-123"
-    assert isinstance(payload["image_b64"], str) and payload["image_b64"]
-    assert payload["marks"] == [{"mark_id": 1, "name": "Save", "bounds": [0, 0, 10, 10]}]
-
-
-def test_emit_desktop_frame_throttled_within_window(monkeypatch):
-    import asyncio as asyncio_module
-    import time
-
-    from charlie import tools as tools_module
-
-    calls = []
-
-    class FakeBus:
-        async def emit(self, event_type, payload, meta=None):
-            calls.append((event_type, payload))
-
-    monkeypatch.setattr(
-        tools_module.asyncio,
-        "run_coroutine_threadsafe",
-        lambda coro, loop: asyncio_module.new_event_loop().run_until_complete(coro),
-    )
-    monkeypatch.setattr(
-        tools_module.recovery, "get_active_session_id", lambda: "sess-123"
-    )
-    monkeypatch.setattr(tools_module, "_event_bus", FakeBus())
-    monkeypatch.setattr(tools_module, "_event_loop", object())
-    monkeypatch.setattr(tools_module, "_last_frame_emit_at", time.time())  # inside the throttle window
-
-    tools_module._emit_desktop_frame(_make_png_bytes(), [])
-
-    assert calls == []
-
-
-def test_capture_and_emit_frame_runs_capture_annotate_emit_off_thread(monkeypatch):
-    """desktop_observe/desktop_read_screen/desktop_screenshot must never wait
-    on frame capture -- it has to run off the calling thread so it can't add
-    latency to the tool's return value."""
-    import threading
-
-    import charlie.desktop.ocr  # noqa: F401 -- ensures the submodule attr exists to patch
-    import charlie.desktop.vision  # noqa: F401
-    from charlie import tools as tools_module
-
-    calls = []
-
-    class FakeOcr:
-        OCR_AVAILABLE = True
-
-        @staticmethod
-        def capture():
-            return _make_png_bytes()
-
-    class FakeVision:
-        VISION_AVAILABLE = True
-
-        @staticmethod
-        def annotate_som(png, elements):
-            calls.append(("annotate", elements))
-            return png
-
-    def fake_emit(png, elements):
-        calls.append(("emit", elements))
-
-    monkeypatch.setattr("charlie.desktop.ocr", FakeOcr)
-    monkeypatch.setattr("charlie.desktop.vision", FakeVision)
-    monkeypatch.setattr(tools_module, "_emit_desktop_frame", fake_emit)
-
-    started = []
-    real_thread_init = threading.Thread.__init__
-
-    def fake_thread_init(self, *a, target=None, daemon=None, **k):
-        started.append(target)
-        real_thread_init(self, target=target, daemon=daemon)
-
-    monkeypatch.setattr(threading.Thread, "__init__", fake_thread_init)
-    monkeypatch.setattr(threading.Thread, "start", lambda self: self._target())
-
-    tools_module._capture_and_emit_frame([])
-
-    assert started  # a background thread was spawned, not run inline
-    assert ("annotate", []) in calls
-    assert ("emit", []) in calls
-
-
-def test_desktop_observe_wires_up_capture_and_emit_frame(monkeypatch):
-    """desktop_observe must feed the dashboard live view on every call, not
-    just when the vision tier is on -- confirmed decision for this phase."""
-    from charlie import tools as tools_module
-    from charlie.desktop.uia import Element
-
-    elements = [
-        Element(
-            mark_id=1, name="Save", control_type="Button",
-            bounds=(0, 0, 10, 10), is_password=False, is_offscreen=False,
-        )
-    ]
-
-    monkeypatch.setattr(tools_module, "_desktop_ready", lambda: True)
-    monkeypatch.setattr(tools_module, "_ocr_fallback_marks", lambda uia_elements: elements)
-    # Unmocked, this hits a real vision-LLM call when VISION_ENABLED=true -- see test_desktop_grounding.py.
-    monkeypatch.setattr(tools_module, "_grounding_marks", lambda els: els)
-
-    import charlie.desktop.uia as uia_module
-    monkeypatch.setattr(uia_module, "snapshot_tree", lambda max_depth=8: [])
-
-    calls = []
-    monkeypatch.setattr(
-        tools_module, "_capture_and_emit_frame", lambda els: calls.append(els)
-    )
-
-    tools_module.desktop_observe()
-
-    assert calls == [elements]
 
 
 def test_system_diagnostics_unknown_check(monkeypatch):
@@ -826,7 +954,7 @@ def test_memory_invalid_target():
 
 def test_needs_decomposition_compare():
     """Test that 'compare X and Y' triggers decomposition."""
-    assert _needs_decomposition("compare React and Vue")
+    assert _needs_decomposition("compare Angular and Vue")
 
 
 def test_needs_decomposition_long_query():
@@ -841,9 +969,9 @@ def test_needs_decomposition_simple():
 
 def test_decompose_query_compare():
     """Test decomposition of comparison queries."""
-    result = _decompose_query("compare React and Vue for web development")
+    result = _decompose_query("compare Angular and Vue for web development")
     assert len(result) == 2
-    assert "react" in result[0].lower()
+    assert "angular" in result[0].lower()
     assert "vue" in result[1].lower()
     assert "web development" in result[0].lower()
 

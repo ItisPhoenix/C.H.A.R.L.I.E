@@ -253,13 +253,6 @@ def test_search_scoped_by_launch_id():
         _cleanup_db(db_path)
 
 
-def test_active_session_defaults_to_primary_voice_session(monkeypatch):
-    import charlie.web_server as web_server
-    monkeypatch.setattr(web_server, "_active_frontend_session", None)
-    monkeypatch.setattr(web_server.config, "charlie_launch_id", "launch-1")
-    assert web_server._primary_session_id() == "voice_launch-1"
-
-
 def test_session_parent_integrity_and_delete_cascade(tmp_path):
     store = SessionStore(str(tmp_path / "integrity.db"))
     store.create_session("s1", "One", source="test")
