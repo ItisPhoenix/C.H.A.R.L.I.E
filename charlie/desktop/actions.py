@@ -184,8 +184,9 @@ def type_text(mark_id: int, text: str) -> str:
     if not isinstance(control, Element):
         set_result = _try_uia_set_value(control, text)
         if set_result is not None:
-            tag = "verified" if set_result else "SetValue did not raise, but read-back did not match"
-            return f"Typed {text!r} into mark [{mark_id}] via UIA ({tag})."
+            if set_result:
+                return f"Typed {text!r} into mark [{mark_id}] via UIA (ValuePattern read-back matched)."
+            return f"Error: UIA ValuePattern read-back did not match requested text for mark [{mark_id}]."
 
     if not _HAS_PYAUTOGUI:
         return "Error: pyautogui is not installed -- desktop control unavailable."

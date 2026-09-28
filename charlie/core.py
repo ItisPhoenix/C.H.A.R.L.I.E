@@ -151,14 +151,39 @@ _APPROVAL_SECRET_OPTION_RE = re.compile(
 
 
 def _approval_operation_preview(tool_name: str, arguments: Dict[str, Any]) -> Optional[str]:
-    """Return a redacted, single-line shell command for approval surfaces."""
-    command = arguments.get("command") if tool_name == "shell_execute" else None
-    if not isinstance(command, str):
+    """Return a concise, redacted description of the exact pending operation."""
+    preview = None
+    if tool_name == "shell_execute":
+        command = arguments.get("command")
+        if not isinstance(command, str):
+            return None
+        preview = command
+    elif tool_name in {"file_write", "download_public_pdf", "plugin_fs_search", "plugin_fs_list_dir"}:
+        path = arguments.get("path")
+        if not isinstance(path, str) or not path.strip():
+            return None
+        from charlie.tools import _resolve_safe_path, _resolve_user_placeholders
+
+        path = str(_resolve_safe_path(_resolve_user_placeholders(path)))
+        if tool_name == "file_write":
+            preview = f"Write to {path} ({len(str(arguments.get('content', '')))} characters)"
+        elif tool_name == "download_public_pdf":
+            preview = f"Download {arguments.get('url', '')} to {path}"
+        elif tool_name == "plugin_fs_search":
+            preview = f"Search {path} for {arguments.get('pattern', '')}"
+        else:
+            preview = f"List {path}"
+    elif tool_name == "desktop_window":
+        action = arguments.get("action")
+        window = arguments.get("window")
+        if action and window:
+            preview = f"{action.title()} window {window}"
+    if not preview:
         return None
     preview = re.sub(
         r"[\x00-\x1f\x7f]",
         lambda match: f"\\x{ord(match.group(0)):02x}",
-        command,
+        str(preview),
     )
     preview = redact_sensitive_text(preview)
     return _APPROVAL_SECRET_OPTION_RE.sub(r"\1[REDACTED]", preview)
@@ -230,6 +255,20 @@ _DESKTOP_CONTROL_TOOLS = frozenset(
         "desktop_open_url",
     }
 )
+_DESKTOP_OBSERVATION_ACTIONS = frozenset({"list", "observe", "get", "snapshot"})
+
+
+def _is_external_action_result(tool_name: str, arguments: Dict[str, Any]) -> bool:
+    """Keep observation-only desktop calls out of action-claim grounding."""
+
+    if tool_name == "shell_execute":
+        return True
+    if tool_name not in _DESKTOP_CONTROL_TOOLS:
+        return False
+    return not (
+        tool_name == "desktop_window"
+        and str(arguments.get("action", "")).casefold() in _DESKTOP_OBSERVATION_ACTIONS
+    )
 _DESKTOP_PHYSICAL_INPUT_TOOLS = frozenset(
     {
         "desktop_click",
@@ -289,6 +328,10 @@ _REPEATED_TOOL_RESULT = (
     "Repeated identical tool call suppressed. Choose another valid capability or finish the response."
 )
 _REPEATED_TOOL_FAILURE = "I couldn't complete that because the model kept requesting an invalid or repeated action."
+_SCOPE_FILTER_NOTICE = (
+    "One or more proposed tool calls were not run because they did not match the user's request "
+    "or verified evidence. Do not retry them; use the available results and state what remains unverified."
+)
 
 
 def _tool_timeout(tool_name: str, operation: Any = None) -> float:
@@ -302,15 +345,23 @@ def _tool_timeout(tool_name: str, operation: Any = None) -> float:
 
 
 class _RepeatToolCallGuard:
-    """Suppress same-turn repeats after a tool failure without caching success."""
+    """Suppress repeated failures and stop successful calls that make no progress."""
 
-    def __init__(self, escape_after: int = 2):
+    def __init__(self, escape_after: int = 2, no_progress_after: int = 5):
         self._blocked: set[str] = set()
+        self._completed_successes: set[str] = set()
         self._suppressed = 0
         self._escape_after = escape_after
+        self._last_successful_outcome: Dict[str, str] = {}
+        self._unchanged_successes: Dict[str, int] = {}
+        self._no_progress_after = no_progress_after
+        self._stop_for_no_progress = False
 
-    def before(self, signature: str) -> bool:
+    def before(self, signature: str, *, suppress_success_replay: bool = False) -> bool:
         if signature in self._blocked:
+            self._suppressed += 1
+            return True
+        if suppress_success_replay and signature in self._completed_successes:
             self._suppressed += 1
             return True
         self._suppressed = 0
@@ -324,14 +375,82 @@ class _RepeatToolCallGuard:
         if state_changed:
             self._blocked.clear()
 
-    def record_result(self, signature: str, envelope: ResultEnvelope, *, state_changed: bool = False) -> None:
-        """Record guard state from the canonical operation outcome."""
+    def record_result(
+        self,
+        signature: str,
+        envelope: ResultEnvelope,
+        *,
+        state_changed: bool = False,
+        track_no_progress: bool = True,
+        suppress_success_replay: bool = False,
+    ) -> int:
+        """Record failure state and consecutive identical successful outcomes."""
 
-        self.record(signature, failed=_operation_failed(envelope), state_changed=state_changed)
+        failed = _operation_failed(envelope)
+        self.record(signature, failed=failed, state_changed=state_changed)
+        if not track_no_progress:
+            return 0
+        if failed or not _operation_succeeded(envelope):
+            self._last_successful_outcome.pop(signature, None)
+            self._unchanged_successes.pop(signature, None)
+            return 0
+
+        if suppress_success_replay:
+            self._completed_successes.add(signature)
+
+        outcome = _repeat_tool_outcome_signature(envelope)
+        count = (
+            self._unchanged_successes.get(signature, 0) + 1
+            if self._last_successful_outcome.get(signature) == outcome
+            else 1
+        )
+        self._last_successful_outcome[signature] = outcome
+        self._unchanged_successes[signature] = count
+        if count >= self._no_progress_after:
+            self._stop_for_no_progress = True
+        return count
 
     @property
     def should_escape(self) -> bool:
         return self._suppressed >= self._escape_after
+
+    @property
+    def should_stop_for_no_progress(self) -> bool:
+        return self._stop_for_no_progress
+
+
+def _repeat_tool_call_signature(tool_name: str, arguments: Dict[str, Any]) -> str:
+    """Canonicalize a tool name and JSON arguments independently of key order."""
+
+    normalized_name = tool_name
+    normalized_arguments = dict(arguments or {})
+    if tool_name == "desktop_window" and str(normalized_arguments.get("action", "")).casefold() == "close":
+        normalized_name = "desktop_close_app"
+        window = normalized_arguments.get("window") or normalized_arguments.get("title") or ""
+        normalized_arguments = {"apps": [str(window)]} if window else normalized_arguments
+    elif tool_name == "desktop_close_app" and "apps" not in normalized_arguments:
+        app = normalized_arguments.get("app") or normalized_arguments.get("window") or ""
+        if app:
+            normalized_arguments = {"apps": [str(app)]}
+    return json.dumps(
+        [normalized_name, normalized_arguments],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    )
+
+
+def _repeat_tool_outcome_signature(envelope: ResultEnvelope) -> str:
+    """Compare user-visible result truth without turn identity or timing metadata."""
+
+    result = " ".join(_result_envelope_to_model_text(envelope).split())
+    errors = sorted(" ".join(str(error).split()) for error in envelope.errors)
+    return json.dumps(
+        [envelope.status, envelope.verification_status, result, errors],
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
 
 
 # request_id -> Future[bool], resolved by the active voice or owner-channel
@@ -946,22 +1065,6 @@ def _detect_operator_persona(query: str) -> bool:
     return bool(_HELM_ADDRESS_RE.match(stripped)) or bool(_HELM_ACTION_RE.search(stripped))
 
 
-_UNINFORMATIVE_PATTERNS = re.compile(
-    r"^(?:Error|No results found|<html|404|500|empty|None|N/A)",
-    re.IGNORECASE,
-)
-_TOOL_RESULT_MIN_CHARS = 50
-
-
-def _assess_tool_result_relevance(tool_name: str, tool_result: str) -> bool:
-    """Heuristic: is this tool result useful? Returns True if relevant."""
-    if not tool_result or len(tool_result.strip()) < _TOOL_RESULT_MIN_CHARS:
-        return False
-    if _UNINFORMATIVE_PATTERNS.match(tool_result.strip()):
-        return False
-    return True
-
-
 _RESULT_FAILURE_STATUSES = frozenset(
     {
         ResultStatus.FAILED.value,
@@ -1176,27 +1279,44 @@ def _tool_target_has_provenance(
                 if host not in request_evidence:
                     return False
 
-    for key in ("url", "uri", "source_url", "target_url", "path", "file_path", "download_path", "app"):
-        value = arguments.get(key)
-        if not isinstance(value, str) or not value.strip():
-            continue
-        value = value.strip().strip("`\"'").casefold()
-        if key in {"url", "uri", "source_url", "target_url"}:
-            host_match = re.search(r"https?://([^/:?#]+)", value)
-            target = host_match.group(1).removeprefix("www.") if host_match else value
-        elif key in {"path", "file_path", "download_path"}:
-            path_parts = [part for part in re.split(r"[\\/]", value) if len(part) > 2]
-            target = next(
-                (part for part in reversed(path_parts) if part in {"downloads", "documents", "desktop", "artifacts"}),
-                path_parts[-1] if path_parts else value,
-            )
-        else:
-            target = value
-        if target and target not in request_evidence and not (
-            key in {"path", "file_path", "download_path"}
-            and any(part in request_evidence for part in path_parts)
-        ):
-            return False
+    for key in (
+        "url",
+        "uri",
+        "source_url",
+        "target_url",
+        "path",
+        "file_path",
+        "download_path",
+        "app",
+        "apps",
+    ):
+        raw_value = arguments.get(key)
+        values = raw_value if key == "apps" and isinstance(raw_value, list) else [raw_value]
+        for value in values:
+            if not isinstance(value, str) or not value.strip():
+                continue
+            value = value.strip().strip("`\"'").casefold()
+            path_parts: List[str] = []
+            if key in {"url", "uri", "source_url", "target_url"}:
+                host_match = re.search(r"https?://([^/:?#]+)", value)
+                target = host_match.group(1).removeprefix("www.") if host_match else value
+            elif key in {"path", "file_path", "download_path"}:
+                path_parts = [part for part in re.split(r"[\\/]", value) if len(part) > 2]
+                target = next(
+                    (
+                        part
+                        for part in reversed(path_parts)
+                        if part in {"downloads", "documents", "desktop", "artifacts"}
+                    ),
+                    path_parts[-1] if path_parts else value,
+                )
+            else:
+                target = value
+            if target and target not in request_evidence and not (
+                key in {"path", "file_path", "download_path"}
+                and any(part in request_evidence for part in path_parts)
+            ):
+                return False
     return True
 
 
@@ -1583,7 +1703,12 @@ def _ground_external_action_response(
             logger.warning("Suppressing ungrounded external action claim for: %s", query)
             return "I couldn't verify that requested app action was executed."
         return response
-    if any(_operation_failed(result) for result in action_results):
+    has_verified_success = any(
+        result.status == ResultStatus.COMPLETED.value
+        and result.verification_status == VerificationStatus.VERIFIED_SUCCESS.value
+        for result in action_results
+    )
+    if any(_operation_failed(result) for result in action_results) and not has_verified_success:
         logger.warning("Suppressing failed external action claim for: %s", query)
         if router.is_explicit_app_action(query):
             return "I couldn't complete that requested app action."
@@ -1595,7 +1720,7 @@ def _ground_external_action_response(
             VerificationStatus.VERIFICATION_UNAVAILABLE.value,
         }
         for result in action_results
-    ):
+    ) and not has_verified_success:
         logger.warning("Suppressing unverified external action claim for: %s", query)
         return "I executed the action, but I couldn't verify the resulting state."
     return response
@@ -2568,26 +2693,39 @@ class Brain:
 
         if current_page_read:
             try:
-                page_text = await loop.run_in_executor(
+                def _read_current_page(page):
+                    try:
+                        page_title = " ".join(str(page.title() or "").split())
+                    except Exception:
+                        page_title = ""
+                    return extract_visible_text(page, max_chars=50000), page_title
+
+                page_text, page_title = await loop.run_in_executor(
                     None,
                     lambda: browser_controller.run(
-                        lambda page: extract_visible_text(page, max_chars=50000), timeout=15.0
+                        _read_current_page, timeout=15.0
                     ),
                 )
             except Exception:
                 text = "I couldn't read the current browser page."
                 return _browser_outcome(text, reason="Current browser page read failed.") if return_envelope else text
-            if not page_text.strip():
+            if not page_text.strip() and not page_title:
                 text = "The current browser page has no readable content."
                 if return_envelope:
                     return _browser_outcome(text, reason="Current browser page had no readable content.")
                 return text
+            page_evidence = []
+            if page_title:
+                page_evidence.append(f"Page title: {page_title}")
+            if page_text.strip():
+                page_evidence.append(f"Visible page text:\n{page_text[:50000]}")
+            page_evidence_text = "\n".join(page_evidence)
             answer_prompt = (
                 "Answer the user's question using only the current browser page evidence below. "
                 "Do not navigate, use memory, or suggest another source. Be concise and state uncertainty "
                 "if evidence is missing.\n\n"
                 f"Question: {task}\n\nCurrent page URL: {get_session().last_url}\n"
-                f"Evidence:\n{page_text[:50000]}"
+                f"Evidence:\n{page_evidence_text}"
             )
             try:
                 answer, _ = await self._stream_completion(
@@ -2595,7 +2733,15 @@ class Brain:
                     generation,
                 )
                 text = answer.strip() or "The current page did not provide an answer."
-                return _browser_outcome(text, status=ResultStatus.COMPLETED.value) if return_envelope else text
+                return (
+                    _browser_outcome(
+                        text,
+                        status=ResultStatus.COMPLETED.value,
+                        data={"title": page_title} if page_title else {},
+                    )
+                    if return_envelope
+                    else text
+                )
             except Exception:
                 text = "I couldn't answer from the current browser page."
                 if return_envelope:
@@ -5145,6 +5291,7 @@ class Brain:
         if direct_screen_query and not effective_skip_tools:
             tool_calls = [call for call in tool_calls if call.get("name") == "desktop_screenshot"]
 
+        scope_notice_added = False
         tool_calls = router.maybe_inject_visual_screenshot_call(
             tool_calls, queue_visual_screenshot and not effective_skip_tools
         )
@@ -5160,6 +5307,8 @@ class Brain:
                 turn_id,
                 scope_suppressed,
             )
+            messages.append({"role": "system", "content": _SCOPE_FILTER_NOTICE})
+            scope_notice_added = True
         executed_action_results: List[ResultEnvelope] = []
 
         if primary_decision is None:
@@ -5253,25 +5402,43 @@ class Brain:
         # --- Tool execution loop ---
         _seen_tool_calls: Dict[str, ResultEnvelope] = {}
         _repeat_guard = _RepeatToolCallGuard()
-        # Desktop clicks/types are not idempotent -- two identical calls are
-        # two real actions, not a cache hit. Desktop perception (observe/
-        # read_screen/screenshot) isn't cacheable either -- the screen can
-        # change between calls even with identical (empty) arguments, e.g.
-        # another tool call opening/closing a window in between; a cached
-        # mark would then resolve to a dead COM proxy. Tracks consecutive
-        # failures of the same call for anomaly auto-halt.
+        # Cache only operations that declare it safe; observations stay fresh.
         _desktop_fail_counts: Dict[str, int] = {}
         _desktop_action_count = [0]  # mutable cell, closed over by _exec_one
         _turn_external_texts: List[str] = []  # tool_external results, fed to security_policy's injected-command check
         last_vision_answer: Optional[str] = None
+
+        def _record_repeat_result(
+            call: Dict[str, Any],
+            signature: str,
+            envelope: ResultEnvelope,
+            *,
+            track_no_progress: bool,
+            suppress_success_replay: bool,
+        ) -> int:
+            count = _repeat_guard.record_result(
+                signature,
+                envelope,
+                state_changed=(
+                    _operation_succeeded(envelope)
+                    and call["name"]
+                    not in {"desktop_observe", "desktop_read_screen", "desktop_screenshot", "desktop_windows"}
+                ),
+                track_no_progress=track_no_progress,
+                suppress_success_replay=suppress_success_replay,
+            )
+            if count == 2:
+                logger.warning("Tool %s returned the same successful result twice without progress.", call["name"])
+            return count
 
         def _finalize_operation_result(
             call: Dict[str, Any],
             envelope: ResultEnvelope,
             *,
             ck: str,
-            is_com: bool,
-            cache_result: bool = True,
+            cache_result: bool = False,
+            track_no_progress: bool = True,
+            suppress_success_replay: bool = False,
             update_desktop_failure: bool = True,
             record_failure_event: bool = True,
             common_finalized: bool = False,
@@ -5291,18 +5458,16 @@ class Brain:
                             "result_length": len(model_text),
                         },
                     )
-                if tool_name in _DESKTOP_CONTROL_TOOLS or tool_name == "shell_execute":
+                if _is_external_action_result(tool_name, call["arguments"]):
                     executed_action_results.append(local_envelope)
                 if tool_name == "memory" and _operation_succeeded(local_envelope):
                     self.reload_context()
-                _repeat_guard.record_result(
+                _record_repeat_result(
+                    call,
                     ck,
                     local_envelope,
-                    state_changed=(
-                        _operation_succeeded(local_envelope)
-                        and tool_name
-                        not in {"desktop_observe", "desktop_read_screen", "desktop_screenshot", "desktop_windows"}
-                    ),
+                    track_no_progress=track_no_progress,
+                    suppress_success_replay=suppress_success_replay,
                 )
                 if tool_name in _DESKTOP_CONTROL_TOOLS and update_desktop_failure:
                     if _operation_failed(local_envelope):
@@ -5322,7 +5487,17 @@ class Brain:
                     self._pending_vision_image_url = pop_pending_vision_image()
 
             if common_finalized:
-                if cache_result and not is_com:
+                # _execute_operation_primitive already ran the operation's
+                # shared finalizer. Keep the loop guard in sync without
+                # repeating callbacks, persistence, or side effects.
+                _record_repeat_result(
+                    call,
+                    ck,
+                    envelope,
+                    track_no_progress=track_no_progress,
+                    suppress_success_replay=suppress_success_replay,
+                )
+                if cache_result:
                     _seen_tool_calls[ck] = envelope
                 return envelope
 
@@ -5334,17 +5509,31 @@ class Brain:
                 record_failure_event=record_failure_event,
                 before_publish=_apply_turn_local,
             )
-            if cache_result and not is_com:
+            if cache_result:
                 _seen_tool_calls[ck] = envelope
             return envelope
 
         async def _exec_one(call: Dict[str, Any]) -> ResultEnvelope:
             nonlocal research_report
             tool_name = call["name"]
-            ck = f'{call["name"]}({json.dumps(call["arguments"], sort_keys=True)})'
+            ck = _repeat_tool_call_signature(tool_name, call["arguments"])
             op = capability_index.get_operation(tool_name)
             is_com = bool(op and op.executor_type == "com_thread")
-            if _repeat_guard.before(ck):
+            # Operations with explicit freshness metadata must re-observe. A
+            # missing descriptor is also not replayable because dynamic tools
+            # default to cacheable=False in the capability index.
+            freshness_sec = getattr(op, "freshness_sec", None)
+            fresh_observation = freshness_sec is not None or tool_name in {
+                "desktop_observe",
+                "desktop_read_screen",
+                "desktop_screenshot",
+                "desktop_windows",
+            }
+            cacheable = bool(op and getattr(op, "cacheable", False)) and not fresh_observation
+            if _repeat_guard.before(
+                ck,
+                suppress_success_replay=not cacheable and not fresh_observation,
+            ):
                 logger.warning("Suppressing repeated failed tool call: %s", ck)
                 suppression_message = _REPEATED_TOOL_RESULT
                 envelope = ResultEnvelope(
@@ -5366,14 +5555,22 @@ class Brain:
                     call,
                     envelope,
                     ck=ck,
-                    is_com=is_com,
                     cache_result=False,
+                    track_no_progress=not fresh_observation,
                     update_desktop_failure=False,
                     record_failure_event=False,
                 )
-            if not is_com and ck in _seen_tool_calls:
+            if cacheable and ck in _seen_tool_calls:
                 logger.info("Tool %s already executed, reusing result", call["name"])
-                return _seen_tool_calls[ck]
+                cached_result = _seen_tool_calls[ck]
+                _record_repeat_result(
+                    call,
+                    ck,
+                    cached_result,
+                    track_no_progress=not fresh_observation,
+                    suppress_success_replay=False,
+                )
+                return cached_result
             if diagnostic_trace is not None:
                 diagnostic_trace.mark(
                     "tool_start",
@@ -5421,7 +5618,6 @@ class Brain:
                     call,
                     envelope,
                     ck=ck,
-                    is_com=is_com,
                     common_finalized=False,
                 )
             elif tool_name in _DESKTOP_CONTROL_TOOLS and _desktop_action_count[0] >= self.config.desktop_max_actions:
@@ -5446,7 +5642,6 @@ class Brain:
                     call,
                     envelope,
                     ck=ck,
-                    is_com=is_com,
                     common_finalized=False,
                 )
             else:
@@ -5488,19 +5683,10 @@ class Brain:
                             "result_length": len(model_text),
                         },
                     )
-                if tool_name in _DESKTOP_CONTROL_TOOLS or tool_name == "shell_execute":
+                if _is_external_action_result(tool_name, call["arguments"]):
                     executed_action_results.append(local_envelope)
                 if tool_name == "memory" and _operation_succeeded(local_envelope):
                     self.reload_context()
-                _repeat_guard.record_result(
-                    ck,
-                    local_envelope,
-                    state_changed=(
-                        _operation_succeeded(local_envelope)
-                        and tool_name
-                        not in {"desktop_observe", "desktop_read_screen", "desktop_screenshot", "desktop_windows"}
-                    ),
-                )
                 if tool_name in _DESKTOP_CONTROL_TOOLS:
                     if _operation_failed(local_envelope):
                         _desktop_fail_counts[ck] = _desktop_fail_counts.get(ck, 0) + 1
@@ -5543,7 +5729,9 @@ class Brain:
                 call,
                 envelope,
                 ck=ck,
-                is_com=is_com,
+                cache_result=cacheable,
+                track_no_progress=not fresh_observation,
+                suppress_success_replay=not cacheable and not fresh_observation,
                 common_finalized=True,
             )
 
@@ -5619,17 +5807,9 @@ class Brain:
                 if self._turn_halted:
                     yield " Desktop control halted for this turn."
                 return
-            # Keep the model-facing tool text stable; structured operation outcomes stay in
-            # the typed callback/persistence boundary above.
+            # Give the model the real operation result. Do not turn short values or
+            # tool-specific errors into a search-specific fallback.
             exec_results = [_result_envelope_to_model_text(result) for result in operation_results]
-
-            # Step 3: Post-tool confidence gate - replace low-quality results
-            exec_results = [
-                r
-                if _assess_tool_result_relevance(c["name"], r)
-                else "Error: Search returned no useful results. Proceed with general knowledge."
-                for c, r in zip(tool_calls, exec_results)
-            ]
 
             for c, r in zip(tool_calls, exec_results):
                 if trust_level_for_tool(c["name"]) == "tool_external":
@@ -5667,7 +5847,8 @@ class Brain:
 
             messages = await _prep_messages(messages, self.config)
 
-            followup_payload = self._build_payload(messages)
+            repeat_limit_reached = _repeat_guard.should_stop_for_no_progress
+            followup_payload = self._build_payload(messages, skip_tools=repeat_limit_reached)
             payload_has_vision = _payload_is_vision(followup_payload)
             if payload_has_vision and self._vision_client is None:
                 logger.warning("Local vision model is unavailable; no visual fallback will be attempted.")
@@ -5732,10 +5913,16 @@ class Brain:
                     logger.warning("Optional follow-up failed; returning the last valid local vision result.")
                     yield last_vision_answer
                     return
+                interruption = (
+                    "I stopped after five identical successful tool results made no progress, "
+                    "and the final response failed."
+                    if repeat_limit_reached
+                    else "I couldn't finish because the follow-up model call failed."
+                )
                 yield _verified_partial_result_reply(
                     original_user_input,
                     turn_operation_results,
-                    "I couldn't finish because the follow-up model call failed.",
+                    interruption,
                 ) or (
                     "I ran into a problem getting a response back just now "
                     "(the follow-up model call failed) -- try asking again."
@@ -5755,8 +5942,8 @@ class Brain:
                     logger.warning("Vision model returned no usable description.")
                     yield "Local vision model returned no usable description."
                     return
-            tool_calls = collect_tool_calls(state.tc_by_index)
-            if not tool_calls and accumulated:
+            tool_calls = [] if repeat_limit_reached else collect_tool_calls(state.tc_by_index)
+            if not repeat_limit_reached and not tool_calls and accumulated:
                 tool_calls = self._extract_tool_calls(accumulated)
             if tool_calls and _verified_requested_shell_facts_complete(
                 original_user_input,
@@ -5780,6 +5967,9 @@ class Brain:
                         turn_id,
                         scope_suppressed,
                     )
+                    if not scope_notice_added:
+                        messages.append({"role": "system", "content": _SCOPE_FILTER_NOTICE})
+                        scope_notice_added = True
                     if not tool_calls:
                         accumulated = _verified_requested_shell_fact_reply(
                             original_user_input,
@@ -5803,7 +5993,11 @@ class Brain:
                 verified_summary = _verified_partial_result_reply(
                     original_user_input,
                     turn_operation_results,
-                    "I couldn't produce a final response after the tool call.",
+                    (
+                        "I stopped after five identical successful tool results made no progress."
+                        if repeat_limit_reached
+                        else "I couldn't produce a final response after the tool call."
+                    ),
                 )
                 yield verified_summary or (
                     "I couldn't get a final response after the tool call, so I can't confirm the requested result."

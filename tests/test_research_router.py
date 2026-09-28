@@ -74,6 +74,18 @@ def test_current_lookup_is_not_automatically_backgrounded():
     assert is_sustained_research_query(query, decision) is False
 
 
+def test_memory_and_reminder_updates_with_relative_time_are_not_research():
+    decision = route(
+        "Correct the NIST task notes from the failed attempt. Update structured memory and remove "
+        "the retry notes. Update the existing reminder to fire five minutes from now in Asia/Kolkata."
+    )
+    assert decision.should_research is False
+    assert decision.reason == "local state update"
+
+    mixed = route("Research the official NIST publication and then update the existing reminder.")
+    assert mixed.should_research is True
+
+
 def test_current_request_asking_for_sources_fetches_documents():
     decision = route("latest major AI developments today with sources")
     assert decision.should_research is True
@@ -101,6 +113,19 @@ def test_research_router_routes_factual_and_comparison_queries():
 
 def test_current_queries_use_extraction_capable_standard_mode():
     assert route("What is the latest Python release?").mode is ResearchMode.STANDARD
+
+
+@pytest.mark.parametrize(
+    "query, expected_mode",
+    [
+        ("Research the current Python release", ResearchMode.STANDARD),
+        ("Deep research current browser agent security", ResearchMode.DEEP),
+        ("What is WebAssembly and what is it used for?", ResearchMode.STANDARD),
+        ("latest Python release", ResearchMode.QUICK),
+    ],
+)
+def test_explicit_research_intent_overrides_quick_but_simple_lookup_stays_quick(query, expected_mode):
+    assert route(query, ResearchMode.QUICK).mode is expected_mode
 
 
 @pytest.mark.parametrize(
@@ -240,7 +265,7 @@ async def test_quick_research_does_not_launch_browser(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_standard_research_fetches_and_cites_sources(monkeypatch):
+async def test_explicit_research_overrides_quick_and_fetches_cites_sources(monkeypatch):
     config = SimpleNamespace(
         research_enabled=True,
         research_max_search_queries=2,
@@ -268,7 +293,8 @@ async def test_standard_research_fetches_and_cites_sources(monkeypatch):
     monkeypatch.setattr("charlie.research.engine.fetch_document", fake_fetch)
     engine = ResearchEngine(config)
     monkeypatch.setattr(engine, "_providers", lambda: [_Provider()])
-    report = await engine.run("research current Python release", "standard")
+    report = await engine.run("research current Python release", "quick")
+    assert report.mode is ResearchMode.STANDARD
     assert report.sources
     assert report.citations[0].source_id == "S1"
     assert "[S1]" in report.prompt_context()

@@ -109,7 +109,11 @@ async def test_budget_exhaustion(monkeypatch, brain_config):
     async for chunk in brain.chat_stream("test"):
         results.append(chunk)
 
-    assert any("tool limit" in str(r) for r in results)
+    assert any(
+        marker in str(result).casefold()
+        for result in results
+        for marker in ("tool limit", "repeated", "no progress")
+    )
 
 
 @pytest.mark.asyncio
@@ -1776,8 +1780,9 @@ async def test_background_chat_keeps_memory_history_while_foreground_reloads_sto
 
 
 @pytest.mark.asyncio
-async def test_native_tool_result_returns_with_matching_id_and_final_answer(monkeypatch):
-    """Exercise the complete native call -> tool result -> model answer loop."""
+@pytest.mark.parametrize("tool_result_text", ["No results found.", "Error: upstream timed out"])
+async def test_native_tool_result_preserves_short_and_error_text(monkeypatch, tool_result_text):
+    """Pass short results and exact failures to the model with the native call ID."""
     from charlie.core import Brain
     from charlie.turn_contracts import TurnRequest
 
@@ -1812,7 +1817,7 @@ async def test_native_tool_result_returns_with_matching_id_and_final_answer(monk
     monkeypatch.setattr(brain, "_stream_followup_once", mock_followup)
     monkeypatch.setattr(
         "charlie.tools.registry.execute_tool_structured",
-        lambda _name, _args: "Observed source result is sufficiently detailed and relevant for a grounded answer.",
+        lambda _name, _args: tool_result_text,
     )
 
     request = TurnRequest(
@@ -1844,12 +1849,52 @@ async def test_native_tool_result_returns_with_matching_id_and_final_answer(monk
     tool_result = next(message for message in messages if message.get("role") == "tool")
     assert assistant_call["tool_calls"][0]["id"] == tool_call["id"]
     assert tool_result["tool_call_id"] == tool_call["id"]
-    assert tool_result["content"] == (
-        "Observed source result is sufficiently detailed and relevant for a grounded answer."
-    )
+    assert tool_result["content"] == tool_result_text
     assert chunks == ["The source says the Charlie test query is confirmed by an observed result."]
     assert len(decisions) == 1
     assert decisions[0].turn_id == request.turn_id
+
+
+@pytest.mark.asyncio
+async def test_scope_filtered_tool_is_explained_to_no_tool_followup(monkeypatch):
+    brain = Brain(
+        Config(
+            llm_url="https://provider.example/v1",
+            llm_key="test-key",
+            llm_model="test-model",
+            native_tool_calling=True,
+            vision_enabled=False,
+            iteration_budget_max=2,
+        ),
+        register_panic_hotkey=False,
+    )
+    payloads = []
+
+    async def mock_completion(payload, _generation):
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return "", [{
+                "id": "call_unrequested_shell",
+                "name": "shell_execute",
+                "arguments": {"command": "Get-ChildItem"},
+            }]
+        return "I didn't run that command. The requested page title is not available yet.", []
+
+    monkeypatch.setattr(brain, "_stream_completion", mock_completion)
+    try:
+        reply = "".join([chunk async for chunk in brain.chat_stream("What is the title of example.com?")])
+    finally:
+        await brain.close()
+
+    assert len(payloads) == 2
+    assert "tools" not in payloads[1]
+    assert any(
+        message.get("role") == "system"
+        and "were not run" in message.get("content", "")
+        and "Do not retry" in message.get("content", "")
+        for message in payloads[1]["messages"]
+    )
+    assert "didn't run" in reply
 
 
 @pytest.mark.asyncio

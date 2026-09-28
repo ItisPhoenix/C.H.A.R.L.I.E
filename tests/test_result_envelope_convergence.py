@@ -2,6 +2,7 @@
 
 import asyncio
 import inspect
+import json
 
 import pytest
 
@@ -378,6 +379,185 @@ async def test_repeated_call_suppression_emits_blocked_envelopes_and_preserves_i
         == ("turn-repeat", "task-repeat", "session-repeat")
         for envelope in envelopes
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("final_fails", [False, True])
+async def test_repeated_successful_call_stops_at_five_and_uses_one_no_tool_final(
+    monkeypatch, caplog, final_fails
+):
+    brain = Brain(
+        Config(
+            llm_url="http://localhost:11434",
+            llm_key="no-key",
+            llm_model="dummy",
+            native_tool_calling=True,
+            iteration_budget_max=12,
+        )
+    )
+    brain._use_native_tools = True
+    operation = core.capability_index.get_operation("file_read")
+    assert operation is not None
+    monkeypatch.setattr(operation, "cacheable", True, raising=False)
+    monkeypatch.setattr(operation, "freshness_sec", None, raising=False)
+    initial_call = {
+        "id": "call_read_1",
+        "name": "file_read",
+        "arguments": {"path": "notes.txt"},
+    }
+    execution_calls = []
+    followup_payloads = []
+    envelopes = []
+
+    async def initial_completion(_payload, _generation):
+        return "", [initial_call]
+
+    async def repeated_followup(_client, _model, payload, _generation, state, *_args):
+        followup_payloads.append(payload)
+        if "tools" not in payload:
+            if final_fails:
+                raise RuntimeError("final response unavailable")
+            state.accumulated = "I read the note and stopped repeating the same result."
+            yield state.accumulated
+            return
+
+        repeat_number = sum("tools" in item for item in followup_payloads)
+        state.tc_by_index = {
+            0: {
+                "id": f"call_read_{repeat_number + 1}",
+                "name": "file_read",
+                "arguments": json.dumps({"path": "notes.txt"}),
+            }
+        }
+        if False:
+            yield ""
+
+    def execute_read(tool_name, arguments):
+        execution_calls.append((tool_name, arguments))
+        return ToolExecutionResult(
+            "Verified note contents.",
+            structured_data={"verified": True},
+        )
+
+    brain.on_operation_result = lambda _name, envelope: envelopes.append(envelope)
+    monkeypatch.setattr(brain, "_stream_completion", initial_completion)
+    monkeypatch.setattr(brain, "_stream_followup_once", repeated_followup)
+    monkeypatch.setattr("charlie.tools.registry.execute_tool", execute_read)
+
+    try:
+        with caplog.at_level("WARNING", logger="charlie.core"):
+            chunks = [
+                chunk
+                async for chunk in brain.chat_stream(
+                    "Read notes.txt and summarize it.",
+                    platform="text",
+                    session_id="session-repeat-success",
+                    task_id="task-repeat-success",
+                    turn_id="turn-repeat-success",
+                )
+            ]
+    finally:
+        await brain.close()
+
+    assert len(execution_calls) == 1
+    assert len(envelopes) == 1
+    assert len(followup_payloads) == 5
+    assert all("tools" in payload for payload in followup_payloads[:-1])
+    assert "tools" not in followup_payloads[-1]
+    assert sum("twice without progress" in record.message for record in caplog.records) == 1
+
+    messages = followup_payloads[-1]["messages"]
+    call_ids = [
+        call["id"]
+        for message in messages
+        if message.get("role") == "assistant"
+        for call in message.get("tool_calls", [])
+    ]
+    result_ids = [message["tool_call_id"] for message in messages if message.get("role") == "tool"]
+    assert call_ids == [f"call_read_{index}" for index in range(1, 6)]
+    assert result_ids == call_ids
+
+    if final_fails:
+        assert len(chunks) == 1
+        assert chunks[0].startswith("Verified so far: Verified note contents.")
+        assert "Status: I stopped after five identical successful tool results" in chunks[0]
+    else:
+        assert chunks == ["I read the note and stopped repeating the same result."]
+
+
+@pytest.mark.asyncio
+async def test_fresh_window_observations_bypass_cache_and_no_progress_stop(monkeypatch, caplog):
+    brain = Brain(
+        Config(
+            llm_url="http://localhost:11434",
+            llm_key="no-key",
+            llm_model="dummy",
+            native_tool_calling=True,
+            iteration_budget_max=6,
+        )
+    )
+    brain._use_native_tools = True
+    operation = core.capability_index.get_operation("desktop_windows")
+    assert operation is not None
+    monkeypatch.setattr(operation, "cacheable", True, raising=False)
+    monkeypatch.setattr(operation, "freshness_sec", 0.0, raising=False)
+    initial_call = {"id": "call_windows_1", "name": "desktop_windows", "arguments": {}}
+    execution_calls = []
+    followup_payloads = []
+
+    async def initial_completion(_payload, _generation):
+        return "", [initial_call]
+
+    async def repeated_followup(_client, _model, payload, _generation, state, *_args):
+        followup_payloads.append(payload)
+        if "tools" not in payload:
+            pytest.fail("fresh observations must not trigger the no-progress final attempt")
+        repeat_number = len(followup_payloads)
+        if repeat_number == 5:
+            state.accumulated = "I observed the current windows."
+            yield state.accumulated
+            return
+        state.tc_by_index = {
+            0: {
+                "id": f"call_windows_{repeat_number + 1}",
+                "name": "desktop_windows",
+                "arguments": "{}",
+            }
+        }
+        if False:
+            yield ""
+
+    def observe_windows(tool_name, arguments):
+        execution_calls.append((tool_name, arguments))
+        return ToolExecutionResult(
+            "The open windows are unchanged.",
+            structured_data={"verified": True},
+        )
+
+    monkeypatch.setattr(brain, "_stream_completion", initial_completion)
+    monkeypatch.setattr(brain, "_stream_followup_once", repeated_followup)
+    monkeypatch.setattr("charlie.tools.registry.execute_tool", observe_windows)
+
+    try:
+        with caplog.at_level("WARNING", logger="charlie.core"):
+            chunks = [
+                chunk
+                async for chunk in brain.chat_stream(
+                    "List open windows.",
+                    platform="text",
+                    session_id="session-window-repeat",
+                    task_id="task-window-repeat",
+                    turn_id="turn-window-repeat",
+                )
+            ]
+    finally:
+        await brain.close()
+
+    assert len(execution_calls) == 5
+    assert len(followup_payloads) == 5
+    assert all("tools" in payload for payload in followup_payloads)
+    assert not any("twice without progress" in record.message for record in caplog.records)
+    assert chunks == ["I observed the current windows."]
 
 
 @pytest.mark.asyncio

@@ -202,6 +202,7 @@ def test_click_mark_falls_back_to_pyautogui_when_invoke_unsupported(fake_pyautog
 
 def test_type_text_uses_uia_set_value_when_supported(fake_pyautogui):
     value_pattern = MagicMock()
+    value_pattern.Value = "hello"
     control = _FakeUiaControl(value_pattern=value_pattern)
     _register_live_control(3, control)
     result = actions.type_text(3, "hello")
@@ -211,13 +212,23 @@ def test_type_text_uses_uia_set_value_when_supported(fake_pyautogui):
     assert "Typed" in result
 
 
-def test_type_text_reports_verified_when_readback_matches(fake_pyautogui):
+def test_type_text_reports_value_readback_without_claiming_app_state(fake_pyautogui):
     value_pattern = MagicMock()
     value_pattern.Value = "hello"
     control = _FakeUiaControl(value_pattern=value_pattern)
     _register_live_control(6, control)
     result = actions.type_text(6, "hello")
-    assert "verified" in result
+
+    from charlie.core import _normalize_tool_result
+    from charlie.turn_contracts import ResultStatus, VerificationStatus
+
+    envelope = _normalize_tool_result(
+        "desktop_type", result, request="type hello", turn_id="turn", task_id="task", session_id="session"
+    )
+    assert "ValuePattern read-back matched" in result
+    assert "verified" not in result.casefold()
+    assert envelope.status == ResultStatus.UNVERIFIED
+    assert envelope.verification_status == VerificationStatus.EXECUTED_UNVERIFIED
     assert "did not match" not in result
 
 
@@ -227,7 +238,45 @@ def test_type_text_reports_mismatch_when_readback_differs(fake_pyautogui):
     control = _FakeUiaControl(value_pattern=value_pattern)
     _register_live_control(7, control)
     result = actions.type_text(7, "hello")
+
+    from charlie.core import _normalize_tool_result
+    from charlie.turn_contracts import ResultStatus, VerificationStatus
+
+    envelope = _normalize_tool_result(
+        "desktop_type", result, request="type hello", turn_id="turn", task_id="task", session_id="session"
+    )
+    assert result.startswith("Error:")
     assert "did not match" in result
+    assert envelope.status == ResultStatus.FAILED
+    assert envelope.verification_status == VerificationStatus.EXECUTED_UNVERIFIED
+
+
+def test_low_confidence_physical_typing_keeps_unverified_result(fake_pyautogui, monkeypatch):
+    from charlie.core import _normalize_tool_result
+    from charlie.turn_contracts import ResultStatus, VerificationStatus
+
+    mark_id = 9999
+    element = uia.Element(
+        mark_id=mark_id,
+        name="Search",
+        control_type="Edit",
+        bounds=(10, 10, 50, 50),
+        is_password=False,
+        is_offscreen=False,
+    )
+    monkeypatch.setitem(uia._controls, mark_id, element)
+    assert uia.is_low_confidence_mark(mark_id) is True
+
+    result = actions.type_text(mark_id, "hello")
+    envelope = _normalize_tool_result(
+        "desktop_type", result, request="type hello", turn_id="turn", task_id="task", session_id="session"
+    )
+
+    fake_pyautogui.click.assert_called_once_with(30, 30)
+    fake_pyautogui.typewrite.assert_called_once_with("hello", interval=0.02)
+    assert "no automatic postcondition check" in result
+    assert envelope.status == ResultStatus.UNVERIFIED
+    assert envelope.verification_status == VerificationStatus.EXECUTED_UNVERIFIED
 
 
 def test_type_text_falls_back_to_pyautogui_when_set_value_unsupported(fake_pyautogui):

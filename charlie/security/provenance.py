@@ -1,10 +1,9 @@
 """Trust-level tagging for tool results.
 
 Deterministic, out-of-band classification by tool name -- not something the
-LLM can influence -- so text that came from the open web, a rendered page, an
-MCP server, on-screen content, or stored vector memory can be told apart from
-what the user actually typed. Everything else (config, user turns) is
-trusted by default.
+LLM can influence -- so retrieved file, session, graph, web, MCP, and screen
+content can be told apart from what the user typed in this turn. Everything
+else (config, user turns) is trusted by default.
 """
 
 from typing import Literal
@@ -14,6 +13,9 @@ TrustLevel = Literal["config", "user_turn", "tool_external"]
 # Tools whose results carry attacker-influenceable text.
 _EXTERNAL_TOOL_NAMES = frozenset(
     {
+        "file_read",
+        "session_search",
+        "graph_query",
         "web_search",
         "web_research",
         "browser_read",

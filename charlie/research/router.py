@@ -37,6 +37,11 @@ _BACKGROUND_TASK_REQUEST = re.compile(
     r"\b(?:start|create|run|schedule)\s+(?:a\s+)?background\s+(?:task|job)\b",
     re.IGNORECASE,
 )
+_LOCAL_STATE_UPDATE = re.compile(
+    r"\b(?:update|change|reschedule|cancel|remove|delete|edit|replace|correct)\b"
+    r"(?s:.{0,160}?)\b(?:memory|notes?|reminder|schedule|task)\b",
+    re.IGNORECASE,
+)
 _BRIEFING_SIGNALS = re.compile(
     r"\b(?:briefing|news\s+roundup|news\s+digest|daily\s+summary|intelligence\s+briefing)\b",
     re.IGNORECASE,
@@ -83,7 +88,13 @@ def choose_mode(query: str, requested: str | ResearchMode | None = None) -> Rese
     """Choose research mode without making the LLM responsible for obvious routing."""
     explicit = _coerce_mode(requested)
     text = query.strip()
-    if explicit is not None:
+    requires_fetched_sources = (
+        is_briefing_query(text)
+        or _RESEARCH_SIGNALS.search(text) is not None
+        or _FACTUAL_RESEARCH.search(text) is not None
+        or _SPECIALIZED_FACTUAL.search(text) is not None
+    )
+    if explicit is not None and (explicit is not ResearchMode.QUICK or not requires_fetched_sources):
         return ResearchDecision(True, explicit, "explicit mode")
     if _BACKGROUND_TASK_REQUEST.search(text) and not _RESEARCH_SIGNALS.search(text):
         return ResearchDecision(False, None, "explicit background task request")
@@ -94,6 +105,10 @@ def choose_mode(query: str, requested: str | ResearchMode | None = None) -> Rese
     if _RESEARCH_SIGNALS.search(text):
         mode = ResearchMode.DEEP if re.search(r"deep|in[- ]depth|thorough", text, re.I) else ResearchMode.STANDARD
         return ResearchDecision(True, mode, "explicit research intent")
+    # Relative reminder times contain freshness words such as "now" and "schedule".
+    # Keep clear local state edits on the tool path instead of sending them to web search.
+    if _LOCAL_STATE_UPDATE.search(text):
+        return ResearchDecision(False, None, "local state update")
     if re.search(r"\bversion\b", text, re.IGNORECASE) and _LOCAL_VERSION_CONTEXT.search(text):
         return ResearchDecision(False, None, "local installed-version lookup")
     if _SOCIAL_CONVERSATION_SIGNALS.search(text):

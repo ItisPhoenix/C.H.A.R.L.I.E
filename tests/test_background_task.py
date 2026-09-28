@@ -894,9 +894,49 @@ def test_check_interrupted_task_reconciles_persisted_non_terminal_background_rec
 
     record = journal.get(f"restart-{status.value}")
     assert record.status is TaskStatus.FAILED
-    assert record.error_summary == "Charlie restarted while this task was still running."
+    assert record.error_summary == background_task._RESTART_ERROR
     restored = TaskJournal(state_path=tmp_path / "task-journal.json")
     assert restored.get(record.id).status is TaskStatus.FAILED
+
+
+def test_restart_reconciliation_keeps_ambiguous_work_failed_without_resubmitting(monkeypatch, tmp_path):
+    journal = _journal_with_path(monkeypatch, tmp_path)
+    journal.create_task(
+        "Submit a payment",
+        task_id="uncertain-payment",
+        origin=TaskOrigin.BACKGROUND,
+        status=TaskStatus.RUNNING,
+        current_step=1,
+        total_steps=2,
+    )
+    _write_legacy_state(
+        {
+            "id": "uncertain-payment",
+            "text": "Submit a payment",
+            "steps": ["Submit payment", "Verify receipt"],
+            "current_step": 1,
+            "status": "running",
+        }
+    )
+    submissions = []
+    monkeypatch.setattr(
+        background_task._manager,
+        "submit",
+        lambda *args, **kwargs: submissions.append((args, kwargs)),
+    )
+
+    interrupted = background_task.check_interrupted_task()
+    assert interrupted["status"] == "failed"
+    assert "outcome is unverified" in interrupted["error"]
+    assert submissions == []
+
+    reopened = TaskJournal(state_path=tmp_path / "task-journal.json")
+    monkeypatch.setattr(background_task, "_journal", reopened)
+    assert background_task.check_interrupted_task() is None
+    record = reopened.get("uncertain-payment")
+    assert record.status is TaskStatus.FAILED
+    assert "outcome is unverified" in record.error_summary
+    assert submissions == []
 
 
 @pytest.mark.parametrize(
@@ -1017,7 +1057,7 @@ def test_check_interrupted_task_returns_existing_legacy_interruption_after_canon
     assert result["current_step"] == 1
     assert result["steps"] == ["Open console", "Inspect logs", "Report"]
     assert result["status"] == "failed"
-    assert result["error"] == "Charlie restarted while this task was still running."
+    assert result["error"] == background_task._RESTART_ERROR
     assert journal.get("matching-legacy").status is TaskStatus.FAILED
     assert background_task.check_interrupted_task() is None
 
@@ -1062,7 +1102,7 @@ def test_active_legacy_state_without_canonical_record_is_reconstructed_and_faile
     assert record.total_steps == 3
     assert record.progress == pytest.approx(1 / 3)
     assert record.status is TaskStatus.FAILED
-    assert record.error_summary == "Charlie restarted while this task was still running."
+    assert record.error_summary == background_task._RESTART_ERROR
 
 
 def test_active_legacy_state_without_id_gets_generated_canonical_task(monkeypatch, tmp_path):

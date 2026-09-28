@@ -63,15 +63,18 @@ logger = logging.getLogger("charlie.background_task")
 _POLL_INTERVAL_SEC = 2.0
 _STEP_RE = re.compile(r"^\s*\d+[.)]\s+(.+)$")
 # Mirrors charlie/recovery_cache.py's dotfile-in-cwd convention.
-_STATE_FILE = ".charlie_background_task_state.json"
-_JOURNAL_FILE = ".charlie_task_journal.json"
+_STATE_FILE = os.getenv("CHARLIE_BACKGROUND_TASK_STATE_PATH", ".charlie_background_task_state.json")
+_JOURNAL_FILE = os.getenv("CHARLIE_TASK_JOURNAL_PATH", ".charlie_task_journal.json")
 _TERMINAL_STATUSES = ("done", "failed", "cancelled")
 _CANONICAL_TERMINAL_STATUSES = frozenset({
     CanonicalTaskStatus.COMPLETED,
     CanonicalTaskStatus.FAILED,
     CanonicalTaskStatus.CANCELLED,
 })
-_RESTART_ERROR = "Charlie restarted while this task was still running."
+_RESTART_ERROR = (
+    "Charlie restarted while this task was still running; the outcome is unverified. "
+    "Review before retrying."
+)
 RESTART_ERROR = _RESTART_ERROR
 # Heuristic pre-scan over free-text plan steps, not a guarantee -- the real gate runs during execution.
 _DESKTOP_KEYWORD_RE = re.compile(

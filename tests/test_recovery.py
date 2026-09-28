@@ -91,6 +91,30 @@ def test_strategies_can_handle():
     assert search_strategy.can_handle({"failure_class": FailureClass.NOT_FOUND}) is True
     assert resolve_strategy.can_handle({"failure_class": FailureClass.NOT_FOUND}) is True
 
+
+@pytest.mark.asyncio
+async def test_timeout_recovery_does_not_launch_a_second_copy(monkeypatch):
+    from charlie import recovery, recovery_cache
+
+    launches = []
+    monkeypatch.setattr(recovery, "RECOVERY_REGISTRY", [DeclassProcessStrategy()])
+    monkeypatch.setattr(recovery_cache, "get_cached_resolution", lambda *_args: None)
+    monkeypatch.setattr(
+        recovery.subprocess,
+        "Popen",
+        lambda *args, **kwargs: launches.append((args, kwargs)),
+    )
+
+    result = await recovery.recover_tool(
+        brain=None,
+        tool_name="shell_execute",
+        arguments={"command": "start notepad"},
+        e=subprocess.TimeoutExpired(cmd="start notepad", timeout=30),
+    )
+
+    assert result is None
+    assert launches == []
+
 def test_recovery_cache():
     # Clean cache first
     if os.path.exists(CACHE_FILE):

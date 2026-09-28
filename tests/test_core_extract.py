@@ -6,7 +6,15 @@ Text-mode (local models) must still match bare patterns.
 
 from unittest.mock import MagicMock, patch
 
-from charlie.core import Brain, _RepeatToolCallGuard
+from charlie.core import (
+    Brain,
+    _ground_external_action_response,
+    _is_external_action_result,
+    _repeat_tool_call_signature,
+    _RepeatToolCallGuard,
+    _tool_target_has_provenance,
+)
+from charlie.turn_contracts import ResultEnvelope, ResultStatus, VerificationStatus
 
 
 class TestRepeatToolCallGuard:
@@ -27,6 +35,73 @@ class TestRepeatToolCallGuard:
         assert guard.before("shell_execute({})") is True
         assert guard.before("shell_execute({})") is True
         assert guard.should_escape is True
+
+    def test_identical_successes_stop_after_five_unchanged_outcomes(self):
+        guard = _RepeatToolCallGuard()
+        outcome = ResultEnvelope(status=ResultStatus.COMPLETED, result="same result")
+
+        counts = [guard.record_result("file_read:{}", outcome) for _ in range(5)]
+
+        assert counts == [1, 2, 3, 4, 5]
+        assert guard.should_stop_for_no_progress is True
+
+    def test_fresh_observations_are_exempt_from_no_progress_tracking(self):
+        guard = _RepeatToolCallGuard()
+        outcome = ResultEnvelope(status=ResultStatus.COMPLETED, result="same screen")
+
+        counts = [
+            guard.record_result("desktop_windows:{}", outcome, track_no_progress=False)
+            for _ in range(7)
+        ]
+
+        assert counts == [0] * 7
+        assert guard.should_stop_for_no_progress is False
+
+    def test_completed_non_cacheable_action_is_suppressed_before_replay(self):
+        guard = _RepeatToolCallGuard()
+        outcome = ResultEnvelope(status=ResultStatus.COMPLETED, result="Notepad closed.")
+
+        guard.record_result("desktop_close_app:Notepad", outcome, suppress_success_replay=True)
+
+        assert guard.before("desktop_close_app:Notepad", suppress_success_replay=True) is True
+
+    def test_repeat_signature_ignores_argument_key_order(self):
+        assert _repeat_tool_call_signature("file_read", {"path": "notes.txt", "options": {"a": 1, "b": 2}}) == (
+            _repeat_tool_call_signature("file_read", {"options": {"b": 2, "a": 1}, "path": "notes.txt"})
+        )
+
+    def test_close_forms_share_one_replay_signature(self):
+        assert _repeat_tool_call_signature("desktop_close_app", {"apps": ["Notepad"]}) == (
+            _repeat_tool_call_signature("desktop_window", {"action": "close", "window": "Notepad"})
+        )
+
+
+def test_close_app_scope_accepts_registered_app_list():
+    assert _tool_target_has_provenance(
+        {"name": "desktop_close_app", "arguments": {"apps": ["notepad"], "processes": ["notepad.exe"]}},
+        "Charlie, please close Notepad.",
+        [],
+    )
+
+
+def test_window_observation_is_not_grounded_as_external_action():
+    assert _is_external_action_result("desktop_window", {"action": "list"}) is False
+    assert _is_external_action_result("desktop_window", {"action": "close", "window": "Notepad"}) is True
+
+
+def test_verified_action_survives_later_failed_observation():
+    verified_close = ResultEnvelope(
+        status=ResultStatus.COMPLETED,
+        verification_status=VerificationStatus.VERIFIED_SUCCESS,
+        result="Notepad has been closed for you.",
+    )
+    failed_followup = ResultEnvelope(status=ResultStatus.FAILED, result="Error: observation failed")
+
+    assert _ground_external_action_response(
+        "Charlie, please close Notepad.",
+        "Notepad has been closed for you.",
+        [verified_close, failed_followup],
+    ) == "Notepad has been closed for you."
 
 
 def _make_brain(use_native_tools: bool) -> Brain:

@@ -247,53 +247,28 @@ async def recover_tool(
                         return None
                     if res.success and res.command:
                         if res.command == command:
-                            if not is_safe_to_recover(res.command):
-                                continue
-                            from charlie.tools import is_shell_command_gated
-                            gate_reason = is_shell_command_gated(res.command)
-                            if gate_reason:
-                                approval_res = await request_recovery_approval(
-                                    original_command=command,
-                                    proposed_command=res.command,
-                                    failure_class=failure_class.value,
-                                    explanation=res.message or f"Retry requires approval: {gate_reason}",
-                                    source="strategy",
-                                    execution_context=execution_context,
-                                )
-                                if approval_res is not None:
-                                    return approval_res
-                                continue
-                            try:
-                                if execution_context is not None and execution_context.cancellation_requested:
-                                    return None
-                                logger.info("Executing automatic local recovery strategy: %s", res.command)
-                                if type(strategy).__name__ == "DeclassProcessStrategy":
-                                    subprocess.Popen(
-                                        f'start "" {res.command}', shell=True,
-                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                        creationflags=subprocess.DETACHED_PROCESS if sys.platform == "win32" else 0,
-                                        close_fds=True
-                                    )
-                                    return res.message or "Process launched in background."
-                            except Exception as exec_exc:
-                                logger.warning("Automatic strategy execution failed: %s", exec_exc)
-                        else:
-                            explanation = (
-                                res.message or
-                                f"Recovery strategy {type(strategy).__name__} resolved command executable."
+                            logger.info(
+                                "Skipping automatic retry of unchanged command after %s; "
+                                "the original outcome may be uncertain.",
+                                failure_class.value,
                             )
-                            approval_res = await request_recovery_approval(
-                                original_command=command,
-                                proposed_command=res.command,
-                                failure_class=failure_class.value,
-                                explanation=explanation,
-                                source="strategy",
-                                execution_context=execution_context,
-                            )
-                            if approval_res is not None:
-                                if "rejected" not in approval_res.lower() and "error" not in approval_res.lower():
-                                    set_cached_resolution(command, failure_class.value, error_msg, res.command)
-                                return approval_res
+                            continue
+                        explanation = (
+                            res.message or
+                            f"Recovery strategy {type(strategy).__name__} resolved command executable."
+                        )
+                        approval_res = await request_recovery_approval(
+                            original_command=command,
+                            proposed_command=res.command,
+                            failure_class=failure_class.value,
+                            explanation=explanation,
+                            source="strategy",
+                            execution_context=execution_context,
+                        )
+                        if approval_res is not None:
+                            if "rejected" not in approval_res.lower() and "error" not in approval_res.lower():
+                                set_cached_resolution(command, failure_class.value, error_msg, res.command)
+                            return approval_res
                 except Exception as strat_exc:
                     logger.warning("Strategy execution failed: %s", strat_exc)
 
@@ -309,17 +284,12 @@ class BaseRecoveryStrategy:
         raise NotImplementedError()
 
 class DeclassProcessStrategy(BaseRecoveryStrategy):
-    """Strategy for TIMEOUT: proposes a detached relaunch of the same command.
-
-    Does not execute anything itself -- recover_tool's orchestrator is the
-    single place that safety-checks, gate-checks, and launches, so a
-    strategy can never bypass either check by acting before it runs.
-    """
+    """Recognize timeouts without replaying a command whose outcome is uncertain."""
     def can_handle(self, failure: Dict[str, Any]) -> bool:
         return failure["failure_class"] == FailureClass.TIMEOUT
 
     async def recover(self, command: str, failure: Dict[str, Any]) -> RecoveryResult:
-        return RecoveryResult(success=True, command=command, message="Process launched in background.")
+        return RecoveryResult(success=False, error="Automatic retry disabled after command timeout")
 
 class SystemPathSearchStrategy(BaseRecoveryStrategy):
     """Strategy for NOT_FOUND: searches PATH, registry and standard program folders."""

@@ -11,6 +11,10 @@ class TestTrustLevelForTool:
     def test_vector_memory_is_external(self):
         assert trust_level_for_tool("vector_memory") == "tool_external"
 
+    def test_content_retrieval_tools_are_external(self):
+        for tool_name in ("file_read", "session_search", "graph_query"):
+            assert trust_level_for_tool(tool_name) == "tool_external", tool_name
+
     def test_desktop_observe_and_read_screen_are_external(self):
         assert trust_level_for_tool("desktop_observe") == "tool_external"
         assert trust_level_for_tool("desktop_read_screen") == "tool_external"

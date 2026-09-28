@@ -65,6 +65,131 @@ def test_capability_operation_validation():
         )
 
 
+def test_dynamic_capability_without_risk_metadata_fails_closed():
+    index = CapabilityIndex()
+    operation = register_tool_in_index(
+        name="unclassified_dynamic_tool",
+        description="No risk metadata supplied",
+        schema={"type": "object"},
+        owner="extensions",
+        index=index,
+    )
+    default_operation = CapabilityOperation(
+        id="extension.unclassified",
+        name="unclassified",
+        description="No risk metadata supplied",
+        parameters_schema={"type": "object"},
+    )
+
+    assert operation.risk_class == "security_sensitive"
+    assert default_operation.risk_class == "security_sensitive"
+
+
+def test_dynamic_capability_defaults_to_no_result_replay():
+    index = CapabilityIndex()
+    operation = register_tool_in_index(
+        name="uncached_dynamic_tool",
+        description="No replay metadata supplied",
+        schema={"type": "object"},
+        owner="extensions",
+        risk_class="safe",
+        index=index,
+    )
+
+    assert operation.cacheable is False
+    assert operation.freshness_sec is None
+    assert operation.poll_interval_sec is None
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "desktop_open_app",
+        "desktop_close_app",
+        "desktop_open_url",
+        "desktop_click",
+        "desktop_type",
+        "desktop_invoke",
+        "desktop_key",
+        "desktop_click_at",
+        "desktop_move",
+        "desktop_drag",
+        "desktop_scroll",
+        "desktop_focus",
+        "desktop_window",
+        "desktop_move_window",
+    ],
+)
+def test_desktop_actions_do_not_replay_cached_results(tool_name):
+    operation = register_tool_in_index(
+        name=tool_name,
+        description="Live desktop operation",
+        schema={"type": "object"},
+        index=CapabilityIndex(),
+    )
+
+    assert operation.cacheable is False
+    assert operation.freshness_sec is None
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["desktop_observe", "desktop_read_screen", "desktop_screenshot", "desktop_windows"],
+)
+def test_desktop_observations_are_fresh_and_not_cached(tool_name):
+    operation = register_tool_in_index(
+        name=tool_name,
+        description="Live desktop observation",
+        schema={"type": "object"},
+        index=CapabilityIndex(),
+    )
+
+    assert operation.cacheable is False
+    assert operation.freshness_sec == 0.0
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["desktop_observe", "desktop_read_screen", "desktop_screenshot", "desktop_windows"],
+)
+def test_desktop_observations_publish_polling_interval(tool_name):
+    operation = register_tool_in_index(
+        name=tool_name,
+        description="Live desktop observation",
+        schema={"type": "object"},
+        index=CapabilityIndex(),
+    )
+
+    assert operation.poll_interval_sec == 0.5
+
+
+def test_tool_registry_passes_explicit_replay_freshness_and_polling_policy():
+    name = "cache_policy_extension_probe"
+    reg = ToolRegistry()
+    reg.register_tool(
+        name=name,
+        description="Explicit result replay policy",
+        schema={"type": "object"},
+        owner="extensions",
+        risk_class="safe",
+        cacheable=True,
+        freshness_sec=3.0,
+        poll_interval_sec=1.0,
+    )(lambda: "result")
+
+    try:
+        operation = capability_index.get_operation(name)
+        assert operation is not None
+        assert operation.cacheable is True
+        assert operation.freshness_sec == 3.0
+        assert operation.poll_interval_sec == 1.0
+        requirement, risk, _ = evaluate(name, {})
+        assert requirement == Requirement.ALLOW
+        assert risk == RiskClass.SAFE
+    finally:
+        reg.unregister_tool(name)
+
+
 def test_capability_descriptor_validation():
     op = CapabilityOperation(
         id="system.metrics.read",
@@ -175,6 +300,7 @@ def test_capability_index_availability_and_health():
         name="desktop_focus",
         description="Focus window",
         parameters_schema={},
+        risk_class="safe",
         required_leases=("desktop",),
     )
     desktop_cap = CapabilityDescriptor(
@@ -293,6 +419,7 @@ def test_unregister_capability_cleans_operation_indexes():
         name="run_demo",
         description="Run demo",
         parameters_schema={"type": "object"},
+        risk_class="security_sensitive",
     )
     index.register_capability(
         CapabilityDescriptor(
@@ -343,6 +470,7 @@ def test_capability_schema_filtering():
         name="system_diagnostics",
         description="Get system stats",
         parameters_schema={"type": "object", "properties": {"verbose": {"type": "boolean"}}},
+        risk_class="safe",
     )
     sys_cap = CapabilityDescriptor(
         id="system",
@@ -356,6 +484,7 @@ def test_capability_schema_filtering():
         name="file_read",
         description="Read file",
         parameters_schema={"type": "object", "properties": {"path": {"type": "string"}}},
+        risk_class="safe",
     )
     file_cap = CapabilityDescriptor(
         id="file",
@@ -391,6 +520,7 @@ def test_registered_schema_filtering_excludes_index_only_operations():
                     name="inspect",
                     description="Inspection metadata",
                     parameters_schema={"type": "object"},
+                    risk_class="safe",
                 )
             },
         )
@@ -524,6 +654,7 @@ def test_skill_extension_registration_in_capability_index():
     op = capability_index.get_operation(tool_name)
     assert op is not None
     assert op.name == tool_name
+    assert op.risk_class == "security_sensitive"
 
     cap = capability_index.get_capability("extensions")
     assert cap is not None

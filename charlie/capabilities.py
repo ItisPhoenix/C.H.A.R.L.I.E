@@ -566,6 +566,64 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# Non-cacheable operations must execute through the current capability owner.
+_NON_CACHEABLE_TOOLS = frozenset({
+    "system_diagnostics",
+    "capabilities",
+    "desktop_open_app",
+    "desktop_close_app",
+    "desktop_open_url",
+    "desktop_observe",
+    "desktop_read_screen",
+    "desktop_click",
+    "desktop_type",
+    "desktop_invoke",
+    "desktop_key",
+    "desktop_click_at",
+    "desktop_move",
+    "desktop_drag",
+    "desktop_scroll",
+    "desktop_windows",
+    "desktop_focus",
+    "desktop_window",
+    "desktop_move_window",
+    "desktop_screenshot",
+    "browser_read",
+    "media_snapshot",
+    "file_read",
+    "calendar_list",
+    "calendar_get",
+    "automation_get",
+    "automation_list",
+    "vector_memory",
+    "session_search",
+    "recall_results",
+    "graph_query",
+    "web_search",
+    "web_research",
+})
+_POLLABLE_OBSERVATION_TOOLS = frozenset({
+    "system_diagnostics",
+    "desktop_observe",
+    "desktop_read_screen",
+    "desktop_windows",
+    "desktop_screenshot",
+    "browser_read",
+    "media_snapshot",
+    "calendar_list",
+    "calendar_get",
+    "automation_get",
+    "automation_list",
+})
+for _tool_name in _NON_CACHEABLE_TOOLS:
+    BUILTIN_TOOL_METADATA[_tool_name].update(cacheable=False)
+for _tool_name in _POLLABLE_OBSERVATION_TOOLS:
+    BUILTIN_TOOL_METADATA[_tool_name].update(cacheable=False, freshness_sec=0.0)
+for _tool_name in _POLLABLE_OBSERVATION_TOOLS:
+    BUILTIN_TOOL_METADATA[_tool_name]["poll_interval_sec"] = (
+        0.5 if _tool_name.startswith("desktop_") else 1.0
+    )
+
 
 def get_builtin_tool_metadata(name: str) -> Optional[Dict[str, Any]]:
     """Return a copy of canonical metadata for a known built-in tool."""
@@ -581,13 +639,16 @@ class CapabilityOperation:
     name: str
     description: str
     parameters_schema: Dict[str, Any]
-    risk_class: str = "safe"
+    risk_class: str = "security_sensitive"
     required_leases: Tuple[str, ...] = ()
     timeout_sec: float = 15.0
     is_interactive: bool = False
     verifier: Optional[str] = None
     executor_type: Optional[str] = None
     func: Optional[Callable[..., Any]] = None
+    cacheable: bool = False
+    freshness_sec: Optional[float] = None
+    poll_interval_sec: Optional[float] = None
 
     def __post_init__(self) -> None:
         self.id = str(self.id).strip()
@@ -874,6 +935,9 @@ def register_tool_in_index(
     risk_class: Optional[str] = None,
     is_interactive: bool = False,
     index: Optional[CapabilityIndex] = None,
+    cacheable: Optional[bool] = None,
+    freshness_sec: Optional[float] = None,
+    poll_interval_sec: Optional[float] = None,
 ) -> CapabilityOperation:
     """Register a tool into CapabilityIndex, creating domain descriptor on-demand if needed."""
     if index is None:
@@ -888,6 +952,9 @@ def register_tool_in_index(
         timeout_sec = meta.get("timeout_sec", 15.0)
         executor_type = meta.get("executor_type")
         verifier = meta.get("verifier")
+        eff_cacheable = meta.get("cacheable", executor_type != "com_thread")
+        eff_freshness_sec = meta.get("freshness_sec", freshness_sec)
+        eff_poll_interval_sec = meta.get("poll_interval_sec", poll_interval_sec)
     else:
         domain = owner or "tools"
         if owner.startswith("mcp"):
@@ -896,11 +963,14 @@ def register_tool_in_index(
             domain = "extensions"
 
         op_id = f"{domain}.{name}"
-        eff_risk = risk_class or "safe"
+        eff_risk = risk_class or "security_sensitive"
         required_leases = ()
         timeout_sec = 15.0
         executor_type = None
         verifier = None
+        eff_cacheable = cacheable is True
+        eff_freshness_sec = freshness_sec
+        eff_poll_interval_sec = poll_interval_sec
 
     op = CapabilityOperation(
         id=op_id,
@@ -914,6 +984,9 @@ def register_tool_in_index(
         verifier=verifier,
         executor_type=executor_type,
         func=func,
+        cacheable=eff_cacheable,
+        freshness_sec=eff_freshness_sec,
+        poll_interval_sec=eff_poll_interval_sec,
     )
 
     cap_desc = index.get_capability(domain)

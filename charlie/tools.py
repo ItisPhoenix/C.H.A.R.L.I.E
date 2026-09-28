@@ -154,11 +154,13 @@ class ToolRegistry:
         is_interactive: bool = False,
         owner: str = "",
         risk_class: Optional[str] = None,
+        cacheable: Optional[bool] = None,
+        freshness_sec: Optional[float] = None,
+        poll_interval_sec: Optional[float] = None,
     ):
-        """owner/risk_class are plain strings (not charlie.autonomy.RiskClass) so this module
-        never has to import autonomy.py, which already imports from here. Known built-ins
-        mirror semantic metadata from charlie.capabilities; owner remains a compatibility
-        label for registry callers. Dynamic tools keep their explicit metadata."""
+        """Keep metadata plain so this module does not import autonomy.py, which imports tools.
+        Known built-ins mirror semantic metadata from charlie.capabilities; dynamic tools
+        default to no result replay."""
         from charlie.capabilities import get_builtin_tool_metadata
 
         canonical = get_builtin_tool_metadata(name)
@@ -184,6 +186,9 @@ class ToolRegistry:
                 owner=owner or effective_owner,
                 risk_class=risk_class,
                 is_interactive=is_interactive,
+                cacheable=cacheable,
+                freshness_sec=freshness_sec,
+                poll_interval_sec=poll_interval_sec,
             )
             return func
 
@@ -2161,7 +2166,7 @@ def enable_plugin(reg: "ToolRegistry", manager: Any, plugin: Any) -> List[str]:
             description=description,
             schema=tool_def["parameters"],
             owner="plugins",
-            risk_class="security_sensitive",
+            risk_class="safe" if action in {"fs_list_dir", "fs_search"} else "security_sensitive",
         )(_make_plugin_runner(manager, action))
         registered.append(f"plugin_{action}")
     return registered
@@ -2217,9 +2222,9 @@ def _make_plugin_runner(manager: Any, action: str) -> Callable[..., str]:
             result = manager.call_tool(action, arguments)
         except Exception as exc:  # surface, never swallow
             logger.error("Plugin tool %s failed", action, exc_info=True)
-            return f"Plugin {action} error: {exc}"
+            return f"Error: plugin {action} failed: {exc}"
         if isinstance(result, dict) and result.get("success") is False:
-            return f"Plugin {action} failed: {result.get('error', 'unknown error')}"
+            return f"Error: plugin {action} failed: {result.get('error', 'unknown error')}"
         return str(result)
 
     _runner.__name__ = f"plugin_{action}"
@@ -3104,7 +3109,10 @@ def _automation_tool_result(operation: str, action: Callable[[], Any]) -> ToolEx
         "properties": {
             "kind": {"type": "string", "enum": ["reminder", "task"]},
             "text": {"type": "string"},
-            "first_run_at": {"type": "string", "description": "Timezone-aware ISO-8601 timestamp."},
+            "first_run_at": {
+                "type": "string",
+                "description": "ISO-8601 timestamp in the selected timezone's local offset; use Z or +00:00 for UTC.",
+            },
             "recurrence": {"type": "string", "enum": ["once", "daily", "weekly"]},
             "timezone": {"type": "string", "default": "Asia/Kolkata", "description": "IANA timezone."},
         },
@@ -3138,7 +3146,10 @@ def automation_create(
             "schedule_id": {"type": "string"},
             "kind": {"type": "string", "enum": ["reminder", "task"]},
             "text": {"type": "string"},
-            "first_run_at": {"type": "string", "description": "Timezone-aware ISO-8601 timestamp."},
+            "first_run_at": {
+                "type": "string",
+                "description": "ISO-8601 timestamp in the selected timezone's local offset; use Z or +00:00 for UTC.",
+            },
             "recurrence": {"type": "string", "enum": ["once", "daily", "weekly"]},
             "timezone": {"type": "string", "description": "IANA timezone."},
         },
