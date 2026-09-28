@@ -20,6 +20,7 @@ logger = logging.getLogger("charlie.research.fetch")
 _MIN_CONTENT_CHARS = 160
 _MAX_DOCUMENT_CHARS = 14000
 _TAG_RE = re.compile(r"<[^>]+>")
+_TITLE_RE = re.compile(r"<title\b[^>]*>(.*?)</title\s*>", re.IGNORECASE | re.DOTALL)
 _SPACE_RE = re.compile(r"\s+")
 
 
@@ -66,6 +67,14 @@ def validate_public_url(url: str) -> str:
 def _fallback_text(markup: str) -> str:
     text = html.unescape(_TAG_RE.sub(" ", markup))
     return _SPACE_RE.sub(" ", text).strip()
+
+
+def extract_html_title(markup: str) -> Optional[str]:
+    match = _TITLE_RE.search(markup)
+    if match is None:
+        return None
+    title = html.unescape(_TAG_RE.sub(" ", match.group(1)))
+    return _SPACE_RE.sub(" ", title).strip() or None
 
 
 def extract_text(markup: str) -> tuple[str, str]:
@@ -125,6 +134,7 @@ async def fetch_document(
         )
         response.raise_for_status()
         final_url = validate_public_url(str(response.url))
+        page_title = extract_html_title(response.text)
         text, method = extract_text(response.text)
         redirected = SearchResult(
             title=result.title,
@@ -135,7 +145,12 @@ async def fetch_document(
             published_at=result.published_at,
             domain=urlparse(final_url).netloc.lower(),
         )
-        return document_from_content(redirected, text, extraction_method=method)
+        return document_from_content(
+            redirected,
+            text,
+            extraction_method=method,
+            title=page_title or result.title,
+        )
     except Exception:
         logger.debug("Research fetch failed for %s", result.url, exc_info=True)
         return None

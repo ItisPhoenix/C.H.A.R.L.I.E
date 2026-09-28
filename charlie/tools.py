@@ -3275,7 +3275,8 @@ def browser_read(url: str) -> str:
     result = read_url(url)
     if "error" in result:
         return f"Error: {result['error']}"
-    return f"URL: {result['url']}\n\n{result['content']}"
+    title = f"Title: {result['title']}\n" if result.get("title") else ""
+    return f"{title}URL: {result['url']}\n\n{result['content']}"
 
 
 @registry.register_tool(

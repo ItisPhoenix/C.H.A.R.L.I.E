@@ -60,6 +60,43 @@ def test_browser_read_preserves_public_url_validation_error(monkeypatch):
     assert read_url("https://example.invalid") == {"error": "Research URL host could not be resolved"}
 
 
+def test_browser_read_returns_title_from_short_html_page(monkeypatch):
+    import charlie.research.fetch as fetch_module
+    import charlie.tools as tools_module
+
+    class FakeResponse:
+        url = "https://example.com/"
+        text = "<html><head><title>Example Domain</title></head><body><p>Example Domain</p></body></html>"
+
+        def raise_for_status(self):
+            pass
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def get(self, _url, **_kwargs):
+            return FakeResponse()
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(fetch_module, "validate_public_url", lambda url: url)
+    monkeypatch.setattr(fetch_module.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(tools_module, "_browser_ready", lambda: True)
+
+    result = tools_module.browser_read("https://example.com")
+
+    assert result.startswith("Title: Example Domain\nURL: https://example.com/")
+    assert "Example Domain" in result
+
+
 @pytest.mark.asyncio
 async def test_duckduckgo_provider_prefixes_domain_filter(monkeypatch):
     from charlie.research.providers import DuckDuckGoProvider

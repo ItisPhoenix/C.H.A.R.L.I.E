@@ -258,6 +258,7 @@ def read_url(url: str) -> Dict[str, Any]:
     from charlie.research.crawler import crawl_document
     from charlie.research.fetch import (
         document_from_content,
+        extract_html_title,
         extract_text,
         fetch_document,
         validate_public_url,
@@ -281,8 +282,15 @@ def read_url(url: str) -> Dict[str, Any]:
         try:
             def read_with_playwright(page):
                 page.goto(safe_url, wait_until="domcontentloaded", timeout=int(_READ_TIMEOUT_SEC * 1000))
-                text, method = extract_text(page.content())
-                return document_from_content(result, text, extraction_method=f"playwright:{method}")
+                markup = page.content()
+                text, method = extract_text(markup)
+                title = page.title() or extract_html_title(markup) or result.title
+                return document_from_content(
+                    result,
+                    text,
+                    extraction_method=f"playwright:{method}",
+                    title=title,
+                )
 
             document = controller.run(read_with_playwright, timeout=_READ_TIMEOUT_SEC)
         except Exception as exc:
@@ -291,4 +299,9 @@ def read_url(url: str) -> Dict[str, Any]:
     if document is None:
         return {"error": f"Could not extract content from {url}"}
     content = document.content[:_READ_MAX_CHARS]
-    return {"url": document.url or url, "content": content, "length": len(content)}
+    return {
+        "url": document.url or url,
+        "title": document.title,
+        "content": content,
+        "length": len(content),
+    }
