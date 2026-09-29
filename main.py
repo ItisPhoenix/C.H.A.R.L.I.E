@@ -4276,6 +4276,13 @@ async def main() -> int:
                 _set_subsystem_health("telegram", HealthStatus.RUNNING)
             except Exception as e:
                 logger.warning(f"Failed to start Telegram bot: {e}")
+                failed_telegram_bot = telegram_bot
+                telegram_bot = None
+                if failed_telegram_bot is not None:
+                    try:
+                        await failed_telegram_bot.stop()
+                    except Exception:
+                        logger.debug("Telegram cleanup after failed startup was incomplete", exc_info=True)
                 _set_subsystem_health("telegram", HealthStatus.DEGRADED)
 
         logger.info("Loading AI models (Whisper, VAD, Kokoro)...")

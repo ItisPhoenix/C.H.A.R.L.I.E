@@ -40,6 +40,12 @@ def test_telegram_approval_reason_uses_the_policy_reason():
     ) == "Overwrite of existing file 'summary.md' requires approval."
 
 
+def test_telegram_startup_failure_clears_dead_bot_before_future_approvals():
+    source = Path(main.__file__).read_text(encoding="utf-8")
+    assert "failed_telegram_bot = telegram_bot" in source
+    assert "telegram_bot = None" in source
+
+
 class _ApprovalBot:
     def __init__(self, *, error=None):
         self.started = asyncio.Event()
