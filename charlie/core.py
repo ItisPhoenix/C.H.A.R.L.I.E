@@ -1734,6 +1734,24 @@ def _approval_interruption(operation_results: List[tuple[Dict[str, Any], ResultE
     return "The action was not run because approval was not granted."
 
 
+def _prefer_research_report(
+    current: Optional[ResearchReport], candidate: ResearchReport
+) -> ResearchReport:
+    """Keep fetched evidence when a later compatibility search is snippet-only."""
+    if current is None:
+        return candidate
+
+    def score(report: ResearchReport) -> tuple[int, int, int, int]:
+        return (
+            int(bool(report.sources)),
+            len(report.evidence),
+            len(report.citations),
+            int(report.stop_reason == "evidence-sufficient"),
+        )
+
+    return candidate if score(candidate) > score(current) else current
+
+
 def _operation_succeeded(envelope: ResultEnvelope) -> bool:
     """Return whether execution completed, independent of display text or verification."""
 
@@ -5797,8 +5815,8 @@ class Brain:
             )
             structured_data = envelope.data.get("structured_data")
             if isinstance(structured_data, ResearchReport):
-                research_report = structured_data
-                turn_research_reports.append(research_report)
+                research_report = _prefer_research_report(research_report, structured_data)
+                turn_research_reports.append(structured_data)
             return _finalize_operation_result(
                 call,
                 envelope,
