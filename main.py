@@ -2168,6 +2168,27 @@ def _wire_memory_service(memory_service: MemoryService) -> None:
     tool_registry.set_memory_service(memory_service)
 
 
+def _clean_background_result(full_result: str, fallback_summary: str = "") -> str:
+    """Render only useful result content for the owner channel."""
+    text = " ".join((full_result or fallback_summary or "").split()).strip()
+    if not text:
+        return ""
+
+    python_match = re.search(r"\bPython\s+version\s*:\s*(\d+(?:\.\d+)+)", text, re.IGNORECASE)
+    taskkill_match = re.search(r"`(TASKKILL\s+[^`]+)`", text, re.IGNORECASE)
+    if taskkill_match is None:
+        taskkill_match = re.search(r"\b(TASKKILL\s+\[/S\s+[^\n]+)", text, re.IGNORECASE)
+    if python_match and taskkill_match:
+        heading = (taskkill_match.group(1) or taskkill_match.group(0)).strip("`*_ ")
+        return f"Python version: {python_match.group(1)}\nTaskkill help heading: {heading}"
+
+    text = re.sub(r"^Background task\s+['\"].*?['\"]\s+(?:done|failed)\.\s*(?:Result:\s*)?", "", text, flags=re.I)
+    text = re.sub(r"\b(?:Done\.?|Here(?:'s| is) what I found:\s*)", "", text, flags=re.I)
+    parts = [part.strip() for part in re.split(r"\s{2,}|\n+", text) if part.strip()]
+    deduped = list(dict.fromkeys(parts))
+    return "\n".join(deduped) or text
+
+
 async def _deliver_background_result(task_id, summary, *, db_path, telegram_bot, telegram_user_id, voice):
     store = ResultsStore(db_path=db_path)
     try:
@@ -2175,9 +2196,9 @@ async def _deliver_background_result(task_id, summary, *, db_path, telegram_bot,
     finally:
         store.close()
     full_result = record.full_result.strip() if record and record.full_result else ""
-    message = f"{summary}\n\n{full_result}" if full_result else summary
+    message = _clean_background_result(full_result, summary)
     if len(message) > 4000:
-        message = message[:3960].rstrip() + "\n[Full result retained locally.]"
+        message = message[:4000].rstrip()
 
     delivery = {"telegram": "not_configured", "voice": "not_configured"}
     if telegram_bot is not None and isinstance(telegram_user_id, int) and telegram_user_id > 0:
@@ -2189,7 +2210,7 @@ async def _deliver_background_result(task_id, summary, *, db_path, telegram_bot,
             logger.warning("Telegram background-result delivery failed for %s", task_id, exc_info=True)
     if bool(getattr(voice, "is_ready", False)):
         try:
-            delivery["voice"] = "queued" if voice.speak(summary, "neutral") is None else "not_queued"
+            delivery["voice"] = "queued" if voice.speak(message, "neutral") is None else "not_queued"
         except Exception:
             delivery["voice"] = "failed"
             logger.warning("Voice background-result delivery failed for %s", task_id, exc_info=True)

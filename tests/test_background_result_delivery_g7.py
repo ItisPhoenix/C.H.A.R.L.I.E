@@ -60,7 +60,7 @@ async def test_main_result_callback_reports_full_result_and_queues_ready_voice(t
     assert delivery == {"telegram": "accepted", "voice": "queued"}
     assert telegram.messages[0][0] == 42
     assert "Findings" in telegram.messages[0][1]
-    assert voice.spoken == ["Background task 'Report' done. Result: Findings"]
+    assert voice.spoken == ["Findings"]
 
 
 @pytest.mark.asyncio
@@ -151,7 +151,7 @@ async def test_suppressed_voice_speech_is_recorded_as_not_queued(tmp_path):
         telegram_user_id=0, voice=voice,
     )
     assert delivery == {"telegram": "not_configured", "voice": "not_queued"}
-    assert voice.spoken == ["summary"]
+    assert voice.spoken == ["Findings"]
 
 
 @pytest.mark.asyncio
