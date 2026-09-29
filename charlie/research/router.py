@@ -30,7 +30,7 @@ _RESEARCH_SIGNALS = re.compile(
 )
 _FETCHED_EVIDENCE_SIGNALS = re.compile(
     r"\b(?:official\s+(?:source|sources|publication|page)|sources?|citations?|"
-    r"evidence|publication|paper|report)\b",
+    r"evidence|publication|paper)\b",
     re.IGNORECASE,
 )
 _SUSTAINED_RESEARCH_SIGNALS = re.compile(
