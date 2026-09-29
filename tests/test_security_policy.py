@@ -22,6 +22,9 @@ class TestTrustLevelForTool:
     def test_mcp_prefixed_tools_are_external(self):
         assert trust_level_for_tool("mcp_some_server_tool") == "tool_external"
 
+    def test_plugin_prefixed_tools_are_external(self):
+        assert trust_level_for_tool("plugin_fs_search") == "tool_external"
+
     def test_shell_execute_is_user_turn(self):
         assert trust_level_for_tool("shell_execute") == "user_turn"
 

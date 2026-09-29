@@ -26,7 +26,7 @@ _EXTERNAL_TOOL_NAMES = frozenset(
     }
 )
 # MCP tools are registered with this prefix (see mcp_client.py register_tools_into).
-_EXTERNAL_TOOL_PREFIXES = ("mcp_",)
+_EXTERNAL_TOOL_PREFIXES = ("mcp_", "plugin_")
 
 
 def trust_level_for_tool(tool_name: str) -> TrustLevel:
