@@ -262,8 +262,9 @@ class FilesystemPlugin(Plugin):
 
     def _check_path(self, path_str: str) -> Path:
         """Resolve and validate path is within allowed directories."""
-        resolved = Path(path_str).resolve()
-        from charlie.tools import get_path_gate_reason
+        from charlie.tools import _resolve_user_placeholders, get_path_gate_reason
+
+        resolved = Path(_resolve_user_placeholders(path_str)).resolve()
 
         sensitive_reason = get_path_gate_reason(str(resolved))
         if sensitive_reason:

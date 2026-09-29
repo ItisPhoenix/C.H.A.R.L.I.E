@@ -50,7 +50,13 @@ def parse_generated_tool(name: str, raw_text: str) -> GeneratedToolSpec:
 
 
 def register_generated_tool(registry: Any, spec: GeneratedToolSpec) -> List[str]:
-    registry.register_tool(spec.name, spec.description, spec.schema, owner="extensions", risk_class="reversible")(
+    registry.register_tool(
+        spec.name,
+        spec.description,
+        spec.schema,
+        owner="extensions",
+        risk_class="security_sensitive",
+    )(
         spec.func
     )
     return [spec.name]

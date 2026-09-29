@@ -11,6 +11,8 @@ from charlie.core import (
     _approval_interruption,
     _ground_external_action_response,
     _is_external_action_result,
+    _normalize_automation_timezone,
+    _prefer_research_report,
     _repeat_tool_call_signature,
     _RepeatToolCallGuard,
     _tool_target_has_provenance,
@@ -116,6 +118,42 @@ def test_approval_interruption_keeps_decline_timeout_and_unavailable_distinct():
             data={"failure_kind": "approval_denied", "approval_status": status},
         )
         assert expected in _approval_interruption([({}, envelope)]).casefold()
+
+
+def test_fetched_research_report_survives_later_snippet_only_report():
+    from charlie.research.models import ResearchMode, ResearchReport, SourceDocument
+
+    fetched = ResearchReport(
+        query="NIST",
+        mode=ResearchMode.STANDARD,
+        sources=[SourceDocument(source_id="S1", title="NIST", url="https://nist.gov")],
+        evidence=[object()],
+        citations=[object()],
+        stop_reason="evidence-sufficient",
+    )
+    snippets = ResearchReport(
+        query="NIST",
+        mode=ResearchMode.QUICK,
+        search_results=[object()],
+        stop_reason="search-snippets-only",
+    )
+
+    assert _prefer_research_report(fetched, snippets) is fetched
+
+
+def test_automation_timezone_defaults_to_configured_local_zone_without_user_zone():
+    normalized = _normalize_automation_timezone(
+        "Remind me in five minutes to read it.",
+        "automation_create",
+        {"timezone": "America/New_York", "recurrence": "once"},
+    )
+    assert normalized["timezone"] == "Asia/Kolkata"
+    explicit = _normalize_automation_timezone(
+        "Remind me at 9 AM America/New_York.",
+        "automation_create",
+        {"timezone": "America/New_York", "recurrence": "once"},
+    )
+    assert explicit["timezone"] == "America/New_York"
 
 
 def _make_brain(use_native_tools: bool) -> Brain:

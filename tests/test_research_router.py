@@ -92,6 +92,17 @@ def test_current_request_asking_for_sources_fetches_documents():
     assert decision.mode is ResearchMode.STANDARD
 
 
+def test_official_publication_query_promotes_quick_to_fetched_mode():
+    decision = route("NIST AI Risk Management Framework official publication page", "quick")
+    assert decision.should_research is True
+    assert decision.mode is ResearchMode.STANDARD
+
+
+def test_action_report_phrase_does_not_trigger_research():
+    decision = route("run taskkill /? and report the first help heading")
+    assert decision.should_research is False
+
+
 @pytest.mark.parametrize(
     "query",
     [

@@ -330,7 +330,8 @@ class TestPluginToolBridge:
         metadata = {item["name"]: item for item in reg.list_metadata()}
         assert "plugin_fs_write_file" not in metadata
         assert metadata["plugin_fs_search"]["owner"] == "plugins"
-        assert metadata["plugin_fs_search"]["risk_class"] == "security_sensitive"
+        assert metadata["plugin_fs_search"]["risk_class"] == "safe"
+        assert metadata["plugin_fs_list_dir"]["risk_class"] == "safe"
 
     def test_disabled_then_enabled_is_isolated(self):
         from charlie.tools import ToolRegistry, register_plugin_tools_into
@@ -438,6 +439,48 @@ class TestPluginRuntimeControl:
 
         names = {t["function"]["name"] for t in reg.get_tool_definitions()}
         assert names == {"plugin_code_exec_python"}
+
+
+def test_filesystem_plugin_normalizes_nonexistent_windows_profile(monkeypatch):
+    import getpass
+    import os
+    from pathlib import Path
+
+    if os.name != "nt":
+        pytest.skip("Windows profile path normalization is Windows-specific")
+    monkeypatch.setattr(getpass, "getuser", lambda: "testuser")
+    monkeypatch.setattr(os.path, "isdir", lambda _path: False)
+    expected = Path(f"{Path.home().drive}\\Users\\testuser\\Downloads").resolve()
+    plugin = FilesystemPlugin(allowed_dirs=[str(expected)])
+
+    assert plugin._check_path(r"C:\Users\Charlie\Downloads") == expected
+
+
+def test_filesystem_plugin_scope_error_is_classified_as_failure(tmp_path):
+    from charlie.core import _legacy_tool_result_status
+    from charlie.tools import _make_plugin_runner
+    from charlie.turn_contracts import ResultStatus
+
+    manager = PluginManager()
+    manager.register(FilesystemPlugin(allowed_dirs=[str(tmp_path)]))
+    result = _make_plugin_runner(manager, "fs_search")(
+        path=str(tmp_path.parent), pattern="*.md"
+    )
+
+    assert result.startswith("Error: plugin fs_search failed:")
+    assert _legacy_tool_result_status(result) == ResultStatus.FAILED.value
+
+
+def test_filesystem_plugin_scope_error_is_reported_as_failure(tmp_path):
+    from charlie.tools import _make_plugin_runner
+
+    manager = PluginManager()
+    manager.register(FilesystemPlugin(allowed_dirs=[str(tmp_path)]))
+    result = _make_plugin_runner(manager, "fs_search")(
+        path=str(tmp_path.parent), pattern="*.md"
+    )
+
+    assert result.startswith("Error: plugin fs_search failed:")
 
 
 if __name__ == "__main__":

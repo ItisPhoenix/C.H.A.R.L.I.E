@@ -220,6 +220,10 @@ def test_automation_schedule_timezone_validation_and_local_recurrence(tmp_path):
         store.create_automation("reminder", "Naive", "2026-03-07T09:00:00", "once")
     with pytest.raises(ValueError, match="timezone"):
         store.create_automation("reminder", "Invalid zone", "2026-03-07T09:00:00Z", "once", "Not/AZone")
+    with pytest.raises(ValueError, match="offset.*Asia/Kolkata"):
+        store.create_automation(
+            "reminder", "Wrong offset", "2026-09-28T18:19:00-05:00", "once", "Asia/Kolkata"
+        )
     with pytest.raises(ValueError, match="recurrence"):
         store.create_automation("reminder", "Invalid recurrence", "2026-03-07T09:00:00Z", "monthly")
     store.close()

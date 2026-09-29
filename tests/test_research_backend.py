@@ -97,6 +97,77 @@ def test_browser_read_returns_title_from_short_html_page(monkeypatch):
     assert "Example Domain" in result
 
 
+def test_browser_read_omits_title_when_page_has_no_title(monkeypatch):
+    import charlie.research.fetch as fetch_module
+    import charlie.tools as tools_module
+
+    class FakeResponse:
+        url = "https://example.com/"
+        text = "<html><body><p>Untitled page content</p></body></html>"
+
+        def raise_for_status(self):
+            pass
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def get(self, _url, **_kwargs):
+            return FakeResponse()
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(fetch_module, "validate_public_url", lambda url: url)
+    monkeypatch.setattr(fetch_module.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(tools_module, "_browser_ready", lambda: True)
+
+    result = tools_module.browser_read("https://example.com")
+
+    assert result.startswith("URL: https://example.com/")
+    assert "Title:" not in result
+
+
+@pytest.mark.asyncio
+async def test_current_page_synthesis_includes_observed_title(monkeypatch):
+    from charlie import core
+    from charlie.browser import controller, observation, session
+    from charlie.config import Config
+
+    class FakePage:
+        def title(self):
+            return "Observed document title"
+
+    session.reset_session()
+    session.record_observation("https://example.com/article", page_type="page")
+    monkeypatch.setattr(core, "_BROWSER_AVAILABLE", True)
+    monkeypatch.setattr(observation, "extract_visible_text", lambda *_args, **_kwargs: "Visible body text")
+    monkeypatch.setattr(controller, "run", lambda fn, timeout=None: fn(FakePage()))
+
+    brain = Brain(Config(llm_url="http://localhost", llm_key="x", llm_model="dummy", browser_enabled=True))
+    captured = {}
+
+    async def capture_completion(payload, _generation):
+        captured["prompt"] = payload[0]["content"]
+        return "The page title is Observed document title.", None
+
+    monkeypatch.setattr(brain, "_build_payload", lambda messages, **_kwargs: messages)
+    monkeypatch.setattr(brain, "_stream_completion", capture_completion)
+
+    try:
+        answer = await brain.browser_task("What is the title of this page?", platform="web")
+        assert "Observed document title" in captured["prompt"]
+        assert answer == "The page title is Observed document title."
+    finally:
+        session.reset_session()
+
+
 @pytest.mark.asyncio
 async def test_duckduckgo_provider_prefixes_domain_filter(monkeypatch):
     from charlie.research.providers import DuckDuckGoProvider
@@ -157,6 +228,35 @@ def test_web_research_converts_comma_domains_to_filters_without_rewriting_query(
     assert report.legacy_text() == "ok"
     assert calls == [
         ("Python list comprehensions", "standard", ["docs.python.org", "example.com"])
+    ]
+
+
+def test_web_search_promotes_explicit_research_but_keeps_simple_lookup_quick(monkeypatch):
+    import charlie.research.engine as engine_module
+    import charlie.tools as tools_module
+    from charlie.research.models import ResearchMode
+
+    calls = []
+
+    class FakeEngine:
+        def __init__(self, _config):
+            pass
+
+        def decide(self, query, requested_mode):
+            mode = ResearchMode.STANDARD if "research" in query.casefold() else ResearchMode.QUICK
+            return SimpleNamespace(should_research=True, mode=mode)
+
+        def run_sync(self, query, mode, *, domain_filters=None):
+            calls.append((query, mode, domain_filters))
+            return SimpleNamespace(legacy_text=lambda: "ok")
+
+    monkeypatch.setattr(engine_module, "ResearchEngine", FakeEngine)
+    tools_module._run_research_report("web_search", {"query": "research NIST official sources"})
+    tools_module._run_research_report("web_search", {"query": "Python version"})
+
+    assert calls == [
+        ("research NIST official sources", "standard", None),
+        ("Python version", "quick", None),
     ]
 
 

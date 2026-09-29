@@ -265,7 +265,7 @@ def read_url(url: str) -> Dict[str, Any]:
     )
     from charlie.research.models import SearchResult
 
-    result = SearchResult(title=url, url=url, provider="browser_read")
+    result = SearchResult(title="", url=url, provider="browser_read")
     try:
         safe_url = validate_public_url(url)
     except ValueError as exc:

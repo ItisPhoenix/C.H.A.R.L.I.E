@@ -486,13 +486,20 @@ async def test_background_tool_selection_is_work_without_a_second_router(
 
 
 @pytest.mark.asyncio
-async def test_explicit_background_request_dispatches_only_the_work_capability(
-    monkeypatch: pytest.MonkeyPatch, brain_config: Config
-) -> None:
-    request = _request(
+@pytest.mark.parametrize(
+    "request_text",
+    [
         "Charlie, start a background task with two steps: run python --version, then taskkill /? for help only.",
-        channel="telegram",
-    )
+        (
+            "Charlie, research NIST AI RMF 1.0, save a cited summary, and remind me to read it. "
+            "You can work on it in the background and message me when it's ready."
+        ),
+    ],
+)
+async def test_explicit_background_request_dispatches_only_the_work_capability(
+    monkeypatch: pytest.MonkeyPatch, brain_config: Config, request_text: str
+) -> None:
+    request = _request(request_text, channel="telegram")
     decisions: list[IntentDecision] = []
     operation_names: list[str] = []
     started: list[dict[str, Any]] = []
@@ -532,7 +539,13 @@ async def test_explicit_background_request_dispatches_only_the_work_capability(
     [
         ("Charlie, start a background task to check the report", True),
         ("Please create a background job to check the report", True),
+        (
+            "Please research NIST AI RMF 1.0, save a summary, and remind me to read it. "
+            "You can work on it in the background and message me when it's ready.",
+            True,
+        ),
         ("Please do not start a background task", False),
+        ("You can't work on it in the background", False),
         ("How do I start a background task in Python?", False),
     ],
 )

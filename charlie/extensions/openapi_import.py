@@ -15,7 +15,8 @@ import httpx
 import yaml
 
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9_]")
-_HTTP_METHODS = ("get", "post", "put", "patch", "delete")
+_HTTP_METHODS = ("get", "head", "options", "post", "put", "patch", "delete")
+_READ_ONLY_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
 @dataclass
@@ -164,7 +165,7 @@ def register_openapi_operations(
             description=f"[{spec.title}] {op.description or f'{op.method} {op.path}'}",
             schema=_operation_schema(op),
             owner="extensions",
-            risk_class="reversible",
+            risk_class="safe" if op.method.upper() in _READ_ONLY_METHODS else "security_sensitive",
         )(_invoke)
         registered.append(tool_name)
     return registered

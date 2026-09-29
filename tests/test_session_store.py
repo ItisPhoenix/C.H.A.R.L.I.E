@@ -5,8 +5,8 @@ import pytest
 from charlie.session_store import SessionNotFoundError, SessionStore
 
 
-def test_session_store_append_and_search():
-    db_path = "test_sessions.db"
+def test_session_store_append_and_search(tmp_path):
+    db_path = str(tmp_path / "test_sessions.db")
     if os.path.exists(db_path):
         try:
             os.remove(db_path)
@@ -42,8 +42,8 @@ def test_session_store_append_and_search():
                 pass
 
 
-def test_session_metadata_ops():
-    db_path = "test_sessions_meta.db"
+def test_session_metadata_ops(tmp_path):
+    db_path = str(tmp_path / "test_sessions_meta.db")
     for f in [db_path, f"{db_path}-wal", f"{db_path}-shm"]:
         if os.path.exists(f):
             try:
@@ -98,9 +98,9 @@ def test_session_metadata_ops():
                 except OSError:
                     pass
 
-def test_append_tool_and_reload():
+def test_append_tool_and_reload(tmp_path):
     """Tool results persisted via append_tool must survive round-trip through get_session_messages."""
-    db_path = "test_sessions_tool.db"
+    db_path = str(tmp_path / "test_sessions_tool.db")
     for f in [db_path, f"{db_path}-wal", f"{db_path}-shm"]:
         if os.path.exists(f):
             try:
@@ -158,9 +158,9 @@ def test_append_tool_and_reload():
                 except OSError:
                     pass
 
-def test_tool_content_in_session_messages():
+def test_tool_content_in_session_messages(tmp_path):
     """Tool rows must flow back as role=content tuples for _sanitize_roles."""
-    db_path = "test_sessions_tool2.db"
+    db_path = str(tmp_path / "test_sessions_tool2.db")
     for f in [db_path, f"{db_path}-wal", f"{db_path}-shm"]:
         if os.path.exists(f):
             try:
@@ -215,9 +215,9 @@ def test_tool_events_roundtrip(tmp_path):
     store.close()
 
 
-def test_search_scoped_by_launch_id():
+def test_search_scoped_by_launch_id(tmp_path):
     """search(launch_id) returns only hits from that launch; no launch = all."""
-    db_path = "test_sessions_launch_scope.db"
+    db_path = str(tmp_path / "test_sessions_launch_scope.db")
     _cleanup_db(db_path)
 
     store = SessionStore(db_path)

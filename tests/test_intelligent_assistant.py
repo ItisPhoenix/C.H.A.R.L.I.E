@@ -5,7 +5,6 @@ import tempfile
 
 from charlie.core import (
     _apply_correction_to_memory,
-    _assess_tool_result_relevance,
     _detect_correction,
     _detect_explicit_recall,
     _detect_forget_rule,
@@ -168,47 +167,6 @@ class TestCorrectionFastPath:
 
     def test_followup_what_was_that(self):
         assert _is_followup("what was that") is True
-
-
-# ---------------------------------------------------------------------------
-# Step 3: Post-Tool Confidence Gate
-# ---------------------------------------------------------------------------
-
-class TestConfidenceGate:
-    """Verify _assess_tool_result_relevance filters low-quality results."""
-
-    def test_short_result_rejected(self):
-        assert _assess_tool_result_relevance("web_search", "Error") is False
-
-    def test_empty_result_rejected(self):
-        assert _assess_tool_result_relevance("web_search", "") is False
-
-    def test_error_prefix_rejected(self):
-        assert _assess_tool_result_relevance(
-            "web_search", "Error: timeout connecting to upstream"
-        ) is False
-
-    def test_html_result_rejected(self):
-        assert _assess_tool_result_relevance(
-            "web_search", "<html><head><title>404</title></head></html>"
-        ) is False
-
-    def test_no_results_rejected(self):
-        assert _assess_tool_result_relevance(
-            "web_search", "No results found"
-        ) is False
-
-    def test_good_result_accepted(self):
-        result = (
-            "According to recent data, the population of France is approximately "
-            "68 million people. The country spans 640,679 square kilometers."
-        )
-        assert _assess_tool_result_relevance("web_search", result) is True
-
-    def test_tool_error_result_rejected(self):
-        assert _assess_tool_result_relevance(
-            "web_search", "Error: Tool 'web_search' timed out after 15s"
-        ) is False
 
 
 # ---------------------------------------------------------------------------

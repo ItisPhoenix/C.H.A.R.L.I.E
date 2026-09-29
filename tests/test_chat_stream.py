@@ -397,8 +397,6 @@ def test_calculator_close_prefers_verified_window_identity(monkeypatch):
 
 
 def test_calculator_close_tries_modern_candidate_after_legacy_candidate_is_absent(monkeypatch):
-    import subprocess
-
     called_cmds = []
 
     def mock_run(cmd, *args, **kwargs):
@@ -409,7 +407,7 @@ def test_calculator_close_tries_modern_candidate_after_legacy_candidate_is_absen
             "stderr": "ERROR: The process was not found." if "calc.exe" in cmd else "",
         })()
 
-    monkeypatch.setattr(subprocess, "run", mock_run)
+    monkeypatch.setattr(desktop_apps.subprocess, "run", mock_run)
     monkeypatch.setattr("sys.platform", "win32")
     monkeypatch.setattr(desktop_apps, "is_process_running", lambda _: False)
 
@@ -423,15 +421,13 @@ def test_calculator_close_tries_modern_candidate_after_legacy_candidate_is_absen
 
 
 def test_calculator_close_reports_not_running_when_all_candidates_are_absent(monkeypatch):
-    import subprocess
-
     called_cmds = []
 
     def mock_run(cmd, *args, **kwargs):
         called_cmds.append(cmd)
         return type("Result", (), {"returncode": 128, "stdout": "", "stderr": "not found"})()
 
-    monkeypatch.setattr(subprocess, "run", mock_run)
+    monkeypatch.setattr(desktop_apps.subprocess, "run", mock_run)
     monkeypatch.setattr("sys.platform", "win32")
 
     result = desktop_apps.close_apps(["calculator"], ["calc.exe"])
@@ -2076,7 +2072,8 @@ async def test_approval_denial_stops_remaining_tools_and_model_followup(monkeypa
     assert "version 3.14.1" in response
     assert "scheduled for friday" in response
     assert "remaining steps" in response
-    assert "unverified file fragment" not in response
+    assert "unverified file fragment" in response
+    assert "earlier results" in response
     assert "x" * 100 in response
     assert "x" * 2001 not in response
     assert not any(name in response for name in ("shell_execute", "calendar_list", "web_search", "desktop_key"))

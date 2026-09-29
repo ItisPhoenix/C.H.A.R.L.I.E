@@ -50,6 +50,7 @@ class TestRegisterGeneratedTool:
         spec = parse_generated_tool("double_it", _VALID_SOURCE)
         names = register_generated_tool(registry, spec)
         assert names == ["double_it"]
+        assert registry.get_risk_class("double_it") == "security_sensitive"
         assert registry.execute_tool("double_it", {"n": "10"}) == "20"
 
 

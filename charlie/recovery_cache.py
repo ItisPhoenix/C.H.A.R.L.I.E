@@ -6,7 +6,7 @@ from typing import Optional
 
 logger = logging.getLogger("charlie.recovery_cache")
 
-CACHE_FILE = ".charlie_recovery_cache.json"
+CACHE_FILE = os.getenv("CHARLIE_RECOVERY_CACHE_PATH", ".charlie_recovery_cache.json")
 
 def _get_cache_key(command: str, failure_class: str, error_message: str) -> str:
     """Generates a stable unique hash key for a failure pattern."""

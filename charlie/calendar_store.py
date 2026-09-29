@@ -67,6 +67,28 @@ def _normalize_automation_schedule(
         raise ValueError("recurrence must be once, daily, or weekly")
     zone = _automation_zone(timezone_name)
     normalized_first_run = normalize_calendar_timestamp(first_run_at, "first_run_at")
+    candidate = first_run_at.strip()
+    if candidate.endswith(("Z", "z")):
+        candidate = candidate[:-1] + "+00:00"
+    supplied_first_run = datetime.fromisoformat(candidate)
+    supplied_offset = supplied_first_run.utcoffset()
+    wall_time = supplied_first_run.replace(tzinfo=None)
+    zone_offsets = {
+        wall_time.replace(tzinfo=zone, fold=fold).utcoffset()
+        for fold in (0, 1)
+    }
+    if supplied_offset != timedelta(0) and supplied_offset not in zone_offsets:
+        expected = ", ".join(
+            sorted(
+                datetime(2000, 1, 1, tzinfo=timezone(offset)).strftime("%z")
+                for offset in zone_offsets
+                if offset is not None
+            )
+        )
+        raise ValueError(
+            f"first_run_at offset does not match timezone {zone.key}; "
+            f"use {expected} or Z for UTC"
+        )
     parsed_first_run = datetime.fromisoformat(normalized_first_run.replace("Z", "+00:00"))
     # Resolve the configured zone before persisting so bad timezone names never
     # leave a schedule that a future dispatcher cannot interpret.

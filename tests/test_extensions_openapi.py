@@ -93,9 +93,14 @@ class _FakeRegistry:
     def __init__(self):
         self.registered = {}
 
-    def register_tool(self, name, description, schema, **_):
+    def register_tool(self, name, description, schema, **metadata):
         def decorator(func):
-            self.registered[name] = {"description": description, "schema": schema, "func": func}
+            self.registered[name] = {
+                "description": description,
+                "schema": schema,
+                "risk_class": metadata.get("risk_class"),
+                "func": func,
+            }
             return func
 
         return decorator
@@ -109,6 +114,8 @@ class TestRegisterOpenAPIOperations:
         registered = register_openapi_operations(registry, spec)
 
         assert set(registered) == {"api_getWidget", "api_createWidget"}
+        assert registry.registered["api_getWidget"]["risk_class"] == "safe"
+        assert registry.registered["api_createWidget"]["risk_class"] == "security_sensitive"
 
     def test_path_parameter_substituted_into_url(self, monkeypatch):
         spec = parse_openapi_spec(_SAMPLE_SPEC)
