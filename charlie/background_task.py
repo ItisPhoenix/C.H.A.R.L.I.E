@@ -62,6 +62,12 @@ logger = logging.getLogger("charlie.background_task")
 
 _POLL_INTERVAL_SEC = 2.0
 _STEP_RE = re.compile(r"^\s*\d+[.)]\s+(.+)$")
+_RESEARCH_STEP_ACTION_RE = re.compile(
+    r"\b(?:search|research|investigate|look\s+up|find)\b", re.IGNORECASE
+)
+_RESEARCH_STEP_TARGET_RE = re.compile(
+    r"\b(?:official|source|sources|publication|page|evidence)\b", re.IGNORECASE
+)
 # Mirrors charlie/recovery_cache.py's dotfile-in-cwd convention.
 _STATE_FILE = os.getenv("CHARLIE_BACKGROUND_TASK_STATE_PATH", ".charlie_background_task_state.json")
 _JOURNAL_FILE = os.getenv("CHARLIE_TASK_JOURNAL_PATH", ".charlie_task_journal.json")
@@ -87,6 +93,15 @@ _CLI_COMMAND_RE = re.compile(
     r"cmd(?:\.exe)?|powershell(?:\.exe)?|pwsh(?:\.exe)?)\b",
     re.IGNORECASE,
 )
+
+
+def _step_needs_research_prefetch(step_text: str) -> bool:
+    """Allow one bounded fetched-research prepass for research-shaped steps."""
+
+    text = str(step_text or "")
+    action = _RESEARCH_STEP_ACTION_RE.search(text)
+    target = _RESEARCH_STEP_TARGET_RE.search(text)
+    return bool(action and target and action.start() <= target.start())
 _FILE_RESOURCE_RE = re.compile(r"\b(file|folder|directory|download|write|delete|rename)\b", re.IGNORECASE)
 _RESEARCH_RESOURCE_RE = re.compile(r"\b(research|web\s+search|search\s+sources|investigate)\b", re.IGNORECASE)
 _VISION_RESOURCE_RE = re.compile(r"\b(vision|screenshot|image|photo|picture|visual)\b", re.IGNORECASE)
@@ -1171,7 +1186,7 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
                     step_text,
                     session_id=task.session_id,
                     platform=task.approval_platform,
-                    skip_pre_search=True,
+                    skip_pre_search=not _step_needs_research_prefetch(step_text),
                     task_id=task.id,
                     turn_id=task.turn_id,
                     execution_owner_id=task.id,
