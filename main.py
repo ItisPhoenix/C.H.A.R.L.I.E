@@ -2247,6 +2247,8 @@ async def main() -> int:
     telegram_origin_turn_ids: set[str] = set()
     telegram_background_tasks_by_turn: Dict[str, set[str]] = {}
     telegram_background_task_ids: set[str] = set()
+    telegram_background_start_messages: Dict[str, set[int]] = {}
+    telegram_background_finished_tasks: set[str] = set()
     # ponytail: one-owner Telegram bridge; serialize edits globally, split per-chat if multi-owner support arrives.
     telegram_status_lock = asyncio.Lock()
     active_turn_id: Optional[str] = None
@@ -2588,6 +2590,22 @@ async def main() -> int:
                     telegram_status_tasks_by_turn[task_id] = asyncio.create_task(
                         _show_telegram_status_after_delay(task_id),
                         name=f"telegram-status-{task_id}",
+                    )
+
+        async def _delete_telegram_background_ack(task_id: str) -> None:
+            """Delete transient background acknowledgement messages, preserving final results."""
+            message_ids = telegram_background_start_messages.pop(task_id, set())
+            if telegram_bot is None:
+                return
+            for message_id in message_ids:
+                try:
+                    await telegram_bot.delete_status_message(config.telegram_user_id, message_id)
+                except Exception:
+                    logger.warning(
+                        "Could not clear Telegram background acknowledgement %s for task %s",
+                        message_id,
+                        task_id,
+                        exc_info=True,
                     )
 
         def _schedule_telegram_status_update(turn_id: str, text: str) -> None:
@@ -3037,6 +3055,8 @@ async def main() -> int:
             finally:
                 if task_id in telegram_background_task_ids:
                     await _finish_telegram_turn_feedback(task_id)
+                    telegram_background_finished_tasks.add(task_id)
+                    await _delete_telegram_background_ack(task_id)
                     telegram_background_task_ids.discard(task_id)
                     for parent_turn_id, task_ids in list(telegram_background_tasks_by_turn.items()):
                         task_ids.discard(task_id)
@@ -3913,7 +3933,17 @@ async def main() -> int:
                         logger.warning(f"Failed to archive assistant message or touch session: {e}")
                     if platform == "telegram" and telegram_bot:
                         try:
-                            await telegram_bot.send_message(config.telegram_user_id, final_reply)
+                            message_id = await telegram_bot.send_message(config.telegram_user_id, final_reply)
+                            match = re.search(
+                                r"Background task started \(id=([A-Za-z0-9_-]+),",
+                                final_reply,
+                            )
+                            if message_id is not None and match is not None:
+                                background_id = match.group(1)
+                                telegram_background_start_messages.setdefault(background_id, set()).add(message_id)
+                                if background_id in telegram_background_finished_tasks:
+                                    telegram_background_finished_tasks.discard(background_id)
+                                    await _delete_telegram_background_ack(background_id)
                         except Exception:
                             logger.warning("Failed to send Telegram reply", exc_info=True)
 

@@ -391,6 +391,26 @@ def test_private_owner_can_send_typing_and_manage_one_status_message():
     asyncio.run(exercise())
 
 
+def test_send_message_returns_message_id_for_transient_cleanup():
+    import asyncio
+    from types import SimpleNamespace
+
+    from charlie.telegram_bot import TelegramBot
+
+    async def exercise():
+        class FakeBot:
+            async def send_message(self, **_kwargs):
+                return SimpleNamespace(message_id=23)
+
+        bot = TelegramBot.__new__(TelegramBot)
+        bot._allowed_user_id = 42
+        bot._app = SimpleNamespace(bot=FakeBot())
+
+        assert await bot.send_message(42, "Background task started") == 23
+
+    asyncio.run(exercise())
+
+
 def test_telegram_activity_and_status_api_failures_are_non_fatal():
     import asyncio
     from types import SimpleNamespace

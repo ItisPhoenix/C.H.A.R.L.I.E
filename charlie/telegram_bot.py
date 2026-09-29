@@ -83,8 +83,9 @@ class TelegramBot:
         await self._app.stop()
         await self._app.shutdown()
 
-    async def send_message(self, chat_id: int, text: str) -> None:
-        await self._app.bot.send_message(chat_id=chat_id, text=text)
+    async def send_message(self, chat_id: int, text: str) -> Optional[int]:
+        message = await self._app.bot.send_message(chat_id=chat_id, text=text)
+        return getattr(message, "message_id", None)
 
     async def send_typing(self, chat_id: int) -> None:
         if chat_id != self._allowed_user_id:
