@@ -100,6 +100,23 @@ async def test_compression_keeps_native_tool_call_with_its_result():
     assert any(message.get("content") == "current request" for message in compressed)
 
 
+def test_token_count_includes_tool_call_metadata_and_exposed_schemas():
+    plain = [{"role": "assistant", "content": "answer"}]
+    tool_call = [{
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{"id": "call-1", "function": {"name": "file_read", "arguments": "{}"}}],
+    }]
+    schema = [{
+        "name": "file_read",
+        "description": "Read a file from an allowed path.",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+    }]
+
+    assert _token_count(tool_call) > _token_count(plain)
+    assert _token_count(plain, extra_context=schema) > _token_count(plain)
+
+
 @pytest.mark.asyncio
 async def test_compression_threshold_from_config_is_honored():
     """Regression test: config.compression_threshold must actually control

@@ -797,21 +797,38 @@ def strip_internal_reasoning(text: str) -> str:
     return text.strip()
 
 
-def _token_count(messages: List[Dict[str, Any]]) -> int:
-    """Approximate token count of messages."""
+def _token_count(
+    messages: List[Dict[str, Any]], extra_context: Optional[List[Dict[str, Any]]] = None
+) -> int:
+    """Approximate tokens for messages plus tool-call/schema context."""
+    items = [*messages, *(extra_context or [])]
+
+    def serialized_content(message: Dict[str, Any]) -> str:
+        content = message.get("content", "") or ""
+        if not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=False, separators=(",", ":"))
+        metadata = {
+            key: message[key]
+            for key in ("tool_calls", "tool_call_id", "name")
+            if key in message
+        }
+        if metadata:
+            content += json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+        return content
+
     try:
         import tiktoken
 
         enc = tiktoken.get_encoding("cl100k_base")
         total = 0
-        for msg in messages:
-            total += len(enc.encode(msg.get("content", "") or ""))
+        for msg in items:
+            total += len(enc.encode(serialized_content(msg)))
             total += 4
         return total
     except Exception:
         count = 0
-        for msg in messages:
-            text = msg.get("content", "") or ""
+        for msg in items:
+            text = serialized_content(msg)
             count += len(text) // 4 + 1
         return count
 
@@ -1010,8 +1027,12 @@ async def _generate_summary(messages: List[Dict[str, Any]], config: Any, max_cha
         return f"{len(messages)} earlier messages omitted due to length."
 
 
-async def _compress_messages(messages: List[Dict[str, Any]], config: "Config") -> List[Dict[str, Any]]:
-    total = _token_count(messages)
+async def _compress_messages(
+    messages: List[Dict[str, Any]],
+    config: "Config",
+    extra_context: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    total = _token_count(messages, extra_context)
     window = getattr(config, "context_window", 32000)
     compression_threshold = getattr(config, "compression_threshold", 0.8)
     threshold = int(compression_threshold * window)
@@ -1019,15 +1040,32 @@ async def _compress_messages(messages: List[Dict[str, Any]], config: "Config") -
         return messages
 
     pruned = _prune_old_tool_results(messages, keep_last=2)
-    if _token_count(pruned) <= threshold:
+    if _token_count(pruned, extra_context) <= threshold:
+        logger.info(
+            "context_compacted | original_tokens=%s | retained_tokens=%s | extra_context_tokens=%s",
+            total,
+            _token_count(pruned),
+            _token_count(extra_context or []),
+        )
         return pruned
 
-    return await _halve_history(pruned, config)
+    compressed = await _halve_history(pruned, config)
+    logger.info(
+        "context_truncated | original_tokens=%s | retained_tokens=%s | extra_context_tokens=%s",
+        total,
+        _token_count(compressed),
+        _token_count(extra_context or []),
+    )
+    return compressed
 
 
-async def _prep_messages(messages: List[Dict[str, Any]], config: "Config") -> List[Dict[str, Any]]:
+async def _prep_messages(
+    messages: List[Dict[str, Any]],
+    config: "Config",
+    extra_context: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
     """Sanitize roles then compress to fit the context window."""
-    return await _compress_messages(_sanitize_roles(messages), config)
+    return await _compress_messages(_sanitize_roles(messages), config, extra_context)
 
 
 # --- Verbosity preference detection ---
@@ -5292,7 +5330,16 @@ class Brain:
         if self.history:
             messages.extend(self.history[-(self._history_max_turns * 2) :])
         messages.append({"role": "user", "content": effective_input})
-        messages = await _prep_messages(messages, self.config)
+        context_tools = (
+            capability_index.filter_schemas(
+                available_only=True,
+                registered_only=True,
+                config=self.config,
+            )
+            if self._use_native_tools and not effective_skip_tools
+            else []
+        )
+        messages = await _prep_messages(messages, self.config, extra_context=context_tools)
 
         # Save user message to history -- the full original utterance, even if a
         # fast-path above rebound user_input to a compound instruction's leftover.
@@ -5873,9 +5920,18 @@ class Brain:
                 )
                 messages.extend(tool_results)
 
-            messages = await _prep_messages(messages, self.config)
-
             repeat_limit_reached = _repeat_guard.should_stop_for_no_progress
+            followup_tools = (
+                capability_index.filter_schemas(
+                    available_only=True,
+                    registered_only=True,
+                    config=self.config,
+                )
+                if self._use_native_tools and not repeat_limit_reached
+                else []
+            )
+            messages = await _prep_messages(messages, self.config, extra_context=followup_tools)
+
             followup_payload = self._build_payload(messages, skip_tools=repeat_limit_reached)
             payload_has_vision = _payload_is_vision(followup_payload)
             if payload_has_vision and self._vision_client is None:
