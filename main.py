@@ -2725,6 +2725,7 @@ async def main() -> int:
                 logger.warning("Rejected approval for a stale or wrong-channel request: %s", request_id)
                 return False
 
+            background_record = None
             if expected_platform == "telegram" and approved:
                 journal = get_task_journal()
                 background_record = next(
@@ -2751,18 +2752,34 @@ async def main() -> int:
                             request_id,
                             exc_info=True,
                         )
-                        return resolve_tool_approval(
+                        # Do not leave an approved future capable of running an
+                        # operation whose journal transition failed.
+                        resolve_tool_approval(
                             request_id,
                             False,
                             expected_platform=expected_platform,
                         )
+                        return False
 
-            if not resolve_tool_approval(
+            resolved = resolve_tool_approval(
                 request_id,
                 approved,
                 expected_platform=expected_platform,
-            ):
+            )
+            if not resolved:
                 logger.warning("Ignored stale or unknown tool approval: %s", request_id)
+                if background_record is not None:
+                    try:
+                        get_task_journal().fail(
+                            background_record.id,
+                            error_summary="Approval callback became stale before execution; action was not run.",
+                        )
+                    except Exception:
+                        logger.error(
+                            "Could not fail stale background task %s after approval race",
+                            background_record.id,
+                            exc_info=True,
+                        )
                 return False
             expiry_task = telegram_approval_expiry_tasks.pop(request_id, None)
             if expiry_task is not None and not expiry_task.done():
@@ -3518,7 +3535,10 @@ async def main() -> int:
             from charlie.core import get_active_tool_approval
 
             pending_approval = get_active_tool_approval()
-            if pending_approval:
+            # Telegram ingress handles explicit text responses before dispatch;
+            # every other owner message remains a normal turn and is queued
+            # behind a foreground approval by _should_queue_active_turn.
+            if pending_approval and platform != "telegram":
                 pending_approval_id, approval_channel = pending_approval
                 record_primary_decision(
                     intent="control",

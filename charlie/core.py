@@ -328,6 +328,9 @@ _REPEATED_TOOL_RESULT = (
     "Repeated identical tool call suppressed. Choose another valid capability or finish the response."
 )
 _REPEATED_TOOL_FAILURE = "I couldn't complete that because the model kept requesting an invalid or repeated action."
+_UNCHANGED_RESULT_WARNING = (
+    "The same successful result was returned twice without progress. Make progress with a different action or finish."
+)
 _SCOPE_FILTER_NOTICE = (
     "One or more proposed tool calls were not run because they did not match the user's request "
     "or verified evidence. Do not retry them; use the available results and state what remains unverified."
@@ -1697,26 +1700,50 @@ def _verified_partial_result_reply(
 ) -> str:
     """Report verified work before explaining why the rest of the turn stopped."""
     requested_facts = _verified_requested_shell_fact_reply(request, operation_results)
-    if requested_facts:
-        return f"{requested_facts}\n\nStatus: {interruption} I didn't attempt the remaining steps."
-
     outputs: List[str] = []
+    issues: List[str] = []
     for _call, envelope in operation_results:
-        if (
-            envelope.status != ResultStatus.COMPLETED.value
-            or envelope.verification_status != VerificationStatus.VERIFIED_SUCCESS.value
-        ):
-            continue
-        output = _result_envelope_to_model_text(envelope).strip()
+        output = _result_envelope_to_model_text(envelope).strip() or "; ".join(envelope.errors or ())
         if output:
-            outputs.append(output[:480].rstrip() + (" …" if len(output) > 480 else ""))
-    if outputs:
-        return (
-            "Verified so far: "
-            + "; ".join(outputs)
-            + f"\n\nStatus: {interruption} I didn't attempt the remaining steps."
-        )
-    return ""
+            output = output[:480].rstrip() + (" …" if len(output) > 480 else "")
+        if (
+            envelope.status == ResultStatus.COMPLETED.value
+            and envelope.verification_status == VerificationStatus.VERIFIED_SUCCESS.value
+        ):
+            if output:
+                outputs.append(output)
+        elif (
+            _operation_failed(envelope)
+            or envelope.verification_status == VerificationStatus.VERIFIED_FAILURE.value
+        ):
+            issues.append(f"Failed: {output or 'No verified result was produced.'}")
+        elif (
+            envelope.status == ResultStatus.UNVERIFIED.value
+            or envelope.status == ResultStatus.PARTIALLY_COMPLETED.value
+            or envelope.verification_status
+            in {
+                VerificationStatus.EXECUTED_UNVERIFIED.value,
+                VerificationStatus.VERIFICATION_UNAVAILABLE.value,
+            }
+        ):
+            issues.append(f"Unverified: {output or 'The result could not be verified.'}")
+
+    sections: List[str] = []
+    if requested_facts:
+        sections.append(requested_facts)
+    elif outputs:
+        sections.append("Verified so far: " + "; ".join(outputs))
+    if issues:
+        issue_section = "Earlier results: " + "; ".join(issues)
+        if not sections:
+            return (
+                f"{interruption} I didn't attempt the remaining steps.\n\n"
+                + issue_section
+            )
+        sections.append(issue_section)
+    if not sections:
+        return ""
+    return "\n\n".join(sections) + f"\n\nStatus: {interruption} I didn't attempt the remaining steps."
 
 
 def _approval_interruption(operation_results: List[tuple[Dict[str, Any], ResultEnvelope]]) -> str:
@@ -5527,6 +5554,7 @@ class Brain:
         _desktop_action_count = [0]  # mutable cell, closed over by _exec_one
         _turn_external_texts: List[str] = []  # tool_external results, fed to security_policy's injected-command check
         last_vision_answer: Optional[str] = None
+        repeat_warning_signature: Optional[str] = None
 
         def _record_repeat_result(
             call: Dict[str, Any],
@@ -5536,6 +5564,7 @@ class Brain:
             track_no_progress: bool,
             suppress_success_replay: bool,
         ) -> int:
+            nonlocal repeat_warning_signature
             count = _repeat_guard.record_result(
                 signature,
                 envelope,
@@ -5549,6 +5578,8 @@ class Brain:
             )
             if count == 2:
                 logger.warning("Tool %s returned the same successful result twice without progress.", call["name"])
+                if repeat_warning_signature is None:
+                    repeat_warning_signature = signature
             return count
 
         def _finalize_operation_result(
@@ -5890,7 +5921,30 @@ class Brain:
                 ) or "I reached this turn's tool limit before finishing. Let me know if you want me to continue."
                 return
 
-            tool_calls = allowed_calls
+            # A read-only batch can contain the same stable call more than once.
+            # Keep the first ID/result pair and leave fresh observations uncapped.
+            seen_stable_signatures: set[str] = set()
+            unique_calls: List[Dict[str, Any]] = []
+            for call in allowed_calls:
+                call["arguments"] = _normalize_automation_timezone(
+                    original_user_input,
+                    call["name"],
+                    call["arguments"],
+                )
+                op = capability_index.get_operation(call["name"])
+                fresh_observation = getattr(op, "freshness_sec", None) is not None or call["name"] in {
+                    "desktop_observe",
+                    "desktop_read_screen",
+                    "desktop_screenshot",
+                    "desktop_windows",
+                }
+                if not fresh_observation:
+                    signature = _repeat_tool_call_signature(call["name"], call["arguments"])
+                    if signature in seen_stable_signatures:
+                        continue
+                    seen_stable_signatures.add(signature)
+                unique_calls.append(call)
+            tool_calls = unique_calls
             results_map: Dict[int, ResultEnvelope] = {}
             read_only_idxs = [i for i, call in enumerate(tool_calls) if not tool_registry.is_interactive(call["name"])]
             if read_only_idxs:
@@ -5935,7 +5989,20 @@ class Brain:
                 return
             # Give the model the real operation result. Do not turn short values or
             # tool-specific errors into a search-specific fallback.
-            exec_results = [_result_envelope_to_model_text(result) for result in operation_results]
+            exec_results = []
+            warning_added = False
+            for call, result in zip(tool_calls, operation_results):
+                result_text = _result_envelope_to_model_text(result)
+                if (
+                    not warning_added
+                    and repeat_warning_signature is not None
+                    and repeat_warning_signature == _repeat_tool_call_signature(call["name"], call["arguments"])
+                ):
+                    result_text = f"{result_text}\n\n{_UNCHANGED_RESULT_WARNING}"
+                    warning_added = True
+                exec_results.append(result_text)
+            if warning_added:
+                repeat_warning_signature = None
 
             for c, r in zip(tool_calls, exec_results):
                 if trust_level_for_tool(c["name"]) == "tool_external":

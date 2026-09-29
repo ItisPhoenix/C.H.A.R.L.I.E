@@ -236,9 +236,11 @@ class TelegramBot:
         message = getattr(query, "message", None)
         fallback_chat_id = getattr(getattr(message, "chat", None), "id", None)
         fallback_message_id = getattr(message, "message_id", None)
-        self._on_approval(request_id, approved)
-        await self.delete_approval_message(
-            request_id,
-            chat_id=fallback_chat_id,
-            message_id=fallback_message_id,
-        )
+        try:
+            self._on_approval(request_id, approved)
+        finally:
+            await self.delete_approval_message(
+                request_id,
+                chat_id=fallback_chat_id,
+                message_id=fallback_message_id,
+            )

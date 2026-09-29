@@ -204,6 +204,43 @@ def test_telegram_approval_prompt_is_deleted_after_resolution():
     asyncio.run(exercise())
 
 
+def test_telegram_approval_prompt_is_deleted_when_resolver_raises():
+    import asyncio
+    from types import SimpleNamespace
+
+    from charlie.telegram_bot import TelegramBot
+
+    async def exercise():
+        deleted = []
+
+        class FakeBot:
+            async def delete_message(self, **kwargs):
+                deleted.append(kwargs)
+
+        class FakeCallback:
+            from_user = SimpleNamespace(id=42)
+            data = "approve:req-1"
+            message = SimpleNamespace(chat=SimpleNamespace(id=42), message_id=11)
+
+            async def answer(self):
+                pass
+
+        def failing_resolver(_request_id, _approved):
+            raise RuntimeError("resolver failed")
+
+        bot = TelegramBot.__new__(TelegramBot)
+        bot._allowed_user_id = 42
+        bot._app = SimpleNamespace(bot=FakeBot())
+        bot._on_approval = failing_resolver
+
+        with pytest.raises(RuntimeError, match="resolver failed"):
+            await bot._handle_callback(SimpleNamespace(callback_query=FakeCallback()), None)
+
+        assert deleted == [{"chat_id": 42, "message_id": 11}]
+
+    asyncio.run(exercise())
+
+
 def test_slow_message_does_not_block_owner_approval_callback():
     import asyncio
     from types import SimpleNamespace

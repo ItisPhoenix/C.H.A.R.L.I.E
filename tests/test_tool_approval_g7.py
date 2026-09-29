@@ -168,6 +168,43 @@ async def test_background_telegram_approval_waits_for_send_and_matches_request(t
 
 
 @pytest.mark.asyncio
+async def test_stale_background_callback_fails_journaled_task_closed(tmp_path, monkeypatch):
+    from charlie import core as core_module
+
+    journal = _background_task_journal(tmp_path)
+    bot = _ApprovalBot()
+    approval_callback, telegram_callback = _main_approval_callbacks(bot, journal)
+    brain = _brain(approval_callback)
+    try:
+        decision_task = asyncio.create_task(
+            brain._request_tool_approval_decision(
+                "shell_execute",
+                {"command": "taskkill /?"},
+                "approved shell command",
+                platform="telegram",
+                task_id="bg-approval-test",
+            )
+        )
+        await asyncio.wait_for(bot.started.wait(), timeout=1)
+        request_id = bot.request_id
+        monkeypatch.setattr(core_module, "resolve_tool_approval", lambda *_args, **_kwargs: False)
+
+        assert telegram_callback(request_id, True) is False
+        record = journal.get("bg-approval-test")
+        assert record.status is TaskStatus.FAILED
+        assert record.approval_reference == ""
+        assert "stale" in record.error_summary.casefold()
+
+        monkeypatch.undo()
+        assert resolve_tool_approval(request_id, False, expected_platform="telegram") is True
+        bot.release.set()
+        assert await asyncio.wait_for(decision_task, timeout=1) is ApprovalDecision.REJECTED
+    finally:
+        bot.release.set()
+        await brain.close()
+
+
+@pytest.mark.asyncio
 async def test_background_telegram_send_failure_is_unavailable_and_clears_pending_state(tmp_path):
     journal = _background_task_journal(tmp_path)
     bot = _ApprovalBot(error=RuntimeError("test send failure"))
