@@ -69,6 +69,7 @@ class TelegramBot:
         self._app = Application.builder().token(token).build()
         self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
         self._app.add_handler(CallbackQueryHandler(self._handle_callback))
+        self._approval_message_ids: dict[str, tuple[int, int]] = {}
 
     async def start(self) -> None:
         await self._app.initialize()
@@ -128,17 +129,42 @@ class TelegramBot:
         tool_name: str,
         reason: str,
         operation_preview: Optional[str] = None,
-    ) -> None:
+    ) -> Optional[int]:
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("Approve", callback_data=f"approve:{request_id}"),
             InlineKeyboardButton("Decline", callback_data=f"decline:{request_id}"),
         ]])
         text = f"Please review this action\n{reason}"
         if operation_preview:
-            text += f"\n\nCommand:\n{operation_preview}"
-        await self._app.bot.send_message(
+            label = "Command" if tool_name == "shell_execute" else "Action"
+            text += f"\n\n{label}:\n{operation_preview}"
+        message = await self._app.bot.send_message(
             chat_id=chat_id, text=text, reply_markup=keyboard
         )
+        message_id = getattr(message, "message_id", None)
+        if message_id is not None:
+            if not hasattr(self, "_approval_message_ids"):
+                self._approval_message_ids = {}
+            self._approval_message_ids[request_id] = (chat_id, int(message_id))
+        return message_id
+
+    async def delete_approval_message(
+        self,
+        request_id: str,
+        *,
+        chat_id: Optional[int] = None,
+        message_id: Optional[int] = None,
+    ) -> None:
+        """Remove an approval prompt after it resolves or expires."""
+        stored = getattr(self, "_approval_message_ids", {}).pop(request_id, None)
+        if stored is not None:
+            chat_id, message_id = stored
+        if chat_id is None or message_id is None:
+            return
+        try:
+            await self._app.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception:
+            logger.warning("Telegram approval message delete failed", exc_info=True)
 
     async def send_skill_candidate_review(
         self, chat_id: int, name: str, content_hash: str, review_token: str, content: str
@@ -207,9 +233,12 @@ class TelegramBot:
         if parsed is None:
             return
         request_id, approved = parsed
-        if self._on_approval(request_id, approved):
-            await query.edit_message_reply_markup(reply_markup=None)
-        else:
-            await query.edit_message_text(
-                "This approval has expired. Send the request again.", reply_markup=None
-            )
+        message = getattr(query, "message", None)
+        fallback_chat_id = getattr(getattr(message, "chat", None), "id", None)
+        fallback_message_id = getattr(message, "message_id", None)
+        self._on_approval(request_id, approved)
+        await self.delete_approval_message(
+            request_id,
+            chat_id=fallback_chat_id,
+            message_id=fallback_message_id,
+        )

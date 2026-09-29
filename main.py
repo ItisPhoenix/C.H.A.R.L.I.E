@@ -125,6 +125,7 @@ for _logger_name in NOISY_LOGGER_PREFIXES:
 from charlie import background_task, telemetry
 from charlie.errors import ErrorClass, classify_exception
 from charlie.config import Config, config
+from charlie.console_ingress import ConsoleTextIngress
 from charlie.core import Brain
 from charlie.extensions import (
     ExtensionRuntimeRegistry,
@@ -275,12 +276,15 @@ def _should_queue_active_turn(turn_active: bool, approval_pending: bool, channel
     return turn_active and (not approval_pending or channel == "telegram")
 
 
-def _telegram_approval_reason(tool_name: str, risk_class: Any) -> str:
+def _telegram_approval_reason(tool_name: str, risk_class: Any, reason: str = "") -> str:
     risk = str(getattr(risk_class, "value", risk_class)).casefold()
     if tool_name == "shell_execute":
         if risk in {"destructive", "irreversible"}:
             return "This command may change or stop something on your PC. Please review it before approving."
         return "I can't confirm this command is read-only. Please review it before approving."
+    if reason.strip():
+        sentence = reason.strip().rstrip(".")
+        return f"{sentence[0].upper()}{sentence[1:]}."
     return "This action may change something on your PC. Please review it before approving."
 
 
@@ -2007,12 +2011,16 @@ def _strip_tool_lines(text: str) -> str:
     return "\n".join(kept).strip()
 
 
-def _safe_speak(voice, text: str, emotion: str, label: str = "") -> None:
+def _safe_speak(
+    voice, text: str, emotion: str, label: str = "", *, channel: Optional[str] = None
+) -> None:
     """Speak text, logging (not swallowing) any TTS failure.
 
     A mid-stream TTS error must never abort the answer generation loop --
     the UI token stream and message persistence downstream must still run.
     """
+    if channel == "console":
+        return
     text = re.sub(r"\[S\d+\]", "", text or "").replace("  ", " ").strip()
     if not text:
         return
@@ -2024,6 +2032,10 @@ def _safe_speak(voice, text: str, emotion: str, label: str = "") -> None:
             f" ({label})" if label else "",
             exc_info=True,
         )
+
+
+def _print_console_reply(text: str) -> None:
+    print(f"\nCharlie: {text}", flush=True)
 
 
 def _schedule_process(coro, loop):
@@ -2203,6 +2215,7 @@ async def main() -> int:
 
     logger.info("Charlie is waking up...")
     voice = None
+    console_ingress = None
     store = None
     audit_store = None
     memory_graph = None
@@ -2230,6 +2243,7 @@ async def main() -> int:
     telegram_status_text_by_turn: Dict[str, str] = {}
     telegram_status_tasks_by_turn: Dict[str, asyncio.Task] = {}
     telegram_approval_turn_by_request: Dict[str, str] = {}
+    telegram_approval_expiry_tasks: Dict[str, asyncio.Task] = {}
     telegram_origin_turn_ids: set[str] = set()
     telegram_background_tasks_by_turn: Dict[str, set[str]] = {}
     telegram_background_task_ids: set[str] = set()
@@ -2260,6 +2274,8 @@ async def main() -> int:
             if runtime_shutting_down:
                 return
             runtime_shutting_down = True
+        if console_ingress is not None and not console_ingress.stop():
+            logger.debug("Console input reader remains blocked on stdin during shutdown")
         _runtime_health.set_runtime_lifecycle(RuntimeStatus.SHUTTING_DOWN)
         _set_subsystem_health_if_known("background_tasks", HealthStatus.SHUTTING_DOWN, "Admission closing")
         background_task.close_admission()
@@ -2748,6 +2764,9 @@ async def main() -> int:
             ):
                 logger.warning("Ignored stale or unknown tool approval: %s", request_id)
                 return False
+            expiry_task = telegram_approval_expiry_tasks.pop(request_id, None)
+            if expiry_task is not None and not expiry_task.done():
+                expiry_task.cancel()
             if event_bus is not None:
                 _submit_event_threadsafe(
                     event_bus.emit(
@@ -2761,6 +2780,27 @@ async def main() -> int:
             if approved and approval_turn_id:
                 _schedule_telegram_status_update(approval_turn_id, "Working on it…")
             return True
+
+        async def _delete_telegram_approval_after_timeout(request_id: str) -> None:
+            """Remove a foreground approval prompt after its core wait expires."""
+            try:
+                from charlie.core import _TELEGRAM_TOOL_APPROVAL_TIMEOUT_SEC
+
+                await asyncio.sleep(_TELEGRAM_TOOL_APPROVAL_TIMEOUT_SEC + 0.5)
+                if telegram_bot is not None:
+                    await telegram_bot.delete_approval_message(request_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Could not clear expired Telegram approval %s",
+                    request_id,
+                    exc_info=True,
+                )
+            finally:
+                current = telegram_approval_expiry_tasks.get(request_id)
+                if current is asyncio.current_task():
+                    telegram_approval_expiry_tasks.pop(request_id, None)
 
         async def _handle_voice_control(request: TurnRequest, control: Any) -> None:
             nonlocal speech_echo_cooldown
@@ -2928,12 +2968,17 @@ async def main() -> int:
                             config.telegram_user_id,
                             request_id,
                             tool_name,
-                            _telegram_approval_reason(tool_name, risk_class),
+                            _telegram_approval_reason(tool_name, risk_class, reason),
                             operation_preview=operation_preview,
                         ),
                         timeout=15.0,
                     )
                     sent = True
+                    if background_task_id is None:
+                        telegram_approval_expiry_tasks[request_id] = asyncio.create_task(
+                            _delete_telegram_approval_after_timeout(request_id),
+                            name=f"telegram-approval-expiry-{request_id}",
+                        )
                 except asyncio.TimeoutError:
                     logger.warning("Telegram approval request %s timed out before send confirmation", request_id)
                 except Exception:
@@ -3357,6 +3402,10 @@ async def main() -> int:
             finally:
                 release_lifecycle_gate()
 
+        def on_console_text(text: str):
+            request = _allocate_turn_request(text, current_session_id, "console")
+            _schedule_process(_dispatch_or_queue(request), loop)
+
         def _cleanup_intent_decision(processor):
             """Release interactive route metadata after every processing outcome."""
 
@@ -3420,8 +3469,10 @@ async def main() -> int:
                         await telegram_bot.send_message(config.telegram_user_id, message)
                     except Exception:
                         logger.warning("Failed to send Telegram reply", exc_info=True)
+                elif platform == "console":
+                    _print_console_reply(message)
                 else:
-                    _safe_speak(voice, message, last_emotion, "fast-reply")
+                    _safe_speak(voice, message, last_emotion, "fast-reply", channel=platform)
 
             def record_primary_decision(
                 *,
@@ -3484,6 +3535,8 @@ async def main() -> int:
                     guidance = "Use the matching Approve or Decline button in Telegram. Typed yes does not approve."
                     if platform == "voice":
                         voice.speak(guidance, last_emotion)
+                    elif platform == "console":
+                        await _deliver_immediate_reply(guidance)
                     elif telegram_bot:
                         try:
                             await telegram_bot.send_message(config.telegram_user_id, guidance)
@@ -3503,6 +3556,8 @@ async def main() -> int:
                         voice.speak("Cancelled.", last_emotion)
                     else:
                         voice.speak("That approval expired.", last_emotion)
+                elif platform == "console" and not resolved:
+                    await _deliver_immediate_reply("That approval expired.")
                 elif not resolved and telegram_bot:
                     try:
                         await telegram_bot.send_message(
@@ -3566,7 +3621,8 @@ async def main() -> int:
                     for role, content in results:
                         truncated = content[:120] + "..." if len(content) > 120 else content
                         response_str += f"- [{role}]: {truncated}\n"
-                print(f"\n{response_str}", flush=True)
+                if platform != "console":
+                    print(f"\n{response_str}", flush=True)
                 await _deliver_immediate_reply(response_str)
                 mark_response_complete()
                 return
@@ -3597,7 +3653,8 @@ async def main() -> int:
                                 response_str += f"    {pred}\n"
                             if len(preds) > 3:
                                 response_str += f"    ... +{len(preds) - 3} more\n"
-                print(f"\n{response_str}", flush=True)
+                if platform != "console":
+                    print(f"\n{response_str}", flush=True)
                 await _deliver_immediate_reply(response_str)
                 mark_response_complete()
                 return
@@ -3646,7 +3703,7 @@ async def main() -> int:
                     "calm": "Got it, calming down.",
                 }
                 ack = ack_map.get(cmd_emotion, "Got it.")
-                if platform == "telegram" and telegram_bot is not None:
+                if platform in {"telegram", "console"}:
                     await _deliver_immediate_reply(ack)
                 else:
                     voice.speak(ack, cmd_emotion)
@@ -3714,14 +3771,18 @@ async def main() -> int:
                     if is_first_flush:
                         sentence_buffer, flushed = _flush_complete_sentences(
                             sentence_buffer,
-                            lambda part: _safe_speak(voice, part, detected_emotion, "first-flush"),
+                            lambda part: _safe_speak(
+                                voice, part, detected_emotion, "first-flush", channel=platform
+                            ),
                         )
                         if flushed:
                             is_first_flush = False
                         elif len(sentence_buffer) >= 150:
                             idx = sentence_buffer.rfind(" ", 0, 150)
                             if idx > 0:
-                                _safe_speak(voice, sentence_buffer[:idx], detected_emotion, "first-force")
+                                _safe_speak(
+                                    voice, sentence_buffer[:idx], detected_emotion, "first-force", channel=platform
+                                )
                                 sentence_buffer = sentence_buffer[idx:].lstrip()
                             is_first_flush = False
                             flushed = True
@@ -3729,7 +3790,9 @@ async def main() -> int:
                     if not flushed:
                         sentence_buffer, flushed = _flush_complete_sentences(
                             sentence_buffer,
-                            lambda part: _safe_speak(voice, part, detected_emotion, "sentence"),
+                            lambda part: _safe_speak(
+                                voice, part, detected_emotion, "sentence", channel=platform
+                            ),
                         )
 
                     if not flushed and len(sentence_buffer) >= _MAX_FLUSH_CHARS:
@@ -3738,12 +3801,16 @@ async def main() -> int:
                         clause_idx = _CLAUSE_BOUNDARY.search(sentence_buffer[:_MAX_FLUSH_CHARS])
                         if clause_idx:
                             flush_end = clause_idx.end()
-                            _safe_speak(voice, sentence_buffer[:flush_end], detected_emotion, "clause")
+                            _safe_speak(
+                                voice, sentence_buffer[:flush_end], detected_emotion, "clause", channel=platform
+                            )
                             sentence_buffer = sentence_buffer[flush_end:].lstrip()
                         else:
                             word_idx = sentence_buffer.rfind(" ", 0, _MAX_FLUSH_CHARS)
                             if word_idx > 0:
-                                _safe_speak(voice, sentence_buffer[:word_idx], detected_emotion, "word")
+                                _safe_speak(
+                                    voice, sentence_buffer[:word_idx], detected_emotion, "word", channel=platform
+                                )
                                 sentence_buffer = sentence_buffer[word_idx:].lstrip()
                             elif sentence_buffer.strip():
                                 _safe_speak(
@@ -3751,12 +3818,15 @@ async def main() -> int:
                                     sentence_buffer[:_MAX_FLUSH_CHARS],
                                     detected_emotion,
                                     "force",
+                                    channel=platform,
                                 )
                                 sentence_buffer = sentence_buffer[_MAX_FLUSH_CHARS:]
 
                 # Final TTS for any text that did not reach a progressive boundary.
                 if sentence_buffer.strip():
-                    _safe_speak(voice, sparkle + sentence_buffer, detected_emotion, "final")
+                    _safe_speak(
+                        voice, sparkle + sentence_buffer, detected_emotion, "final", channel=platform
+                    )
 
                 # Persist the generated reply.
                 final_reply = full_reply_buffer.strip()
@@ -4668,6 +4738,31 @@ async def main() -> int:
                         )
                     except Exception:
                         logger.warning("Failed to emit watcher alert event", exc_info=True)
+                    signal = payload.get("signal") or {}
+                    if (
+                        signal.get("kind") in {"path_change", "stalled_task"}
+                        and level >= AttentionLevel.INFORM
+                        and telegram_bot is not None
+                        and config.telegram_user_id > 0
+                    ):
+                        async def _deliver_watcher_telegram() -> None:
+                            try:
+                                await telegram_bot.send_message(
+                                    config.telegram_user_id, f"Watcher alert: {message}"
+                                )
+                            except Exception:
+                                logger.warning("Watcher Telegram API send failed", exc_info=True)
+                            else:
+                                logger.info("Watcher Telegram API send accepted")
+
+                        try:
+                            submitted = _submit_event_threadsafe(
+                                _deliver_watcher_telegram(), _watcher_loop
+                            )
+                            if submitted is None:
+                                logger.warning("Watcher Telegram delivery failed: main loop unavailable")
+                        except Exception:
+                            logger.warning("Failed to schedule watcher Telegram delivery", exc_info=True)
                     if level >= AttentionLevel.ATTENTION and bool(getattr(voice, "is_ready", False)):
                         try:
                             voice.speak(message, "neutral")
@@ -4722,6 +4817,9 @@ async def main() -> int:
             zmq_handler.setFormatter(logging.Formatter("%(asctime)s [%(name)s] [%(levelname)s] - %(message)s"))
             zmq_handler.setLevel(logging.INFO)
             logging.getLogger().addHandler(zmq_handler)
+
+            console_ingress = ConsoleTextIngress(loop, on_console_text)
+            console_ingress.start()
 
             system_status_task = asyncio.create_task(_emit_system_status(bus), name="emit_system_status")
             calendar_task = asyncio.create_task(_calendar_reminder_loop(), name="calendar_reminder_loop")
@@ -4840,6 +4938,13 @@ async def main() -> int:
 
         get_task_journal().set_on_change(None)
         if telegram_bot is not None:
+            expiry_tasks = list(telegram_approval_expiry_tasks.values())
+            telegram_approval_expiry_tasks.clear()
+            for task in expiry_tasks:
+                if not task.done():
+                    task.cancel()
+            if expiry_tasks:
+                await asyncio.gather(*expiry_tasks, return_exceptions=True)
             for turn_id in set(telegram_status_text_by_turn) | set(telegram_status_messages_by_turn):
                 try:
                     await _finish_telegram_turn_feedback(turn_id)

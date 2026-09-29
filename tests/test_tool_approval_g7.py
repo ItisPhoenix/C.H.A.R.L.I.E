@@ -14,11 +14,30 @@ from charlie.config import Config
 from charlie.core import (
     ApprovalDecision,
     Brain,
+    _approval_operation_preview,
     get_active_tool_approval,
     pending_tool_approvals,
     resolve_tool_approval,
 )
 from charlie.task_journal import TaskJournal, TaskOrigin, TaskStatus
+
+
+def test_approval_preview_names_file_target_without_exposing_contents():
+    preview = _approval_operation_preview(
+        "file_write",
+        {"path": r"C:\Users\Charlie\Downloads\summary.md", "content": "private draft"},
+    )
+
+    assert "summary.md" in preview
+    assert "Write to" in preview
+    assert "private draft" not in preview
+
+
+def test_telegram_approval_reason_uses_the_policy_reason():
+    assert main._telegram_approval_reason(
+        "file_write", RiskClass.SECURITY_SENSITIVE,
+        "overwrite of existing file 'summary.md' requires approval",
+    ) == "Overwrite of existing file 'summary.md' requires approval."
 
 
 class _ApprovalBot:
@@ -67,6 +86,7 @@ def _main_approval_callbacks(bot, journal):
             "event_bus": None,
             "get_task_journal": lambda: journal,
             "telegram_approval_turn_by_request": {},
+            "telegram_approval_expiry_tasks": {},
             "telegram_background_task_ids": set(),
             "_set_telegram_turn_status": no_status_update,
             "_schedule_telegram_status_update": lambda *_args, **_kwargs: None,

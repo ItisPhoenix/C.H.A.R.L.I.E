@@ -141,29 +141,65 @@ def test_stale_telegram_approval_button_reports_expiration():
     from charlie.telegram_bot import TelegramBot
 
     async def exercise():
-        edits = []
+        deleted = []
+
+        class FakeBot:
+            async def delete_message(self, **kwargs):
+                deleted.append(kwargs)
 
         class FakeCallback:
             from_user = SimpleNamespace(id=42)
             data = "approve:expired-request"
+            message = SimpleNamespace(chat=SimpleNamespace(id=42), message_id=7)
 
             async def answer(self):
                 pass
 
-            async def edit_message_reply_markup(self, **kwargs):
-                edits.append(("markup", kwargs))
-
-            async def edit_message_text(self, text, **kwargs):
-                edits.append(("text", text, kwargs))
-
         bot = TelegramBot.__new__(TelegramBot)
         bot._allowed_user_id = 42
         bot._on_approval = lambda _request_id, _approved: False
+        bot._app = SimpleNamespace(bot=FakeBot())
         await bot._handle_callback(SimpleNamespace(callback_query=FakeCallback()), None)
 
-        assert edits[0][0] == "text"
-        assert "expired" in edits[0][1].casefold()
-        assert edits[0][2].get("reply_markup") is None
+        assert deleted == [{"chat_id": 42, "message_id": 7}]
+
+    asyncio.run(exercise())
+
+
+def test_telegram_approval_prompt_is_deleted_after_resolution():
+    import asyncio
+    from types import SimpleNamespace
+
+    from charlie.telegram_bot import TelegramBot
+
+    async def exercise():
+        deleted = []
+
+        class FakeBot:
+            async def send_message(self, **kwargs):
+                return SimpleNamespace(message_id=11)
+
+            async def delete_message(self, **kwargs):
+                deleted.append(kwargs)
+
+        class FakeCallback:
+            from_user = SimpleNamespace(id=42)
+            data = "approve:req-1"
+            message = SimpleNamespace(chat=SimpleNamespace(id=42), message_id=11)
+
+            async def answer(self):
+                pass
+
+        bot = TelegramBot.__new__(TelegramBot)
+        bot._allowed_user_id = 42
+        bot._app = SimpleNamespace(bot=FakeBot())
+        bot._on_approval = lambda request_id, approved: (request_id, approved) == ("req-1", True)
+
+        await bot.send_approval_request(42, "req-1", "desktop_close_app", "Needs approval")
+        await bot._handle_callback(SimpleNamespace(callback_query=FakeCallback()), None)
+
+        assert deleted == [{"chat_id": 42, "message_id": 11}]
+        assert bot._approval_message_ids == {}
 
     asyncio.run(exercise())
 
@@ -379,6 +415,13 @@ def test_approval_request_shows_optional_operation_preview_and_keeps_buttons():
         await bot.send_approval_request(
             42, "req-2", "shell_execute", "Needs approval", operation_preview="Get-ChildItem C:\\"
         )
+        await bot.send_approval_request(
+            42,
+            "req-3",
+            "file_write",
+            "Overwrite of existing file 'summary.md' requires approval.",
+            operation_preview="Write to C:\\Users\\abhi2\\Downloads\\summary.md (42 characters)",
+        )
 
         assert sent[0]["text"].splitlines()[0] == "Please review this action"
         assert "Operation preview" not in sent[0]["text"]
@@ -386,6 +429,9 @@ def test_approval_request_shows_optional_operation_preview_and_keeps_buttons():
         assert "Needs approval" in sent[1]["text"].splitlines()
         assert "Get-ChildItem C:\\" in sent[1]["text"].splitlines()
         assert "Command:" in sent[1]["text"].splitlines()
+        assert "Overwrite of existing file 'summary.md' requires approval." in sent[2]["text"]
+        assert "Action:" in sent[2]["text"].splitlines()
+        assert r"C:\Users\abhi2\Downloads\summary.md" in sent[2]["text"]
         buttons = sent[1]["reply_markup"].inline_keyboard[0]
         assert [button.callback_data for button in buttons] == ["approve:req-2", "decline:req-2"]
 
