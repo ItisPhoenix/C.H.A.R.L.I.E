@@ -6563,10 +6563,9 @@ def _format_text_tool_summary(
         if call["name"] == "shell_execute":
             args = call.get("arguments", {})
             cmd = args.get("command", args) if isinstance(args, dict) else args
-            if "Command executed successfully" in content:
-                lines.append(f"shell_execute {cmd} executed successfully. The command is now running.")
-            else:
-                lines.append(f"shell_execute {cmd} returned: {content}")
+            # Keep the adapter result verbatim. The model needs short stdout
+            # and exact errors to ground its follow-up instead of guessing.
+            lines.append(f"shell_execute {cmd} returned: {content}")
         else:
             args = call.get("arguments", {})
             arg_str = args.get("command", args) if isinstance(args, dict) else args
