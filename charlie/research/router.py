@@ -23,6 +23,11 @@ _LOCAL_VERSION_CONTEXT = re.compile(
     r"\b(?:installed|locally|on this (?:pc|computer|machine|device)|on my (?:pc|computer|machine|device))\b",
     re.IGNORECASE,
 )
+_LOCAL_SHELL_FACTS = re.compile(
+    r"\btaskkill\b.*\b(?:help|heading|first)\b"
+    r"|\b(?:python|python3)\b.*\bversion\b.*\b(?:installed|locally|on (?:this|my)\b)\b",
+    re.IGNORECASE | re.DOTALL,
+)
 _RESEARCH_SIGNALS = re.compile(
     r"\b(research|investigate|deep research|in[- ]depth|compare|comparison|thorough|thoroughly|"
     r"look into|analyze current|multi[- ]source|multi[- ]step)\b",
@@ -119,6 +124,8 @@ def choose_mode(query: str, requested: str | ResearchMode | None = None) -> Rese
         return ResearchDecision(True, ResearchMode.STANDARD, "fetched evidence requested")
     if re.search(r"\bversion\b", text, re.IGNORECASE) and _LOCAL_VERSION_CONTEXT.search(text):
         return ResearchDecision(False, None, "local installed-version lookup")
+    if _LOCAL_SHELL_FACTS.search(text) and not _RESEARCH_SIGNALS.search(text):
+        return ResearchDecision(False, None, "local shell fact lookup")
     if _SOCIAL_CONVERSATION_SIGNALS.search(text):
         return ResearchDecision(False, None, "social conversation is not a live-web request")
     if _STABLE_EXPLANATION.search(text) and not _CURRENT_SIGNALS.search(text):
