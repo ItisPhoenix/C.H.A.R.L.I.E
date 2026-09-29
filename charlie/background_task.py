@@ -126,6 +126,9 @@ class BackgroundTask:
     require_successful_operation: bool = False
     successful_operation: Optional[ResultEnvelope] = field(default=None, repr=False)
     planning_pending: bool = field(default=False, repr=False)
+    verified_step_checkpoints: List[int] = field(default_factory=list)
+    active_step_index: Optional[int] = field(default=None, repr=False, compare=False)
+    step_operation_results: List[bool] = field(default_factory=list, repr=False, compare=False)
 
     def to_event(self) -> Dict[str, Any]:
         return {
@@ -168,6 +171,7 @@ class BackgroundTask:
             "turn_id": self.turn_id,
             "origin": self.origin.value,
             "capability_requirements": list(self.capability_requirements),
+            "verified_step_checkpoints": list(self.verified_step_checkpoints),
         }
 
 
@@ -278,6 +282,7 @@ def _record_task_lifecycle(
         current_action=current_action,
         current_step=task.current_step,
         total_steps=len(task.steps),
+        verified_step_checkpoints=task.verified_step_checkpoints,
         waiting_reason="user_input" if requested_status is CanonicalTaskStatus.PAUSED else None,
     )
     if mirror_legacy_status:
@@ -503,6 +508,17 @@ def _legacy_current_step(state: Dict[str, Any]) -> int:
         return 0
 
 
+def _legacy_verified_step_checkpoints(state: Dict[str, Any], steps: List[str]) -> List[int]:
+    values = state.get("verified_step_checkpoints", ())
+    if not isinstance(values, (list, tuple)):
+        return []
+    return sorted({
+        value
+        for value in values
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < len(steps)
+    })
+
+
 def _legacy_initial_status(state: Dict[str, Any]) -> CanonicalTaskStatus:
     raw_status = state.get("status")
     try:
@@ -523,6 +539,7 @@ def _legacy_state_is_terminal(state: Dict[str, Any]) -> bool:
 
 def _mirror_legacy_terminal_state(state: Dict[str, Any], record: TaskRecord) -> None:
     state["status"] = _legacy_status_for(record.status)
+    state["verified_step_checkpoints"] = list(record.verified_step_checkpoints)
     if record.error_summary:
         state["error"] = record.error_summary
     _write_legacy_state(state)
@@ -554,6 +571,7 @@ def _reconstruct_legacy_task(state: Dict[str, Any]) -> TaskRecord:
         current_action=current_action,
         current_step=current_step,
         total_steps=len(steps),
+        verified_step_checkpoints=_legacy_verified_step_checkpoints(state, steps),
     )
     return _journal.transition(task_id, CanonicalTaskStatus.FAILED, error_summary=_RESTART_ERROR)
 
@@ -581,10 +599,11 @@ def check_interrupted_task() -> Optional[Dict[str, Any]]:
             pass
 
     if canonical is not None:
+        state["verified_step_checkpoints"] = list(canonical.verified_step_checkpoints)
         if canonical.status in _CANONICAL_TERMINAL_STATUSES:
             if task_id in reconciled_ids:
                 state["status"] = "failed"
-                state["error"] = _RESTART_ERROR
+                state["error"] = canonical.error_summary or _RESTART_ERROR
                 _write_legacy_state(state)
                 return state
             _mirror_legacy_terminal_state(state, canonical)
@@ -616,7 +635,8 @@ def check_interrupted_task() -> Optional[Dict[str, Any]]:
     if task_id is None:
         state["id"] = reconstructed.id
     state["status"] = "failed"
-    state["error"] = _RESTART_ERROR
+    state["error"] = reconstructed.error_summary or _RESTART_ERROR
+    state["verified_step_checkpoints"] = list(reconstructed.verified_step_checkpoints)
     _write_legacy_state(state)
     return state
 
@@ -794,6 +814,17 @@ async def start(
         verification_status = getattr(
             envelope.verification_status, "value", envelope.verification_status
         )
+        if task.active_step_index is not None:
+            from charlie.capabilities import capability_index
+
+            operation = capability_index.get_operation(tool_name)
+            task.step_operation_results.append(
+                operation is not None
+                and operation.risk_class == "safe"
+                and envelope.operation == operation.id
+                and _operation_succeeded(envelope)
+                and verification_status == "verified_success"
+            )
         if (
             task.successful_operation is None
             and _operation_succeeded(envelope)
@@ -1133,16 +1164,21 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
 
             step_text = task.steps[task.current_step]
             step_output = ""
-            async for chunk in task.brain.chat_stream(
-                step_text,
-                session_id=task.session_id,
-                platform=task.approval_platform,
-                skip_pre_search=True,
-                task_id=task.id,
-                turn_id=task.turn_id,
-                execution_owner_id=task.id,
-            ):
-                step_output += chunk
+            task.active_step_index = task.current_step
+            task.step_operation_results.clear()
+            try:
+                async for chunk in task.brain.chat_stream(
+                    step_text,
+                    session_id=task.session_id,
+                    platform=task.approval_platform,
+                    skip_pre_search=True,
+                    task_id=task.id,
+                    turn_id=task.turn_id,
+                    execution_owner_id=task.id,
+                ):
+                    step_output += chunk
+            finally:
+                task.active_step_index = None
             step_outputs.append(step_output)
 
             if task.cancel_requested:
@@ -1160,6 +1196,10 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
                 await _store_result(task, event_bus, f"Task failed: {task.error}")
                 return
 
+            if task.step_operation_results and all(task.step_operation_results):
+                if task.current_step not in task.verified_step_checkpoints:
+                    task.verified_step_checkpoints.append(task.current_step)
+                    task.verified_step_checkpoints.sort()
             task.current_step += 1
             record = _record_task_lifecycle(task)
             await _emit_task_event(event_bus, record, task=task)

@@ -172,6 +172,20 @@ def launch_and_verify(resolution: AppResolution, timeout_s: float = 3.0) -> bool
     return False
 
 
+def _wait_for_process_exit(process_name: str, timeout_s: float = 0.75) -> bool:
+    """Allow Windows' asynchronous task termination to settle before judging it."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            if not is_process_running(process_name):
+                return True
+        except Exception:
+            return False
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
 def close_apps(matched_apps: list[str], launched_processes: list[str]) -> str:
     """Close resolved apps and report per-app process/window verification."""
     if sys.platform != "win32":
@@ -225,14 +239,10 @@ def close_apps(matched_apps: list[str], launched_processes: list[str]) -> str:
                 )
                 stderr = (result.stderr or "").lower()
                 if result.returncode == 0:
-                    try:
-                        still_running = is_process_running(process)
-                    except Exception:
-                        still_running = True
-                    if still_running:
-                        failed = True
-                    else:
+                    if _wait_for_process_exit(process):
                         closed = True
+                    else:
+                        failed = True
                     break
                 if "not found" in stderr or result.returncode == 128:
                     continue

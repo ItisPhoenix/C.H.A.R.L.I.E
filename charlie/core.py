@@ -918,14 +918,28 @@ async def _halve_history(messages: List[Dict[str, Any]], config: Any) -> List[Di
     summary_max = getattr(config, "history_summary_max_chars", 400)
 
     system_msg = messages[0] if messages and messages[0].get("role") == "system" else None
+    middle_start = 1 if system_msg else 0
 
     # Split: prefix (system), middle (dropped), tail (recent verbatim)
     if len(messages) <= keep_recent + (1 if system_msg else 0):
         return messages
 
-    tail = messages[-keep_recent:]
-    middle_start = 1 if system_msg else 0
-    middle = messages[middle_start : len(messages) - keep_recent]
+    tail_start = len(messages) - keep_recent
+    # Keep tool result batches with their assistant request and user prompt.
+    if tail_start < len(messages) and messages[tail_start].get("role") == "tool":
+        while tail_start > middle_start and messages[tail_start - 1].get("role") == "tool":
+            tail_start -= 1
+        if tail_start > middle_start and messages[tail_start - 1].get("role") == "assistant":
+            tail_start -= 1
+    if tail_start < len(messages) and messages[tail_start].get("role") == "assistant":
+        has_tool_turn = bool(messages[tail_start].get("tool_calls")) or (
+            tail_start + 1 < len(messages) and messages[tail_start + 1].get("role") == "tool"
+        )
+        if has_tool_turn and tail_start > middle_start and messages[tail_start - 1].get("role") == "user":
+            tail_start -= 1
+
+    tail = messages[tail_start:]
+    middle = messages[middle_start:tail_start]
 
     if not middle:
         return messages

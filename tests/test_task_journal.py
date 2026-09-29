@@ -40,6 +40,31 @@ def test_task_journal_creates_stable_canonical_record() -> None:
     assert "awaiting_approval" not in {status.value for status in TaskStatus}
 
 
+def test_task_journal_persists_only_in_range_verified_step_checkpoints(tmp_path) -> None:
+    path = tmp_path / "task-journal.json"
+    journal = TaskJournal(state_path=path)
+    task = journal.create_task(
+        "Read then report",
+        task_id="checkpointed-task",
+        origin=TaskOrigin.BACKGROUND,
+        status=TaskStatus.RUNNING,
+        current_step=2,
+        total_steps=3,
+    )
+
+    checkpointed = journal.update_progress(
+        task.id,
+        current_step=2,
+        total_steps=3,
+        verified_step_checkpoints=[0, 1, 1, -1, 3, True, "2"],
+    )
+
+    assert checkpointed.verified_step_checkpoints == (0, 1)
+    restored = TaskJournal(state_path=path).get(task.id)
+    assert restored.current_step == 2
+    assert restored.verified_step_checkpoints == (0, 1)
+
+
 def test_task_journal_enforces_lifecycle_and_rejects_terminal_regression() -> None:
     journal = TaskJournal()
     task = journal.create_task(title="Inspect logs")

@@ -856,6 +856,71 @@ async def test_count_active_tasks_reflects_queue_depth(monkeypatch, bg_config):
     await asyncio.sleep(0.05)
 
 
+@pytest.mark.asyncio
+async def test_background_task_persists_only_verified_safe_operation_checkpoints(monkeypatch, bg_config, tmp_path):
+    monkeypatch.setattr(background_task, "_DESKTOP_AVAILABLE", False)
+    brains = []
+
+    class CheckpointBrain:
+        def __init__(self, config, **kwargs):
+            self.config = config
+            self.on_result_stored = kwargs.get("on_result_stored")
+            self.on_operation_result = kwargs.get("on_operation_result")
+            self.closed = False
+            brains.append(self)
+
+        async def chat_stream(self, user_input, **_kwargs):
+            if "Break the following task" in user_input:
+                yield "1. Read a file\n2. Write a file\n"
+                return
+
+            operation, risk_class = (
+                ("file_read", "safe")
+                if user_input == "Read a file"
+                else ("file_write", "reversible")
+            )
+            operation_id = "file.system.read" if operation == "file_read" else "file.system.write"
+            self.on_operation_result(
+                operation,
+                ResultEnvelope(
+                    operation=operation_id,
+                    status="completed",
+                    verification_status="verified_success",
+                    risk_class=risk_class,
+                ),
+            )
+            yield "Operation complete."
+
+        async def close(self):
+            self.closed = True
+
+        def cancel_chat(self):
+            return None
+
+    monkeypatch.setattr(background_task, "Brain", CheckpointBrain)
+    journal_path = tmp_path / "task-journal.json"
+    bus = FakeEventBus()
+    task = None
+    try:
+        task = await background_task.start(
+            bg_config, bus, "Read then write a file", task_id="safe-checkpoint"
+        )
+        manager_task = background_task._manager._task_handles[task.id]
+        await asyncio.wait_for(manager_task, timeout=1)
+
+        record = TaskJournal(state_path=journal_path).get(task.id)
+        assert record.status is TaskStatus.COMPLETED
+        assert record.current_step == 2
+        assert record.verified_step_checkpoints == (0,)
+        with open(background_task._STATE_FILE, "r", encoding="utf-8") as state_file:
+            legacy_state = json.load(state_file)
+        assert legacy_state["verified_step_checkpoints"] == [0]
+    finally:
+        for brain in brains:
+            if not brain.closed:
+                await brain.close()
+
+
 # --- restart persistence ---
 
 
@@ -936,7 +1001,54 @@ def test_restart_reconciliation_keeps_ambiguous_work_failed_without_resubmitting
     record = reopened.get("uncertain-payment")
     assert record.status is TaskStatus.FAILED
     assert "outcome is unverified" in record.error_summary
+    assert record.verified_step_checkpoints == ()
     assert submissions == []
+
+
+def test_restart_preserves_verified_checkpoint_but_does_not_resume_remaining_step(
+    monkeypatch, tmp_path
+):
+    journal = _journal_with_path(monkeypatch, tmp_path)
+    task = journal.create_task(
+        "Read then submit",
+        task_id="checkpoint-restart",
+        origin=TaskOrigin.BACKGROUND,
+        status=TaskStatus.RUNNING,
+        current_step=1,
+        total_steps=2,
+    )
+    journal.update_progress(
+        task.id,
+        current_step=1,
+        total_steps=2,
+        verified_step_checkpoints=[0],
+    )
+    _write_legacy_state(
+        {
+            "id": task.id,
+            "text": "Read then submit",
+            "steps": ["Read current state", "Submit payment"],
+            "current_step": 1,
+            "status": "running",
+        }
+    )
+    submissions = []
+    monkeypatch.setattr(
+        background_task._manager,
+        "submit",
+        lambda *args, **kwargs: submissions.append((args, kwargs)),
+    )
+
+    interrupted = background_task.check_interrupted_task()
+
+    assert interrupted["status"] == "failed"
+    assert interrupted["verified_step_checkpoints"] == [0]
+    assert "outcome is unverified" in interrupted["error"]
+    assert submissions == []
+    restored = TaskJournal(state_path=tmp_path / "task-journal.json").get(task.id)
+    assert restored.status is TaskStatus.FAILED
+    assert restored.current_step == 1
+    assert restored.verified_step_checkpoints == (0,)
 
 
 @pytest.mark.parametrize(

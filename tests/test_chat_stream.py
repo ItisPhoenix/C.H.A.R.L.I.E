@@ -458,6 +458,24 @@ def test_close_app_verifies_successful_taskkill_postcondition(monkeypatch):
     assert result == "Failed to close Calculator."
 
 
+def test_close_app_waits_for_async_taskkill_exit(monkeypatch):
+    import subprocess
+
+    running = iter([True, False])
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+    )
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr(desktop_apps, "is_process_running", lambda _: next(running))
+    monkeypatch.setattr(desktop_apps.time, "sleep", lambda _: None)
+
+    result = desktop_apps.close_apps(["calculator"], ["calc.exe"])
+
+    assert result == "Calculator has been closed for you."
+
+
 def test_close_app_keeps_per_app_truth_for_multiple_apps(monkeypatch):
     import subprocess
 

@@ -52,6 +52,55 @@ async def test_compression_trigger():
 
 
 @pytest.mark.asyncio
+async def test_compression_keeps_native_tool_call_with_its_result():
+    config = Config(
+        context_window=100,
+        compression_threshold=0.5,
+        history_keep_recent=1,
+        history_summary_max_chars=400,
+        llm_url="",
+    )
+    tool_call = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "call-native-17",
+                "type": "function",
+                "function": {"name": "file_read", "arguments": "{}"},
+            }
+        ],
+    }
+    tool_result = {
+        "role": "tool",
+        "tool_call_id": "call-native-17",
+        "name": "file_read",
+        "content": "result",
+    }
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "earlier " * 100},
+        {"role": "assistant", "content": "answer " * 100},
+        {"role": "user", "content": "current request"},
+        tool_call,
+        tool_result,
+    ]
+
+    compressed = await _compress_messages(messages, config)
+
+    retained_calls = [
+        call
+        for message in compressed
+        for call in message.get("tool_calls", [])
+        if message.get("role") == "assistant"
+    ]
+    retained_results = [message for message in compressed if message.get("role") == "tool"]
+    assert len(retained_calls) == len(retained_results) == 1
+    assert retained_calls[0]["id"] == retained_results[0]["tool_call_id"] == "call-native-17"
+    assert any(message.get("content") == "current request" for message in compressed)
+
+
+@pytest.mark.asyncio
 async def test_compression_threshold_from_config_is_honored():
     """Regression test: config.compression_threshold must actually control
     when compression kicks in. Before this fix, core.py used a hardcoded

@@ -159,6 +159,7 @@ class TaskRecord:
     started_at: Optional[str] = None
     updated_at: str = field(default_factory=utc_now_iso)
     completed_at: Optional[str] = None
+    verified_step_checkpoints: tuple[int, ...] = ()
 
     def to_dict(self) -> dict:
         return {
@@ -173,6 +174,7 @@ class TaskRecord:
             "capability_requirements": list(self.capability_requirements),
             "current_step": self.current_step,
             "total_steps": self.total_steps,
+            "verified_step_checkpoints": list(self.verified_step_checkpoints),
             "progress": self.progress,
             "current_action": self.current_action,
             "waiting_reason": self.waiting_reason,
@@ -201,6 +203,13 @@ class TaskRecord:
             capability_requirements=tuple(str(value) for value in payload.get("capability_requirements", ())),
             current_step=int(payload.get("current_step", 0)),
             total_steps=int(payload.get("total_steps", 0)),
+            verified_step_checkpoints=tuple(sorted({
+                value
+                for value in payload.get("verified_step_checkpoints", ())
+                if isinstance(value, int)
+                and not isinstance(value, bool)
+                and 0 <= value < max(0, int(payload.get("total_steps", 0)))
+            })) if isinstance(payload.get("verified_step_checkpoints", ()), (list, tuple)) else (),
             progress=payload.get("progress"),
             current_action=payload.get("current_action"),
             waiting_reason=payload.get("waiting_reason"),
@@ -339,6 +348,7 @@ class TaskJournal:
         current_action: Optional[str] = None,
         current_step: Optional[int] = None,
         total_steps: Optional[int] = None,
+        verified_step_checkpoints: Optional[Iterable[int]] = None,
         waiting_reason: Optional[str] = None,
     ) -> TaskRecord:
         with self._lock:
@@ -351,6 +361,14 @@ class TaskJournal:
                 task.current_step = max(0, int(current_step))
             if total_steps is not None:
                 task.total_steps = max(0, int(total_steps))
+            if verified_step_checkpoints is not None:
+                task.verified_step_checkpoints = tuple(sorted({
+                    value
+                    for value in verified_step_checkpoints
+                    if isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and 0 <= value < task.total_steps
+                }))
             if waiting_reason is not None:
                 task.waiting_reason = waiting_reason
             task.updated_at = utc_now_iso()
@@ -464,7 +482,9 @@ class TaskJournal:
         os.replace(temporary, self._state_path)
 
 
-_default_task_journal = TaskJournal(state_path=".charlie_task_journal.json")
+_default_task_journal = TaskJournal(
+    state_path=os.getenv("CHARLIE_TASK_JOURNAL_PATH", ".charlie_task_journal.json")
+)
 
 
 def get_task_journal() -> TaskJournal:
