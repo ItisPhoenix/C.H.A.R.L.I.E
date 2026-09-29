@@ -661,7 +661,7 @@ class TestNormalRoundTrips:
 
         result = await _collect(brain, "close the mystery utility", skip_pre_search=True)
 
-        assert result.startswith("I stopped because the requested approval was not given.")
+        assert result.startswith("The action was declined, so it was not run.")
         assert "desktop_window" not in result
         assert "I didn't attempt the remaining steps." in result
         assert "I've closed the mystery utility." not in result
