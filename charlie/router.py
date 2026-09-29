@@ -504,12 +504,28 @@ _EXPLICIT_BACKGROUND_TASK_START_RE = re.compile(
     r"(?:start|create|launch|queue|run)\s+(?:a\s+)?background\s+(?:task|job)\b",
     re.IGNORECASE,
 )
+_BACKGROUND_WORK_PERMISSION_RE = re.compile(
+    r"\b(?:you\s+(?:can|could|may)\s+work\s+on\s+(?:it|this|that)|"
+    r"please\s+work\s+on\s+(?:it|this|that))\s+in\s+the\s+background\b|"
+    r"\b(?:check|tell|find|look\s+up|run|do|handle|prepare|save|download|remember|remind|"
+    r"research|review)\b(?:\s+\w+){0,20}\s+in\s+the\s+background\b",
+    re.IGNORECASE,
+)
+_BACKGROUND_NEGATION_RE = re.compile(
+    r"\b(?:don['’]t|do\s+not|never|can['’]t|cannot)\b[^.?!]{0,80}\bin\s+the\s+background\b",
+    re.IGNORECASE,
+)
 
 
 def is_explicit_background_task_start(query: str) -> bool:
-    """Recognize a direct request to queue work for background execution."""
+    """Recognize direct task-start language and clear permission to work in background."""
 
-    return bool(_EXPLICIT_BACKGROUND_TASK_START_RE.search(query))
+    if _BACKGROUND_NEGATION_RE.search(query):
+        return False
+    return bool(
+        _EXPLICIT_BACKGROUND_TASK_START_RE.search(query)
+        or _BACKGROUND_WORK_PERMISSION_RE.search(query)
+    )
 
 
 _BACKGROUND_TASK_STATUS_RE = re.compile(
