@@ -28,6 +28,11 @@ _RESEARCH_SIGNALS = re.compile(
     r"look into|analyze current|multi[- ]source|multi[- ]step)\b",
     re.IGNORECASE,
 )
+_FETCHED_EVIDENCE_SIGNALS = re.compile(
+    r"\b(?:official\s+(?:source|sources|publication|page)|sources?|citations?|"
+    r"evidence|publication|paper|report)\b",
+    re.IGNORECASE,
+)
 _SUSTAINED_RESEARCH_SIGNALS = re.compile(
     r"\b(?:investigate|deep\s+research|in[- ]depth|thorough(?:ly)?|"
     r"multi[- ]source|multi[- ]step|look\s+into|analyze\s+current|comparison|compare)\b",
@@ -91,6 +96,7 @@ def choose_mode(query: str, requested: str | ResearchMode | None = None) -> Rese
     requires_fetched_sources = (
         is_briefing_query(text)
         or _RESEARCH_SIGNALS.search(text) is not None
+        or _FETCHED_EVIDENCE_SIGNALS.search(text) is not None
         or _FACTUAL_RESEARCH.search(text) is not None
         or _SPECIALIZED_FACTUAL.search(text) is not None
     )
@@ -109,6 +115,8 @@ def choose_mode(query: str, requested: str | ResearchMode | None = None) -> Rese
     # Keep clear local state edits on the tool path instead of sending them to web search.
     if _LOCAL_STATE_UPDATE.search(text):
         return ResearchDecision(False, None, "local state update")
+    if _FETCHED_EVIDENCE_SIGNALS.search(text):
+        return ResearchDecision(True, ResearchMode.STANDARD, "fetched evidence requested")
     if re.search(r"\bversion\b", text, re.IGNORECASE) and _LOCAL_VERSION_CONTEXT.search(text):
         return ResearchDecision(False, None, "local installed-version lookup")
     if _SOCIAL_CONVERSATION_SIGNALS.search(text):
