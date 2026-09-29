@@ -1839,6 +1839,34 @@ _VISION_SYSTEM_PROMPT = (
     "Do not enumerate every visible detail unless the user asks for detail."
 )
 
+_AUTOMATION_DEFAULT_TIMEZONE = "Asia/Kolkata"
+_EXPLICIT_TIMEZONE_RE = re.compile(
+    r"\b(?:timezone|time\s+zone|UTC|GMT|IST|[A-Za-z]+/[A-Za-z_]+|"
+    r"New\s+York|Eastern\s+Time|Pacific\s+Time)\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_automation_timezone(
+    request: str, tool_name: str, arguments: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Use Charlie's default zone unless the user explicitly names a timezone."""
+    if tool_name not in {"automation_create", "automation_update"}:
+        return arguments
+    timezone_name = arguments.get("timezone")
+    if not isinstance(timezone_name, str) or timezone_name == _AUTOMATION_DEFAULT_TIMEZONE:
+        return arguments
+    if _EXPLICIT_TIMEZONE_RE.search(request):
+        return arguments
+    normalized = dict(arguments)
+    normalized["timezone"] = _AUTOMATION_DEFAULT_TIMEZONE
+    logger.info(
+        "automation_timezone_defaulted | requested=%s | applied=%s",
+        timezone_name,
+        _AUTOMATION_DEFAULT_TIMEZONE,
+    )
+    return normalized
+
 
 def _with_vision_image(messages: List[Dict[str, Any]], image_url: str) -> List[Dict[str, Any]]:
     """Build the vision follow-up payload: a minimal purpose-built system message + the last
@@ -5608,6 +5636,11 @@ class Brain:
         async def _exec_one(call: Dict[str, Any]) -> ResultEnvelope:
             nonlocal research_report
             tool_name = call["name"]
+            call["arguments"] = _normalize_automation_timezone(
+                original_user_input,
+                tool_name,
+                call["arguments"],
+            )
             ck = _repeat_tool_call_signature(tool_name, call["arguments"])
             op = capability_index.get_operation(tool_name)
             is_com = bool(op and op.executor_type == "com_thread")
