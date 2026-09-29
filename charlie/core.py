@@ -6106,8 +6106,27 @@ class Brain:
             )
         )
         try:
-            async for chunk in stream:
-                yield chunk
+            deadline_s = float(getattr(self.config, "turn_deadline_s", 180.0))
+            if deadline_s > 0:
+                async with asyncio.timeout(deadline_s):
+                    async for chunk in stream:
+                        yield chunk
+            else:
+                async for chunk in stream:
+                    yield chunk
+        except TimeoutError:
+            logger.warning(
+                "Turn deadline exceeded | platform=%s | deadline_s=%s | turn_id=%s",
+                effective_platform,
+                deadline_s,
+                decision_turn_id,
+            )
+            if diagnostic_trace is not None:
+                diagnostic_trace.mark(
+                    "turn_timeout",
+                    fields={"platform": effective_platform, "deadline_s": deadline_s},
+                )
+            yield "I stopped because this turn exceeded its time limit."
         finally:
             await _await_bounded_cleanup(stream.aclose(), "chat_stream_generator")
             if interactive_vision:

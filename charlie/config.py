@@ -164,6 +164,10 @@ class Config:
         default=int(os.getenv("ITERATION_BUDGET_MAX", "20")),
         metadata=_meta("ITERATION_BUDGET_MAX", "Chat Behavior"),
     )
+    turn_deadline_s: float = field(
+        default=float(os.getenv("TURN_DEADLINE_S", "180")),
+        metadata=_meta("TURN_DEADLINE_S", "Chat Behavior"),
+    )
     context_window: int = field(
         default=int(os.getenv("CONTEXT_WINDOW", "32000")),
         metadata=_meta("CONTEXT_WINDOW", "Chat Behavior"),

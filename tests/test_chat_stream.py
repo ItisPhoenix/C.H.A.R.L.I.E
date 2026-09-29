@@ -117,6 +117,22 @@ async def test_budget_exhaustion(monkeypatch, brain_config):
 
 
 @pytest.mark.asyncio
+async def test_turn_deadline_returns_truthful_timeout(monkeypatch, brain_config):
+    brain_config.turn_deadline_s = 0.01
+    brain = Brain(brain_config)
+
+    async def slow_stream(_self, *_args, **_kwargs):
+        await asyncio.sleep(0.05)
+        yield "late"
+
+    monkeypatch.setattr(Brain, "_chat_stream_impl", slow_stream)
+
+    chunks = [chunk async for chunk in brain.chat_stream("slow", platform="text")]
+
+    assert chunks == ["I stopped because this turn exceeded its time limit."]
+
+
+@pytest.mark.asyncio
 async def test_explicit_remember_bypasses_model_tool_calling(monkeypatch, brain_config):
     brain = Brain(brain_config)
     calls = []
