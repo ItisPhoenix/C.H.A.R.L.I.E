@@ -3053,10 +3053,13 @@ async def main() -> int:
                     voice=voice,
                 )
             finally:
+                # Result persistence can race the journal terminal callback;
+                # cleanup of the transient acknowledgement must not depend on
+                # telegram_background_task_ids still containing the task.
+                telegram_background_finished_tasks.add(task_id)
+                await _delete_telegram_background_ack(task_id)
                 if task_id in telegram_background_task_ids:
                     await _finish_telegram_turn_feedback(task_id)
-                    telegram_background_finished_tasks.add(task_id)
-                    await _delete_telegram_background_ack(task_id)
                     telegram_background_task_ids.discard(task_id)
                     for parent_turn_id, task_ids in list(telegram_background_tasks_by_turn.items()):
                         task_ids.discard(task_id)
