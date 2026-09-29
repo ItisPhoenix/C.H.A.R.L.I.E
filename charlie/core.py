@@ -1681,6 +1681,21 @@ def _verified_partial_result_reply(
     return ""
 
 
+def _approval_interruption(operation_results: List[tuple[Dict[str, Any], ResultEnvelope]]) -> str:
+    """Describe the concrete approval outcome without exposing internal enums."""
+    statuses = [
+        (envelope.data or {}).get("approval_status")
+        for _call, envelope in reversed(operation_results)
+    ]
+    if "timed_out" in statuses:
+        return "Approval expired before the action ran."
+    if "rejected" in statuses:
+        return "The action was declined, so it was not run."
+    if "unavailable" in statuses:
+        return "Approval was unavailable, so the action was not run."
+    return "The action was not run because approval was not granted."
+
+
 def _operation_succeeded(envelope: ResultEnvelope) -> bool:
     """Return whether execution completed, independent of display text or verification."""
 
@@ -3274,9 +3289,7 @@ class Brain:
                 ApprovalDecision.TIMED_OUT: "Error: Command approval timed out before execution.",
                 ApprovalDecision.UNAVAILABLE: "Error: Command approval channel unavailable.",
             }.get(decision, "Error: Command approval was not granted.")
-            rejection_data = {"failure_kind": "approval_denied"}
-            if include_approval_status:
-                rejection_data["approval_status"] = decision.value
+            rejection_data = {"failure_kind": "approval_denied", "approval_status": decision.value}
             return await _publish(
                 _normalize_tool_result(
                     tool_name,
@@ -5801,11 +5814,12 @@ class Brain:
                     approval_denied = (result.data or {}).get("failure_kind") == "approval_denied"
 
             if approval_denied:
+                interruption = _approval_interruption(turn_operation_results)
                 response = _verified_partial_result_reply(
                     original_user_input,
                     turn_operation_results,
-                    "I stopped because the requested approval was not given (declined or expired).",
-                ) or "I stopped because the requested approval was not given. I didn't attempt the remaining steps."
+                    interruption,
+                ) or f"{interruption} I didn't attempt the remaining steps."
                 self.history.append({"role": "assistant", "content": response})
                 max_messages = self._history_max_turns * 2
                 if len(self.history) > max_messages:

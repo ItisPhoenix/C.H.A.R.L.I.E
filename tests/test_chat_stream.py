@@ -2072,7 +2072,7 @@ async def test_approval_denial_stops_remaining_tools_and_model_followup(monkeypa
     assert calls == ["web_search", "calendar_list", "file_read", "shell_execute"]
     assert len(followup_rounds) == 1
     response = " ".join(chunks).casefold()
-    assert "requested approval was not given" in response
+    assert "approval expired" in response
     assert "version 3.14.1" in response
     assert "scheduled for friday" in response
     assert "remaining steps" in response

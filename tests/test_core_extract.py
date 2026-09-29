@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from charlie.core import (
     Brain,
+    _approval_interruption,
     _ground_external_action_response,
     _is_external_action_result,
     _repeat_tool_call_signature,
@@ -102,6 +103,19 @@ def test_verified_action_survives_later_failed_observation():
         "Notepad has been closed for you.",
         [verified_close, failed_followup],
     ) == "Notepad has been closed for you."
+
+
+def test_approval_interruption_keeps_decline_timeout_and_unavailable_distinct():
+    for status, expected in (
+        ("rejected", "declined"),
+        ("timed_out", "expired"),
+        ("unavailable", "unavailable"),
+    ):
+        envelope = ResultEnvelope(
+            status=ResultStatus.CANCELLED,
+            data={"failure_kind": "approval_denied", "approval_status": status},
+        )
+        assert expected in _approval_interruption([({}, envelope)]).casefold()
 
 
 def _make_brain(use_native_tools: bool) -> Brain:
