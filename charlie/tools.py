@@ -557,10 +557,16 @@ def _run_research_report(name: str, arguments: Dict[str, Any]):
     from charlie.research.engine import ResearchEngine
 
     query = str(arguments.get("query", ""))
-    mode = "quick" if name == "web_search" else str(arguments.get("mode", "auto"))
+    engine = ResearchEngine(config)
+    mode = str(arguments.get("mode", "auto"))
+    if name == "web_search":
+        # Keep quick lookup latency, but do not let explicit research requests
+        # satisfy a fetched-source requirement with snippets alone.
+        decision = engine.decide(query, "quick")
+        mode = decision.mode.value if decision.should_research and decision.mode else "quick"
     domain = str(arguments.get("domain", ""))
     domain_filters = list(dict.fromkeys(part.strip() for part in domain.split(",") if part.strip()))
-    return ResearchEngine(config).run_sync(query, mode, domain_filters=domain_filters or None)
+    return engine.run_sync(query, mode, domain_filters=domain_filters or None)
 
 
 def _single_search(query: str) -> str:
