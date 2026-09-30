@@ -38,9 +38,14 @@ class TestCheckToolCallPathContainment:
         assert result.needs_approval is True
         assert "sensitive path" in result.reason
 
-    def test_ordinary_path_does_not_require_approval(self, tmp_path):
-        result = check_tool_call("file_read", {"path": str(tmp_path / "notes.txt")})
+    def test_ordinary_path_inside_workspace_does_not_require_approval(self, workspace_path):
+        result = check_tool_call("file_read", {"path": str(workspace_path("notes.txt"))})
         assert result.needs_approval is False
+
+    def test_path_outside_approved_roots_requires_approval(self, tmp_path):
+        result = check_tool_call("file_read", {"path": str(tmp_path / "notes.txt")})
+        assert result.needs_approval is True
+        assert "outside Charlie's workspace" in result.reason
 
     def test_file_write_to_ssh_dir_requires_approval(self, tmp_path):
         ssh_path = tmp_path / ".ssh" / "id_rsa"

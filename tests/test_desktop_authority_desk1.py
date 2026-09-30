@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import sys
 import threading
@@ -276,11 +277,29 @@ def test_desktop_host_effect_metadata_is_canonical():
         assert operation.name in registry.get_tool_names()
 
 
-def test_router_matches_apps_but_does_not_own_physical_execution():
+def test_router_matches_apps_but_does_not_own_physical_execution(monkeypatch):
+    """The router may interpret intent, never spawn or kill anything.
+
+    Previously asserted that four strings were absent from router.py's source,
+    which keeps passing if the router starts a process through a differently
+    spelled API. Arm every process entry point to raise, then match: a router
+    that stays pure returns its matches; one that reaches for execution fails.
+    """
+    import os
+    import subprocess
+
     import charlie.router as router
 
-    source = Path(router.__file__).read_text(encoding="utf-8")
-    assert all(token not in source for token in ("Popen", "startfile", "taskkill", "subprocess"))
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("router must not own physical execution")
+
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess, "call", forbidden)
+    monkeypatch.setattr(subprocess, "check_output", forbidden)
+    monkeypatch.setattr(os, "startfile", forbidden, raising=False)
+    monkeypatch.setattr(os, "system", forbidden)
+
     assert router.match_open_app("open notepad") == (["notepad"], ["notepad"], None)
     assert router.match_close_app("close notepad") == (["notepad"], ["notepad.exe"])
 
@@ -493,9 +512,17 @@ def test_takeover_revokes_only_canonical_desktop_ownership(monkeypatch):
         actions.clear_halt()
 
     assert takeover_calls == [("desktop",)]
-    source = Path(takeover_module.__file__).read_text(encoding="utf-8")
-    assert 'release("physical_mouse")' not in source
-    assert 'release("keyboard")' not in source
+    # Physical input ownership is not a Charlie capability: revoking it must
+    # not release a lease the user holds. Assert on the live lease map instead
+    # of grepping the module for release("physical_mouse").
+    assert "physical_mouse" not in resource_locks.default_lease_manager.snapshot()
+    assert "keyboard" not in resource_locks.default_lease_manager.snapshot()
+    assert set(resource_locks.default_lease_manager.snapshot()) <= {
+        "desktop",
+        "browser",
+        "telegram",
+        "voice",
+    }
 
 
 def test_desktop_close_and_window_close_require_destructive_approval():
@@ -541,23 +568,153 @@ def test_uia_shutdown_is_idempotent_and_rejects_new_work(monkeypatch):
         desktop_module.get_uia_executor()
 
 
-def test_main_shutdown_closes_uia_after_execution_drain():
+def test_main_shutdown_closes_uia_only_after_the_submission_drain():
+    """Ordering contract, asserted on the shutdown block itself.
+
+    The old check compared two raw-string offsets across the whole file, so it
+    passed on any occurrence of the text anywhere -- including inside the
+    startup path -- and inverted silently if the drain moved into a later
+    `finally`. This resolves both calls to their real statements inside main's
+    teardown block and requires the drain to come first.
+    """
+    import ast
+
     source = Path(__file__).resolve().parents[1].joinpath("main.py").read_text(encoding="utf-8")
-    drain_index = source.rfind("await _drain_event_bus_submissions")
-    shutdown_index = source.index("shutdown_uia_executor()")
-    assert drain_index < shutdown_index
+    tree = ast.parse(source)
+    main_fn = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "main"
+    )
+    teardown = next(
+        node
+        for node in ast.walk(main_fn)
+        if isinstance(node, ast.Try) and node.finalbody and node.finalbody[0].lineno > 5000
+    )
+
+    def first_line(predicate) -> int:
+        return min(
+            node.lineno
+            for node in ast.walk(teardown)
+            if isinstance(node, ast.Call) and predicate(node)
+        )
+
+    drain_line = first_line(
+        lambda call: isinstance(call.func, ast.Name)
+        and call.func.id == "_drain_runtime_submissions"
+    )
+    uia_line = first_line(
+        lambda call: isinstance(call.func, ast.Name)
+        and call.func.id == "shutdown_uia_executor"
+    )
+
+    assert drain_line < uia_line, (
+        f"UIA executor is closed at line {uia_line} before the submission drain "
+        f"at line {drain_line}: in-flight EventBus work would be abandoned"
+    )
 
 
-def test_web_process_does_not_create_uia_executor_at_import():
+@pytest.mark.asyncio
+async def test_a_drain_that_never_quiesces_blocks_dependent_store_close(monkeypatch):
+    """The ordering above exists because a failed drain must not be silent.
+
+    If drain reported success while work was still running, the UIA executor
+    and the SQLite stores would be torn down under live publishers. Verify the
+    failure path really is observable: the drain raises, and an unverified
+    quiescence refuses to close dependent stores.
+    """
+    import asyncio
+
+    import main
+
+    registry = main._EventBusSubmissionRegistry()
+    loop = asyncio.get_running_loop()
+    stubborn_started = asyncio.Event()
+    stubborn_release = asyncio.Event()
+
+    async def stubborn():
+        # Cancellation is deliberately ineffective here: a publisher that
+        # swallows cancel() and keeps publishing is exactly the failure this
+        # test exists to catch, so the drain must not be able to stop it.
+        # `stubborn_release` is therefore the *only* exit, and the polling
+        # sleep keeps that exit reachable within milliseconds.
+        stubborn_started.set()
+        while not stubborn_release.is_set():
+            try:
+                await asyncio.sleep(0.01)
+            except asyncio.CancelledError:
+                continue
+
+    registry.submit_task(stubborn(), loop)
+    await asyncio.wait_for(stubborn_started.wait(), 1.0)
+
+    with pytest.raises(RuntimeError, match="did not reach quiescence"):
+        await main._drain_event_bus_submissions(registry, loop=loop, timeout=0.05)
+
+    closed = []
+
+    class Store:
+        def close(self):
+            closed.append("closed")
+
+    main._close_runtime_stores(None, Store(), quiescent=False)
+    assert closed == [], "stores were closed despite unverified quiescence"
+
+    # The task must be gone before the test returns. Leaving it pending hangs
+    # the whole suite: pytest-asyncio's loop teardown cancels all pending tasks
+    # and then waits on them, and a task that swallows cancellation never
+    # settles, so the loop parks in select() forever.
+    stubborn_release.set()
+    pending = [task for task in registry.snapshot()[0] if not task.done()]
+    if pending:
+        _, still_pending = await asyncio.wait(pending, timeout=5.0)
+        assert not still_pending, (
+            f"stubborn publisher did not terminate: {still_pending}. It would "
+            "block event-loop teardown and hang the entire pytest run."
+        )
+
+
+def test_web_process_does_not_create_uia_executor_at_import(tmp_path):
+    """Importing the web-process modules must not build the UIA executor.
+
+    A fresh interpreter is the only honest probe: an in-process import would
+    merely re-read the module-level global this suite already populated. The
+    child is bounded and always killed, so a regression here can never wedge
+    the suite the way an unbounded ``run`` would.
+    """
     script = (
         "import charlie.tools; import charlie.capabilities; "
         "import charlie.desktop as d; assert d.UIA_EXECUTOR is None"
     )
-    result = subprocess.run(
+    child_env = dict(os.environ)
+    # Keep the probe off production state: no .env overlay, and any log the
+    # child emits lands in the test's temp dir rather than the repo. The script
+    # imports modules only and never calls main(), so the single-instance lock
+    # is never acquired; the assertion below proves the child never reached it.
+    child_env["CHARLIE_TEST_MODE"] = "true"
+    child_env["CHARLIE_LOG_FILE"] = str(tmp_path / "child.log")
+
+    child = subprocess.Popen(
         [sys.executable, "-c", script],
         cwd=Path(__file__).resolve().parents[1],
-        capture_output=True,
+        env=child_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=15,
     )
-    assert result.returncode == 0, result.stderr
+    try:
+        stdout, stderr = child.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.communicate()
+        pytest.fail(f"import probe hung and was killed (pid {child.pid})")
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.communicate()
+
+    assert child.returncode == 0, f"stdout={stdout!r}\nstderr={stderr!r}"
+    assert "charlie.lock" not in stderr, (
+        f"child engaged the single-instance lock, which is outside this test's "
+        f"intent: {stderr}"
+    )

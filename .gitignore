@@ -36,6 +36,12 @@ browser_profile/
 .charlie_task_journal.json
 pet_position.json
 
+# === Runtime state: extension registry + self-extension skill candidates ===
+# data/extensions.json carries live review_token values and data/skills/.candidates/
+# holds pending-review skills. Runtime state, never source.
+data/extensions.json
+data/skills/
+
 # === ML Models (large files) ===
 models/
 charlie_memory_db/

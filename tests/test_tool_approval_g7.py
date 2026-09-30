@@ -40,10 +40,117 @@ def test_telegram_approval_reason_uses_the_policy_reason():
     ) == "Overwrite of existing file 'summary.md' requires approval."
 
 
-def test_telegram_startup_failure_clears_dead_bot_before_future_approvals():
+def _telegram_startup_block():
+    """main()'s real `if config.telegram_enabled:` startup block, as source.
+
+    The block lives inline inside main(), so there is no importable symbol to
+    call. Extracting and executing it (the same harness this module already uses
+    for the approval callbacks) still runs main.py's own code: a stubbed
+    TelegramBot whose start() raises must leave the runtime with no bot
+    reference, no live poller, and telegram projected DEGRADED.
+    """
     source = Path(main.__file__).read_text(encoding="utf-8")
-    assert "failed_telegram_bot = telegram_bot" in source
-    assert "telegram_bot = None" in source
+    tree = ast.parse(source)
+    main_node = next(
+        node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "main"
+    )
+    block = next(
+        node
+        for node in ast.walk(main_node)
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Attribute)
+        and node.test.attr == "telegram_enabled"
+    )
+    return textwrap.dedent(ast.get_source_segment(source, block))
+
+
+class _FailingStartBot:
+    """TelegramBot stand-in whose startup fails, as it does when polling dies."""
+
+    def __init__(self, *_args, **_kwargs):
+        self.started = False
+        self.stop_calls = 0
+
+    async def start(self):
+        self.started = True
+        raise RuntimeError("telegram poller failed to start")
+
+    async def stop(self):
+        self.stop_calls += 1
+
+
+@pytest.mark.asyncio
+async def test_telegram_startup_failure_clears_dead_bot_and_degrades(monkeypatch):
+    from charlie import telegram_bot as telegram_bot_module
+
+    bot = _FailingStartBot()
+    health = []
+    monkeypatch.setattr(telegram_bot_module, "TelegramBot", lambda *_a, **_k: bot)
+    monkeypatch.setattr(
+        main,
+        "_set_subsystem_health",
+        lambda name, status, detail=None: health.append((name, status, detail)),
+    )
+
+    namespace = vars(main).copy()
+    namespace.update(
+        {
+            "config": SimpleNamespace(
+                telegram_enabled=True,
+                telegram_bot_token="token",
+                telegram_user_id=123,
+            ),
+            "brain": None,
+            "self_extension_orchestrator": None,
+            "logger": _NullLogger(),
+        }
+    )
+    wrapper = (
+        "async def _run():\n" + textwrap.indent(_telegram_startup_block(), "    ") + "\n    return telegram_bot\n"
+    )
+    exec(compile(wrapper, "<main.telegram_startup>", "exec"), namespace)
+    remaining_bot = await namespace["_run"]()
+
+    assert bot.started is True
+    # The dead reference must not survive: later code (shutdown, status
+    # updates, approval relay) dereferences telegram_bot without a None check.
+    assert remaining_bot is None
+    assert bot.stop_calls == 1, "failed startup must release the bot's poller"
+    assert health == [("telegram", main.HealthStatus.DEGRADED, None)]
+
+
+@pytest.mark.asyncio
+async def test_gated_call_declines_rather_than_hangs_after_telegram_startup_failed(tmp_path):
+    """With no live bot, an approval-gated call must settle -- not park forever.
+
+    A dead bot reference left in place makes on_tool_approval_request send
+    through a client that no longer receives updates, so the approval future is
+    never resolved and a foreground turn waits for its full timeout.
+    """
+    journal = _background_task_journal(tmp_path)
+    approval_callback, _ = _main_approval_callbacks(None, journal)
+    brain = _brain(approval_callback)
+    try:
+        decision = await asyncio.wait_for(
+            brain._request_tool_approval_decision(
+                "shell_execute",
+                {"command": "taskkill /?"},
+                "approved shell command",
+                platform="telegram",
+                task_id="bg-approval-test",
+            ),
+            timeout=1,
+        )
+        assert decision is ApprovalDecision.UNAVAILABLE
+    finally:
+        await brain.close()
+
+
+class _NullLogger:
+    def info(self, *_args, **_kwargs):
+        pass
+
+    warning = error = debug = exception = info
 
 
 class _ApprovalBot:

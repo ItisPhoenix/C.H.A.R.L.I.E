@@ -84,7 +84,24 @@ if "pytest" not in sys.modules:
         sys.stderr = SafeStreamWrapper(sys.stderr)
 
 os.makedirs("logs", exist_ok=True)
-LOG_FILE = "logs/charlie.log"
+# The rotating file handler below is attached to the root logger at *import*
+# time, so merely importing this module -- which a dozen test modules do -- used
+# to open and rotate the production log. A single pytest run therefore shifted
+# up to 20MB of real history into charlie.log.1 and destroyed the diagnostic
+# record the file exists to preserve. Under test mode we resolve the log inside
+# the isolated test state dir that tests/conftest.py already redirects every
+# other runtime resource into, so importing main stays non-destructive.
+# CHARLIE_LOG_FILE remains an explicit override so this location is a seam
+# rather than a second hardcoded copy of conftest's directory name.
+_TEST_MODE = os.getenv("CHARLIE_TEST_MODE", "").lower() == "true"
+if _TEST_MODE:
+    _log_dir = os.path.join(".codex-pytest-tmp", "logs")
+    os.makedirs(_log_dir, exist_ok=True)
+    LOG_FILE = os.path.join(_log_dir, "charlie.log")
+else:
+    LOG_FILE = "logs/charlie.log"
+LOG_FILE = os.getenv("CHARLIE_LOG_FILE", "").strip() or LOG_FILE
+os.makedirs(os.path.dirname(os.path.abspath(LOG_FILE)), exist_ok=True)
 
 # 2. CONFIGURE SPLIT LOGGING
 file_log_level = parse_log_level(os.getenv("FILE_LOG_LEVEL"), logging.DEBUG)
@@ -152,6 +169,7 @@ from charlie.results import ResultsStore
 from charlie.settings_service import (
     SettingsService,
 )
+from charlie.single_instance import SingleInstanceError, SingleInstanceLock
 from charlie.state import StateMachine
 from charlie.subsystem_health import HealthRegistry, HealthStatus, RuntimeStatus
 from charlie.task_journal import TaskOrigin, TaskStatus, get_task_journal
@@ -2221,6 +2239,20 @@ async def _deliver_background_result(task_id, summary, *, db_path, telegram_bot,
 
 async def main() -> int:
     global _main_event_bus, _main_event_bus_registry
+    # Claim the runtime before doing any real startup work. The expensive part
+    # of boot (models, brain, subscriptions) is worth skipping entirely for an
+    # instance that is not allowed to own the Telegram poller anyway. Releasing
+    # lives in the shutdown `finally` below; the few lines between here and that
+    # `try` are covered by the OS, which drops the lock if this process dies
+    # before reaching it -- the same guarantee that makes a crashed predecessor
+    # non-blocking for the next run.
+    instance_lock = SingleInstanceLock()
+    try:
+        instance_lock.acquire()
+    except SingleInstanceError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    logger.info("Single-instance lock acquired: %s (pid=%s)", instance_lock.path, os.getpid())
     loop = asyncio.get_running_loop()
     settings_service = SettingsService(config_instance=config)
     _configure_runtime_health(config)
@@ -5082,6 +5114,12 @@ async def main() -> int:
         loop.call_exception_handler = _orig_handler
 
         _log_port_release("127.0.0.1", 5555)
+
+        # Released before logging.shutdown() so the line below still reaches the
+        # file. Releasing last means no other instance can start while this one
+        # is still tearing down.
+        instance_lock.release()
+        logger.info("Single-instance lock released: %s", instance_lock.path)
 
         if shutdown_quiescent and exit_code == 0:
             _runtime_health.set_runtime_lifecycle(RuntimeStatus.STOPPED)

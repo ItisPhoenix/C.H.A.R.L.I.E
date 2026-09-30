@@ -8,15 +8,26 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import socket
+import subprocess
 import time
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from charlie.runtime_introspector import RuntimeIntrospector
 
 logger = logging.getLogger("charlie.doctor")
+
+# LLM and vision probes are real network calls that can bill a completion.
+# Re-running diagnostics must not fan out one request per caller, so a verdict
+# is reused briefly inside a single doctor instance.
+_PROBE_CACHE_TTL_S = 30.0
+# Mirrors Brain.probe_primary_llm's default; long enough to cross a slow local
+# endpoint, short enough that a diagnostics call cannot hang the runtime.
+_DEFAULT_PROBE_TIMEOUT_S = 5.0
 
 
 class CheckStatus(StrEnum):
@@ -31,6 +42,145 @@ class CheckSeverity(StrEnum):
     MEDIUM = "medium"
     HIGH = "high"
     CRITICAL = "critical"
+
+
+@dataclass(frozen=True)
+class ProbeResult:
+    """Verdict of a real dependency probe.
+
+    ``detail`` is evidence a human can read back and must never carry a key.
+    ``status_code`` is preserved so a caller can tell "credential rejected"
+    apart from "route unreachable" instead of collapsing both into one verdict.
+    """
+
+    ok: bool
+    detail: str
+    status_code: Optional[int] = None
+
+    @property
+    def credential_rejected(self) -> bool:
+        return self.status_code in (401, 403)
+
+    @property
+    def transport_failed(self) -> bool:
+        """Whether the request never obtained an HTTP response at all.
+
+        A refused connection, DNS failure, or timeout is a different fault from
+        a 5xx: the endpoint never saw the request, so it neither accepted nor
+        rejected the credential. Collapsing both into one verdict would let a
+        network problem be reported as a rejected key.
+        """
+        return not self.ok and self.status_code is None
+
+
+@dataclass(frozen=True)
+class PortOccupancy:
+    """Whether a TCP port is currently held by a listening socket."""
+
+    occupied: bool
+    detail: str
+
+
+def _probe_event_port(port: int) -> PortOccupancy:
+    """Observe whether ``port`` is held, without disturbing whatever holds it.
+
+    Binding is the only portable way to ask the OS that question, and this
+    implementation never connects or listens, so a live EventBus PUB socket on
+    that port is unaffected. On success the probe socket closes immediately,
+    which is why a free port can still be claimed by the runtime a moment later
+    -- an occupied reading is evidence of a live listener, a free reading only
+    says nobody is bound *at this instant*.
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind(("127.0.0.1", port))
+    except OSError as exc:
+        return PortOccupancy(True, f"bind refused: {type(exc).__name__}")
+    finally:
+        probe.close()
+    return PortOccupancy(False, "bind succeeded, so no socket is listening")
+
+
+def _resolve_event_port() -> int:
+    """Re-derive the port ``EventBus`` would bind.
+
+    Mirrors ``charlie.ipc.EventBus.__init__`` instead of constructing a bus:
+    constructing one allocates a ZeroMQ context, which is runtime state a
+    diagnostic must not own or tear down. Returns 0 when the runtime asked for
+    an ephemeral port, which cannot be meaningfully probed.
+    """
+    from charlie.ipc import DEFAULT_EVENT_PORT
+
+    if os.getenv("CHARLIE_TEST_MODE", "").lower() == "true":
+        return int(os.getenv("CHARLIE_TEST_EVENT_PORT", "0"))
+    return DEFAULT_EVENT_PORT
+
+
+def _probe_chat_endpoint(
+    base_url: str,
+    model: str,
+    api_key: Optional[str],
+    timeout: float,
+    trust_env: bool = False,
+) -> Optional[ProbeResult]:
+    """POST the same one-shot completion request ``Brain.probe_primary_llm`` sends.
+
+    Returns ``None`` when no transport is importable, so the caller can report
+    "unprobed" instead of guessing. Deliberately does not record telemetry or
+    emit health transitions: a diagnostic observes, it does not mutate the
+    canonical counters it is meant to read.
+    """
+    try:
+        import httpx
+
+        from charlie.utils import build_auth_headers
+    except Exception:
+        return None
+
+    payload = {"model": model, "messages": [{"role": "user", "content": "ping"}], "stream": False}
+    try:
+        with httpx.Client(
+            base_url=base_url,
+            headers=build_auth_headers(api_key or ""),
+            timeout=timeout,
+            trust_env=trust_env,
+        ) as client:
+            response = client.post("chat/completions", json=payload)
+    except Exception as exc:
+        return ProbeResult(False, f"{type(exc).__name__} contacting {base_url}/chat/completions")
+
+    code = response.status_code
+    if code < 400:
+        return ProbeResult(True, f"HTTP {code} from {base_url}/chat/completions", code)
+    return ProbeResult(False, f"HTTP {code} from {base_url}/chat/completions", code)
+
+
+def _probe_tesseract(binary: str, timeout: float) -> ProbeResult:
+    """Ask the tesseract binary to identify itself.
+
+    ``--version`` is the cheapest real proof that the executable exists, loads
+    its shared libraries, and can run -- the three ways a screen-OCR tier
+    silently breaks in practice.
+    """
+    try:
+        completed = subprocess.run(
+            [binary, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError:
+        return ProbeResult(False, f"executable not found at '{binary}'")
+    except subprocess.TimeoutExpired:
+        return ProbeResult(False, f"'{binary} --version' did not answer within {timeout:g}s")
+    except OSError as exc:
+        return ProbeResult(False, f"could not execute '{binary}': {type(exc).__name__}")
+
+    banner = next(iter((completed.stdout or "").strip().splitlines()), "").strip() or "(no output)"
+    if completed.returncode != 0:
+        return ProbeResult(False, f"'{binary} --version' exited {completed.returncode}: {banner}")
+    return ProbeResult(True, f"{banner} (exit 0)")
 
 
 @dataclass
@@ -93,7 +243,18 @@ class CharlieDoctor:
         health_registry: Optional[Any] = None,
         mcp_client: Optional[Any] = None,
         memory_service: Optional[Any] = None,
+        llm_probe: Optional[Callable[[], Optional[ProbeResult]]] = None,
+        probe_timeout: float = _DEFAULT_PROBE_TIMEOUT_S,
     ) -> None:
+        """Build a diagnostic instance.
+
+        ``llm_probe`` exists because ``charlie_doctor_diagnose`` constructs this
+        class with no Brain (``charlie/tools.py``), and ``Brain.probe_primary_llm``
+        is an async coroutine owned by a live client. Rather than requiring a
+        Brain, the owner may inject any callable returning a ``ProbeResult`` --
+        returning ``None`` states "this source cannot produce a verdict", which
+        the model check reports as unverified rather than healthy.
+        """
         if capability_index is None:
             from charlie.capabilities import get_capability_index
 
@@ -114,10 +275,64 @@ class CharlieDoctor:
         self._health_registry = health_registry
         self._mcp_client = mcp_client
         self._memory_service = memory_service
+        self._llm_probe = llm_probe
+        self._probe_timeout = probe_timeout
+        self._llm_probe_cache: Optional[tuple[float, Optional[ProbeResult]]] = None
 
         # Repair tracking & circuit breaker
         self._repair_attempts: Dict[str, List[float]] = {}
         self._repair_failures: Dict[str, int] = {}
+
+    # -------------------------------------------------------------------------
+    # Probe plumbing
+    # -------------------------------------------------------------------------
+
+    def _runtime_config(self) -> Any:
+        """Read config without assuming the introspector exposes a private hook.
+
+        Reduced test doubles and the tools.py construction path both lack a
+        usable config; a diagnostic that raises on that is worse than one that
+        reports it could not observe the dependency.
+        """
+        getter = getattr(self._introspector, "_get_config", None)
+        if not callable(getter):
+            return None
+        try:
+            return getter()
+        except Exception:
+            return None
+
+    def _probe_cache_is_fresh(self) -> bool:
+        """Whether this instance already settled on a probe verdict for this run."""
+        entry = self._llm_probe_cache
+        return entry is not None and time.time() - entry[0] <= _PROBE_CACHE_TTL_S
+
+    def _cached_llm_probe(self) -> Optional[ProbeResult]:
+        """Return the recent LLM probe verdict without issuing a new request.
+
+        The secrets check reads this instead of probing again, so "key is
+        present" can be distinguished from "key is accepted" without paying for
+        a second billable completion. Returns ``None`` when no verdict exists
+        yet or the cached one aged out -- callers must treat that as unknown.
+        """
+        return self._llm_probe_cache[1] if self._probe_cache_is_fresh() else None
+
+    def _run_llm_probe(self, cfg: Any) -> Optional[ProbeResult]:
+        """Probe the configured chat route, reusing a recent verdict if present."""
+        if self._probe_cache_is_fresh():
+            return self._llm_probe_cache[1]
+        if self._llm_probe is not None:
+            result = self._llm_probe()
+        else:
+            result = _probe_chat_endpoint(
+                base_url=cfg.llm_url,
+                model=getattr(cfg, "llm_model", None) or "unknown",
+                api_key=getattr(cfg, "llm_key", None) or getattr(cfg, "llm_api_key", None),
+                timeout=self._probe_timeout,
+                trust_env=bool(getattr(cfg, "llm_trust_env", False)),
+            )
+        self._llm_probe_cache = (time.time(), result)
+        return result
 
     # -------------------------------------------------------------------------
     # Diagnostic Checks Suite
@@ -129,10 +344,17 @@ class CharlieDoctor:
 
         # 1. Config Validity
         checks.append(self._check_config_validity())
-        # 2. Secrets Configured
-        checks.append(self._check_secrets_configured())
-        # 3. Model Provider
+        # 2. Model Provider. This check owns the live LLM probe, so it must run
+        #    before secrets: the secrets check reads the probe verdict out of
+        #    the cache to tell "key is present" apart from "key is accepted",
+        #    and it deliberately never issues a second billable request. Run
+        #    first, that verdict is already settled; run second, the cache is
+        #    empty and a rejected key is reported as healthy. No other check
+        #    reads the probe or another check's result, so this reordering
+        #    changes only the report order, not any verdict.
         checks.append(self._check_model_provider())
+        # 3. Secrets Configured
+        checks.append(self._check_secrets_configured())
         # 4. Capability Registry
         checks.append(self._check_capability_registry())
         # 5. EventBus / IPC
@@ -205,7 +427,7 @@ class CharlieDoctor:
         )
 
     def _check_secrets_configured(self) -> DiagnosticCheck:
-        cfg = self._introspector._get_config()
+        cfg = self._runtime_config()
         model_info = self._introspector.get_model_info() if cfg else {}
         api_key = bool(model_info.get("api_key_configured"))
         provider = model_info.get("provider", "unknown")
@@ -223,27 +445,172 @@ class CharlieDoctor:
                 fix_hint="Set LLM_API_KEY in .env or switch to a local provider like Ollama.",
             )
 
+        # Presence is a local read; acceptance is a remote fact. The model check
+        # owns the live LLM probe and has already run by now (see diagnose()), so
+        # read its cached verdict rather than issuing a second billable request
+        # -- and say plainly when no verdict exists instead of implying the key
+        # was tested. Every branch below must be literally true of the probe that
+        # actually ran: a 5xx and a dead socket are different faults, and neither
+        # is a rejected credential.
+        probe = self._cached_llm_probe()
+        if probe is not None and probe.credential_rejected:
+            return DiagnosticCheck(
+                check_id="secrets_configured",
+                category="secrets",
+                status=CheckStatus.WARNING,
+                severity=CheckSeverity.HIGH,
+                summary=f"LLM credential present but rejected by the endpoint (HTTP {probe.status_code})",
+                evidence=(
+                    f"LLM API key is present for provider '{provider}', but the live endpoint probe "
+                    f"answered {probe.status_code}. A present key is not a working key."
+                ),
+                probable_cause="The key is expired, revoked, or scoped to a different provider/account.",
+                fix_hint="Replace LLM_API_KEY with a key the configured provider accepts.",
+            )
+
+        if probe is None:
+            summary = "Required secrets configured; endpoint acceptance unverified"
+            evidence = (
+                f"LLM API key is present for provider '{provider}'. Only presence was verified: "
+                "no live probe evidence is available to this diagnostic instance, so whether the "
+                "key is accepted by the endpoint is unverified (see model_provider)."
+            )
+        elif probe.ok:
+            summary = "Required secrets configured"
+            evidence = (
+                f"LLM API key is present for provider '{provider}' and the live endpoint probe "
+                f"accepted it: {probe.detail}."
+            )
+        elif probe.transport_failed:
+            # No HTTP response at all: the request never got an answer to read,
+            # so calling this a rejection would be inventing a verdict.
+            summary = "Required secrets configured; endpoint acceptance unverified"
+            evidence = (
+                f"LLM API key is present for provider '{provider}'. The live probe never obtained an "
+                f"HTTP response from the route ({probe.detail}), so the endpoint neither accepted nor "
+                "rejected the key and its acceptance is unverified. This is a transport failure, not a "
+                "credential rejection. See model_provider for the failing dependency."
+            )
+        else:
+            # An HTTP answer that is not 401/403: a server-side or routing fault.
+            # The route answered, so it read the request, but it did not reject
+            # the credential -- the key is not disproved.
+            summary = "Required secrets configured; endpoint acceptance unverified"
+            evidence = (
+                f"LLM API key is present for provider '{provider}'. The route answered the live probe "
+                f"with {probe.detail}, which is a server-side or gateway failure rather than a "
+                "credential rejection (that would be HTTP 401/403), so the key itself was not "
+                "disproved. See model_provider for the failing dependency."
+            )
+
         return DiagnosticCheck(
             check_id="secrets_configured",
             category="secrets",
             status=CheckStatus.OK,
             severity=CheckSeverity.LOW,
-            summary="Required secrets configured",
-            evidence=f"LLM API key is present and configured for provider '{provider}'.",
+            summary=summary,
+            evidence=evidence,
         )
 
     def _check_model_provider(self) -> DiagnosticCheck:
+        """Verify the primary LLM route against the live endpoint, not just config.
+
+        Introspection alone (``RuntimeIntrospector.get_model_info``) reads
+        ``cfg.llm_model`` and can never observe a failure, so a dead provider
+        used to be reported as OK while the runtime logged
+        "Primary LLM probe failed with network error". charlie/AGENTS.md §12
+        forbids exactly that, so this check now contacts the route and fails.
+        """
+        cfg = self._runtime_config()
         m = self._introspector.get_model_info()
+        route = (
+            f"Provider: {m.get('provider')}, Model: {m.get('model')}, "
+            f"Base URL: {m.get('api_base_url') or 'default'}, Vision: {m.get('vision_model')}."
+        )
+
+        if cfg is None:
+            # No config means no route to probe. config_validity owns the error;
+            # claiming a model verdict here would be invention.
+            return DiagnosticCheck(
+                check_id="model_provider",
+                category="models",
+                status=CheckStatus.INFO,
+                severity=CheckSeverity.LOW,
+                summary="Model state unknown",
+                evidence=(
+                    f"{route} No configuration is available to this diagnostic instance, "
+                    "so the LLM route was not probed."
+                ),
+            )
+
+        base_url = getattr(cfg, "llm_url", None) or getattr(cfg, "llm_base_url", None)
+        if not base_url:
+            return DiagnosticCheck(
+                check_id="model_provider",
+                category="models",
+                status=CheckStatus.ERROR,
+                severity=CheckSeverity.HIGH,
+                summary="LLM endpoint not configured",
+                evidence=f"{route} Neither LLM_URL nor llm_base_url is set, so the primary route cannot be used.",
+                probable_cause="LLM_URL is missing from the environment and .env.",
+                fix_hint="Set LLM_URL to the OpenAI-compatible base URL and restart the runtime.",
+            )
+
+        result = self._run_llm_probe(cfg)
+        if result is None:
+            # No probe capability: unverified, not healthy. The endpoint may well
+            # be fine, but nothing observed it and the report must say so.
+            return DiagnosticCheck(
+                check_id="model_provider",
+                category="models",
+                status=CheckStatus.INFO,
+                severity=CheckSeverity.LOW,
+                summary="Model configured; no live probe available",
+                evidence=(
+                    f"{route} No live probe is available to this diagnostic instance "
+                    "(no HTTP transport and no injected probe), so the endpoint was never contacted. "
+                    "Model health is unverified."
+                ),
+            )
+
+        if result.ok:
+            return DiagnosticCheck(
+                check_id="model_provider",
+                category="models",
+                status=CheckStatus.OK,
+                severity=CheckSeverity.LOW,
+                summary=f"Model endpoint reachable: {m.get('model', 'unknown')} ({m.get('provider', 'unknown')})",
+                evidence=f"{route} Live probe succeeded: {result.detail}.",
+            )
+
+        # Three distinct faults must not be collapsed into one verdict: the
+        # route rejected the credential (401/403), the route never answered
+        # (transport), or the route answered with its own failure (e.g. 5xx).
+        if result.credential_rejected:
+            summary = f"LLM credential rejected by endpoint (HTTP {result.status_code})"
+            probable_cause = "The configured API key is expired, revoked, or scoped to another provider/account."
+            fix_hint = "Replace LLM_API_KEY with a key the configured provider accepts."
+        elif result.transport_failed:
+            summary = f"LLM endpoint unreachable: {m.get('model', 'unknown')} ({m.get('provider', 'unknown')})"
+            probable_cause = "The LLM endpoint is down, or this host has no network path to it."
+            fix_hint = "Verify LLM_URL reachability and outbound network access from this host."
+        else:
+            summary = f"LLM endpoint returned an error: {m.get('model', 'unknown')} ({m.get('provider', 'unknown')})"
+            probable_cause = (
+                f"The route answered HTTP {result.status_code}, so it is reachable and the request "
+                "reached it, but it refused to serve this completion."
+            )
+            fix_hint = "Check the provider's own status and the model name the route expects."
+
         return DiagnosticCheck(
             check_id="model_provider",
             category="models",
-            status=CheckStatus.OK,
-            severity=CheckSeverity.LOW,
-            summary=f"Model configured: {m.get('model', 'unknown')} ({m.get('provider', 'unknown')})",
-            evidence=(
-                f"Provider: {m.get('provider')}, Model: {m.get('model')}, "
-                f"Base URL: {m.get('api_base_url') or 'default'}, Vision: {m.get('vision_model')}."
-            ),
+            status=CheckStatus.ERROR,
+            severity=CheckSeverity.HIGH,
+            summary=summary,
+            evidence=f"{route} Live probe failed: {result.detail}. The configured route cannot currently answer.",
+            probable_cause=probable_cause,
+            fix_hint=fix_hint,
         )
 
     def _check_capability_registry(self) -> DiagnosticCheck:
@@ -272,13 +639,91 @@ class CharlieDoctor:
         )
 
     def _check_event_bus(self) -> DiagnosticCheck:
+        """Observe the ZeroMQ event transport instead of asserting a constant.
+
+        End-to-end delivery needs a live SUB socket bound to the runtime's PUB
+        endpoint, and this instance owns no bus -- injecting a subscriber, or
+        publishing a synthetic event, would mean either racing the real runtime
+        for the port or writing a fabricated telemetry event onto the canonical
+        stream. So the check reports what it can actually observe: whether the
+        ZeroMQ transport loads, and whether the configured port is held by a
+        live listener. It deliberately never returns WARNING-by-default, which
+        told the user something was wrong on every single run.
+        """
+        try:
+            import zmq
+
+            transport = f"ZeroMQ {zmq.zmq_version()} via pyzmq {zmq.__version__}"
+        except Exception as exc:
+            return DiagnosticCheck(
+                check_id="event_bus",
+                category="health",
+                status=CheckStatus.ERROR,
+                severity=CheckSeverity.HIGH,
+                summary="EventBus transport unavailable",
+                evidence=(
+                    f"ZeroMQ transport could not be imported: {type(exc).__name__}: {exc}. "
+                    "Without it charlie.ipc.EventBus cannot bind or publish."
+                ),
+                probable_cause="pyzmq is not installed or its native libzmq failed to load.",
+                fix_hint="Install pyzmq: `uv sync` or `pip install pyzmq`.",
+            )
+
+        cfg = self._runtime_config()
+        if cfg is None:
+            return DiagnosticCheck(
+                check_id="event_bus",
+                category="health",
+                status=CheckStatus.INFO,
+                severity=CheckSeverity.LOW,
+                summary="EventBus state unknown",
+                evidence=(
+                    f"{transport}. No configuration is available to this diagnostic instance, "
+                    "so the event port could not be observed."
+                ),
+            )
+
+        port = _resolve_event_port()
+        if port == 0:
+            return DiagnosticCheck(
+                check_id="event_bus",
+                category="health",
+                status=CheckStatus.INFO,
+                severity=CheckSeverity.LOW,
+                summary="EventBus on an ephemeral port",
+                evidence=(
+                    f"{transport}. The runtime requested an ephemeral event port, which cannot be "
+                    "probed by an outside observer; delivery was not exercised."
+                ),
+            )
+
+        occupancy = _probe_event_port(port)
+        if not occupancy.occupied:
+            # A free port does not mean the bus is broken -- it means it is not
+            # bound right now. Claiming a fault here would be a guess.
+            return DiagnosticCheck(
+                check_id="event_bus",
+                category="health",
+                status=CheckStatus.INFO,
+                severity=CheckSeverity.LOW,
+                summary=f"No EventBus bound on 127.0.0.1:{port}",
+                evidence=(
+                    f"{transport}. Port {port} probe: {occupancy.detail}. No publisher is bound to the "
+                    "configured event port, so the runtime is not currently publishing. Event delivery "
+                    "was not exercised by this check."
+                ),
+            )
+
         return DiagnosticCheck(
             check_id="event_bus",
             category="health",
-            status=CheckStatus.WARNING,
+            status=CheckStatus.OK,
             severity=CheckSeverity.LOW,
-            summary="EventBus delivery unverified",
-            evidence="No end-to-end delivery probe is available to this diagnostic instance.",
+            summary=f"EventBus transport live on 127.0.0.1:{port}",
+            evidence=(
+                f"{transport}. Port {port} probe: {occupancy.detail}, so a publisher is bound to the "
+                "configured event port. Subscriber-side delivery was not exercised by this check."
+            ),
         )
 
     def _check_task_journal(self) -> DiagnosticCheck:
@@ -519,13 +964,101 @@ class CharlieDoctor:
         )
 
     def _check_vision_ocr(self) -> DiagnosticCheck:
+        """Verify the perception tier by exercising its real dependencies.
+
+        Three separate things can fail independently here, so each is observed:
+        the OCR python packages import, the tesseract executable answers, and
+        the configured vision endpoint completes a request. None of them is
+        inferred from configuration.
+        """
+        cfg = self._runtime_config()
+        if cfg is None:
+            return DiagnosticCheck(
+                check_id="vision_ocr",
+                category="vision",
+                status=CheckStatus.INFO,
+                severity=CheckSeverity.LOW,
+                summary="Vision/OCR state unknown",
+                evidence=(
+                    "No configuration is available to this diagnostic instance, so neither the OCR "
+                    "binary nor the vision endpoint could be observed."
+                ),
+            )
+
+        observations: List[str] = []
+        degraded = False
+
+        # 1. OCR python packages (mss / pytesseract / Pillow), as the capture tier
+        #    itself reports them -- no duplicate import logic here.
+        try:
+            from charlie.desktop import ocr as ocr_tier
+
+            ocr_available = bool(getattr(ocr_tier, "OCR_AVAILABLE", False))
+        except Exception as exc:
+            ocr_available = False
+            observations.append(f"charlie.desktop.ocr import failed: {type(exc).__name__}")
+        if ocr_available:
+            observations.append("OCR tier importable (mss/pytesseract/Pillow present)")
+        else:
+            degraded = True
+            observations.append("OCR tier reports OCR_AVAILABLE=False (mss/pytesseract/Pillow missing)")
+
+        # 2. The exact binary the OCR tier would run. ocr.py only overrides
+        #    pytesseract's default when TESSERACT_CMD is set, otherwise it relies
+        #    on PATH -- so the probe follows the same resolution.
+        configured_cmd = (getattr(cfg, "tesseract_cmd", None) or "").strip()
+        binary = configured_cmd or (shutil.which("tesseract") or "")
+        if not binary:
+            degraded = True
+            observations.append("no tesseract binary configured (TESSERACT_CMD unset and 'tesseract' not on PATH)")
+        else:
+            binary_probe = _probe_tesseract(binary, self._probe_timeout)
+            observations.append(f"tesseract '{binary}': {binary_probe.detail}")
+            if not binary_probe.ok:
+                degraded = True
+
+        # 3. Vision endpoint, only when it is switched on -- probing a
+        #    deliberately disabled feature would report a fault the owner chose.
+        if not getattr(cfg, "vision_enabled", False):
+            observations.append("vision endpoint disabled by configuration (VISION_ENABLED=false)")
+        else:
+            vision_url = getattr(cfg, "vision_llm_url", None)
+            if not vision_url:
+                degraded = True
+                observations.append("vision endpoint enabled but VISION_LLM_URL is not set")
+            else:
+                vision_probe = _probe_chat_endpoint(
+                    base_url=vision_url,
+                    model=getattr(cfg, "vision_llm_model", None) or "unknown",
+                    api_key=getattr(cfg, "vision_llm_key", None),
+                    timeout=self._probe_timeout,
+                )
+                if vision_probe is None:
+                    degraded = True
+                    observations.append("vision endpoint probe unavailable (no HTTP transport)")
+                elif vision_probe.ok:
+                    observations.append(f"vision endpoint '{vision_url}': {vision_probe.detail}")
+                else:
+                    degraded = True
+                    observations.append(f"vision endpoint '{vision_url}' probe failed: {vision_probe.detail}")
+
         return DiagnosticCheck(
             check_id="vision_ocr",
             category="vision",
-            status=CheckStatus.WARNING,
-            severity=CheckSeverity.LOW,
-            summary="Vision/OCR execution unverified",
-            evidence="No model inference or OCR execution evidence is available to this diagnostic instance.",
+            status=CheckStatus.WARNING if degraded else CheckStatus.OK,
+            severity=CheckSeverity.MEDIUM if degraded else CheckSeverity.LOW,
+            summary=(
+                "Vision/OCR tier degraded"
+                if degraded
+                else "Vision/OCR dependencies verified"
+            ),
+            evidence=" ".join(observations),
+            fix_hint=(
+                "Install the tesseract binary and the OCR python packages, or start the configured "
+                "vision endpoint. UIA remains the primary desktop perception tier."
+                if degraded
+                else None
+            ),
         )
 
     def _check_voice_subsystem(self) -> DiagnosticCheck:

@@ -1,7 +1,6 @@
 """Focused tests for the interactive capability-result normalization boundary."""
 
 import asyncio
-import inspect
 import json
 
 import pytest
@@ -146,13 +145,157 @@ def test_model_facing_text_is_the_legacy_tool_result_not_the_envelope():
     assert _result_envelope_to_model_text(envelope) == model_text
 
 
-def test_canonical_tool_loop_has_one_structured_operation_result_type():
-    source = inspect.getsource(core.Brain._chat_stream_impl)
+def _multi_tool_stream(tool_calls: list[dict], final_text: str):
+    """One assistant message carrying several tool calls, then a reply."""
+    calls = [0]
 
-    assert "async def _exec_one(call: Dict[str, Any]) -> ResultEnvelope:" in source
-    assert "results_map: Dict[int, ResultEnvelope]" in source
-    assert "ResultEnvelope | str" not in source
-    assert "isinstance(result, ResultEnvelope)" not in source
+    def mock_stream(*_args, **_kwargs):
+        class MockResponse:
+            def raise_for_status(self):
+                pass
+
+            async def aiter_lines(self):
+                calls[0] += 1
+                if calls[0] == 1:
+                    deltas = [
+                        {
+                            "index": index,
+                            "id": call["id"],
+                            "function": {
+                                "name": call["name"],
+                                "arguments": json.dumps(call["arguments"]),
+                            },
+                        }
+                        for index, call in enumerate(tool_calls)
+                    ]
+                    yield "data: " + json.dumps(
+                        {"choices": [{"delta": {"tool_calls": deltas}}]}
+                    )
+                else:
+                    yield "data: " + json.dumps(
+                        {"choices": [{"delta": {"content": final_text}}]}
+                    )
+                yield "data: [DONE]"
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc):
+                return None
+
+        return MockResponse()
+
+    return mock_stream
+
+
+@pytest.mark.asyncio
+async def test_every_tool_in_a_batch_yields_one_correlated_envelope(monkeypatch):
+    """No call in a multi-tool batch may degrade to a bare string result.
+
+    The old version read Brain._chat_stream_impl's source and checked the
+    ResultEnvelope annotations. That passes unchanged if a code path returns a
+    str, which then silently loses status/data downstream. Here each call must
+    arrive at on_operation_result as a ResultEnvelope carrying its own
+    turn/task/session identity, correlated by call index.
+    """
+    brain = Brain(Config(llm_url="http://localhost:11434", llm_key="no-key", llm_model="dummy"))
+    envelopes = []
+    brain.on_operation_result = lambda name, envelope: envelopes.append((name, envelope))
+    executed = []
+
+    def execute(name, arguments):
+        executed.append((name, arguments))
+        return f"{name} finished for {arguments['path']}"
+
+    monkeypatch.setattr(brain.client, "stream", _multi_tool_stream(
+        [
+            {"id": "1", "name": "file_read", "arguments": {"path": "notes.txt"}},
+            {"id": "2", "name": "file_read", "arguments": {"path": "todo.md"}},
+        ],
+        "Both files read.",
+    ))
+    monkeypatch.setattr("charlie.tools.registry.execute_tool", execute)
+
+    chunks = [
+        chunk
+        async for chunk in brain.chat_stream(
+            "read notes.txt and todo.md",
+            platform="text",
+            skip_pre_search=True,
+            session_id="session-batch",
+            task_id="task-batch",
+            turn_id="turn-batch",
+        )
+    ]
+
+    assert chunks == ["Both files read."]
+    assert [name for name, _ in executed] == ["file_read", "file_read"]
+    assert [name for name, _ in envelopes] == ["file_read", "file_read"]
+    for _name, envelope in envelopes:
+        assert isinstance(envelope, ResultEnvelope), envelope
+        assert (envelope.turn_id, envelope.task_id, envelope.session_id) == (
+            "turn-batch",
+            "task-batch",
+            "session-batch",
+        )
+        assert envelope.status == ResultStatus.COMPLETED
+    results = {envelope.result for _name, envelope in envelopes}
+    assert results == {
+        "file_read finished for notes.txt",
+        "file_read finished for todo.md",
+    }
+
+
+@pytest.mark.asyncio
+async def test_interactive_approval_denial_short_circuits_the_batch(monkeypatch):
+    """A denied interactive call must arrive as a structured denial envelope.
+
+    _exec_one feeds (result.data or {}).get("failure_kind") -- a bare string
+    here would raise instead of gating the remaining interactive calls, so this
+    also proves the batch really stops rather than proceeding.
+    """
+    brain = Brain(
+        Config(llm_url="http://localhost:11434", llm_key="no-key", llm_model="dummy"),
+        on_tool_approval_request=None,
+    )
+    envelopes = []
+    brain.on_operation_result = lambda name, envelope: envelopes.append((name, envelope))
+    executed = []
+
+    monkeypatch.setattr(brain.client, "stream", _multi_tool_stream(
+        [{"id": "1", "name": "shell_execute", "arguments": {"command": "echo hello"}}],
+        "done",
+    ))
+    monkeypatch.setattr(
+        "charlie.tools.registry.execute_tool_structured",
+        lambda name, arguments: executed.append(name) or "never reached",
+    )
+
+    chunks = [
+        chunk
+        async for chunk in brain.chat_stream(
+            "run echo hello",
+            platform="telegram",
+            skip_pre_search=True,
+            session_id="session-denied",
+            task_id="task-denied",
+            turn_id="turn-denied",
+        )
+    ]
+
+    assert executed == [], "a denied interactive tool must never execute"
+    assert len(envelopes) == 1
+    name, envelope = envelopes[0]
+    assert name == "shell_execute"
+    assert isinstance(envelope, ResultEnvelope)
+    assert envelope.data["failure_kind"] == "approval_denied"
+    assert envelope.data["approval_status"] != "approved"
+    assert envelope.requires_approval is True
+    assert envelope.status == ResultStatus.CANCELLED
+    # The turn reports the denial instead of claiming the command ran.
+    reply = "".join(chunks).lower()
+    assert "approval" in reply
+    assert "hello" not in reply
 
 
 def test_telemetry_success_predicate_uses_status_not_display_text():
