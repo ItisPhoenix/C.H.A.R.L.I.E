@@ -32,6 +32,10 @@ from charlie.research.shopping import extract_products, is_shopping_query
 
 logger = logging.getLogger("charlie.research.engine")
 
+# Ceiling on real-browser extraction attempts per run. A handful still covers
+# genuinely JS-gated pages without letting unreachable sources eat the turn.
+_MAX_BROWSER_ESCALATIONS = 3
+
 ProgressCallback = Callable[[ResearchProgress], Any]
 BrowserFetchCallback = Callable[[SearchResult], Awaitable[Optional[SourceDocument]]]
 
@@ -261,6 +265,9 @@ class ResearchEngine:
         self.browser_fetch = browser_fetch
         self.search_cache: TTLCache[List[SearchResult]] = TTLCache(256)
         self.document_cache: TTLCache[SourceDocument] = TTLCache(128)
+        # Cap per run: each attempt opens a page and can wait out a full
+        # navigation timeout.
+        self._browser_escalations = 0
 
     async def _notify(self, progress: ResearchProgress) -> None:
         if self.progress is None:
@@ -270,20 +277,18 @@ class ResearchEngine:
             await result
 
     def _providers(self):
+        """Search backends, in priority order. Two, deliberately.
+
+        Paid adapters were removed rather than left as dead config knobs.
+        """
         from charlie.research.providers import (
             DuckDuckGoProvider,
-            ExaProvider,
             SearXNGProvider,
-            TavilyProvider,
         )
 
         providers = []
         if getattr(self.config, "searxng_url", ""):
             providers.append(SearXNGProvider(self.config.searxng_url))
-        if getattr(self.config, "exa_api_key", ""):
-            providers.append(ExaProvider(self.config.exa_api_key))
-        if getattr(self.config, "tavily_api_key", ""):
-            providers.append(TavilyProvider(self.config.tavily_api_key))
         if getattr(self.config, "research_ddg_enabled", True):
             providers.append(
                 DuckDuckGoProvider(
@@ -354,10 +359,12 @@ class ResearchEngine:
         cached = self.document_cache.get(cache_key)
         if cached is not None:
             return cached
+        status_out: list = []
         try:
             document = await fetch_document(
                 result,
                 timeout_s=float(getattr(self.config, "research_fetch_timeout_s", 12)),
+                status_out=status_out,
             )
         except ValueError:
             logger.info("Research URL rejected: %s", result.url)
@@ -369,9 +376,25 @@ class ResearchEngine:
                 max_depth=int(getattr(self.config, "research_crawl_max_depth", 2)),
                 max_pages=int(getattr(self.config, "research_crawl_max_pages", 20)),
             )
-        if document is None and mode is not ResearchMode.QUICK and self.browser_fetch is not None:
+        # Only escalate when a browser could plausibly survive. A 4xx is the
+        # server refusing us; headless Chromium fails too, and once per refused
+        # source it was eating the whole turn.
+        refused = status_out[0] if status_out else None
+        browser_worth_trying = refused is None or refused >= 500
+        if (
+            document is None
+            and mode is not ResearchMode.QUICK
+            and self.browser_fetch is not None
+            and browser_worth_trying
+            and self._browser_escalations < _MAX_BROWSER_ESCALATIONS
+        ):
+            self._browser_escalations += 1
             logger.info("Escalating source to Browser Executor: %s", result.url)
             document = await self.browser_fetch(result)
+        elif document is None and refused is not None and not browser_worth_trying:
+            logger.info(
+                "Skipping browser escalation after HTTP %s: %s", refused, result.url
+            )
         if document is not None:
             before = len(document.content)
             document.content = sanitize_source_text(document.content)
@@ -437,6 +460,8 @@ class ResearchEngine:
         domain_filters: Optional[List[str]] = None,
     ) -> ResearchReport:
         started = time.perf_counter()
+        # The escalation budget is per run, not per engine instance.
+        self._browser_escalations = 0
         plan = self.plan(query, mode, domain_filters=domain_filters)
         report = ResearchReport(query=query, mode=mode, plan=plan)
         await self._notify(ResearchProgress("planning", f"Planning {mode.value} research", mode=mode))

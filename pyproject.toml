@@ -4,6 +4,9 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.27",
+    # Browser TLS/JA3 + HTTP2 fingerprint for web fetching. fetch.py falls back
+    # to httpx when absent, so removing it degrades rather than breaks.
+    "curl-cffi>=0.13",
     "trafilatura>=1.12",
     "python-dotenv>=1.0",
     "numpy>=1.26",

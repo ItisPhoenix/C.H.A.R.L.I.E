@@ -121,6 +121,17 @@ class SearXNGProvider:
             response = await client.get(f"{self.base_url.rstrip('/')}/search", params=params)
             response.raise_for_status()
             payload = response.json()
+        # SearXNG answers HTTP 200 with an empty set when every upstream engine
+        # is suspended (CAPTCHA, rate limit, access denied). That is
+        # indistinguishable from a genuine no-hits query unless surfaced.
+        unresponsive = payload.get("unresponsive_engines") or []
+        if unresponsive:
+            detail = ", ".join(f"{n}: {r}" for n, r in unresponsive if n)
+            logger.warning(
+                "SearXNG returned no results; upstream engines suspended (%s). "
+                "The instance is reachable but cannot search.",
+                detail,
+            )
         results: List[SearchResult] = []
         for rank, item in enumerate(payload.get("results", [])[:limit], start=1):
             url = str(item.get("url") or "").strip()

@@ -17,6 +17,26 @@ from charlie.research.models import SearchResult, SourceDocument
 
 logger = logging.getLogger("charlie.research.fetch")
 
+# curl_cffi does the TLS handshake with a real browser's JA3/HTTP2 fingerprint.
+# Anti-bot vendors match Python's signature and refuse before headers are read,
+# so a browser User-Agent on httpx does not help.
+try:
+    from curl_cffi.requests import AsyncSession as _CurlAsyncSession
+
+    CURL_CFFI_AVAILABLE = True
+except ImportError:
+    _CurlAsyncSession = None
+    CURL_CFFI_AVAILABLE = False
+
+_BROWSER_HEADERS = {
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Upgrade-Insecure-Requests": "1",
+}
+
 _MIN_CONTENT_CHARS = 160
 _MAX_DOCUMENT_CHARS = 14000
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -118,24 +138,60 @@ def document_from_content(
     )
 
 
+async def _get_browser_shaped(
+    url: str,
+    *,
+    timeout_s: float,
+) -> tuple[int, str, str]:
+    """GET with a browser TLS fingerprint. Returns (status, text, final_url).
+
+    Falls back to httpx so the feature degrades rather than disappearing.
+    """
+    if CURL_CFFI_AVAILABLE and _CurlAsyncSession is not None:
+        async with _CurlAsyncSession(impersonate="chrome") as session:
+            response = await session.get(
+                url,
+                headers=_BROWSER_HEADERS,
+                timeout=timeout_s,
+                allow_redirects=True,
+            )
+            return int(response.status_code), response.text, str(response.url)
+
+    async with httpx.AsyncClient(timeout=timeout_s, follow_redirects=True) as client:
+        response = await client.get(url, headers=_BROWSER_HEADERS)
+        return int(response.status_code), response.text, str(response.url)
+
+
 async def fetch_document(
     result: SearchResult,
     *,
     timeout_s: float = 12.0,
     client: Optional[httpx.AsyncClient] = None,
+    status_out: Optional[list] = None,
 ) -> Optional[SourceDocument]:
+    """Fetch and extract one source.
+
+    ``status_out`` receives the HTTP status on an error response, so callers
+    can tell a 403 bot-wall from a transport failure.
+    """
     current_url = validate_public_url(result.url)
-    owns_client = client is None
-    http_client = client or httpx.AsyncClient(timeout=timeout_s, follow_redirects=True)
     try:
-        response = await http_client.get(
-            current_url,
-            headers={"User-Agent": "CharlieResearch/1.0 (+public-web-research)"},
-        )
-        response.raise_for_status()
-        final_url = validate_public_url(str(response.url))
-        page_title = extract_html_title(response.text)
-        text, method = extract_text(response.text)
+        if client is not None:
+            response = await client.get(current_url, headers=_BROWSER_HEADERS)
+            status, body, final_url = int(response.status_code), response.text, str(response.url)
+        else:
+            status, body, final_url = await _get_browser_shaped(
+                current_url, timeout_s=timeout_s
+            )
+        if status >= 400:
+            if status_out is not None:
+                status_out.append(status)
+            logger.debug(
+                "Research fetch refused with HTTP %s for %s", status, result.url
+            )
+            return None
+        page_title = extract_html_title(body)
+        text, method = extract_text(body)
         redirected = SearchResult(
             title=result.title,
             url=final_url,
@@ -154,6 +210,3 @@ async def fetch_document(
     except Exception:
         logger.debug("Research fetch failed for %s", result.url, exc_info=True)
         return None
-    finally:
-        if owns_client:
-            await http_client.aclose()

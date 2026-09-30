@@ -60,6 +60,20 @@ def test_browser_read_preserves_public_url_validation_error(monkeypatch):
     assert read_url("https://example.invalid") == {"error": "Research URL host could not be resolved"}
 
 
+def _fake_browser_shaped(fake_response):
+    """Stand in for fetch._get_browser_shaped -> (status, text, final_url).
+
+    Patching fetch.httpx.AsyncClient no longer intercepts the fetch path: it
+    prefers curl_cffi for a browser TLS fingerprint and only falls back to httpx
+    when curl_cffi is absent. Patch Charlie's own seam instead.
+    """
+
+    async def _fake(url, *, timeout_s=12.0):
+        return 200, fake_response.text, fake_response.url
+
+    return _fake
+
+
 def test_browser_read_returns_title_from_short_html_page(monkeypatch):
     import charlie.research.fetch as fetch_module
     import charlie.tools as tools_module
@@ -88,7 +102,7 @@ def test_browser_read_returns_title_from_short_html_page(monkeypatch):
             pass
 
     monkeypatch.setattr(fetch_module, "validate_public_url", lambda url: url)
-    monkeypatch.setattr(fetch_module.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(fetch_module, "_get_browser_shaped", _fake_browser_shaped(FakeResponse()))
     monkeypatch.setattr(tools_module, "_browser_ready", lambda: True)
 
     result = tools_module.browser_read("https://example.com")
@@ -125,7 +139,7 @@ def test_browser_read_omits_title_when_page_has_no_title(monkeypatch):
             pass
 
     monkeypatch.setattr(fetch_module, "validate_public_url", lambda url: url)
-    monkeypatch.setattr(fetch_module.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(fetch_module, "_get_browser_shaped", _fake_browser_shaped(FakeResponse()))
     monkeypatch.setattr(tools_module, "_browser_ready", lambda: True)
 
     result = tools_module.browser_read("https://example.com")
