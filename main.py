@@ -175,6 +175,7 @@ from charlie.subsystem_health import HealthRegistry, HealthStatus, RuntimeStatus
 from charlie.task_journal import TaskOrigin, TaskStatus, get_task_journal
 from charlie.turn_contracts import ExecutionPolicy, IntentDecision, ResultEnvelope, TurnRequest
 from charlie.voice import VoiceEngine
+from charlie.web_gateway import RuntimeWebGateway
 from charlie.attention import AttentionLevel
 from charlie.watchers import (
     WatcherRegistry,
@@ -2314,6 +2315,7 @@ async def main() -> int:
     watcher_callback_lock = threading.Lock()
     watcher_stop_event = threading.Event()
     watcher_thread: Optional[threading.Thread] = None
+    web_gateway: Optional[RuntimeWebGateway] = None
     settings_operation_lock = asyncio.Lock()
     session_lifecycle_gate = asyncio.Lock()
     extension_runtime_registry = ExtensionRuntimeRegistry()
@@ -3495,6 +3497,68 @@ async def main() -> int:
             finally:
                 release_lifecycle_gate()
 
+        async def _web_command(command: dict[str, Any]) -> dict[str, Any]:
+            """Route browser commands through canonical runtime owners."""
+            command_type = str(command.get("type", ""))
+            if command_type == "submit_text":
+                text = command.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    raise ValueError("text must be a non-empty string")
+                request = _allocate_turn_request(text.strip(), current_session_id, "web")
+                await _dispatch_or_queue(request)
+                return {"accepted": True, "turn_id": request.turn_id, "session_id": request.session_id}
+            if command_type == "cancel_task":
+                task_id = command.get("task_id")
+                if not isinstance(task_id, str) or not task_id.strip():
+                    raise ValueError("task_id must be a non-empty string")
+                record = get_task_journal().cancel(task_id)
+                await _publish_task_snapshot(event_bus)
+                return {"accepted": True, "task_id": record.id, "status": record.status.value}
+            if command_type in {"approve", "reject"}:
+                request_id = command.get("request_id")
+                if not isinstance(request_id, str) or not request_id.strip():
+                    raise ValueError("request_id must be a non-empty string")
+                from charlie.core import get_active_tool_approval
+
+                pending = get_active_tool_approval()
+                if pending is None or pending[0] != request_id:
+                    raise ValueError("approval is stale or unavailable")
+                resolved = _resolve_tool_approval_and_notify(
+                    request_id,
+                    command_type == "approve",
+                    expected_platform=None,
+                )
+                if not resolved:
+                    raise ValueError("approval was not accepted")
+                return {"accepted": True, "request_id": request_id, "approved": command_type == "approve"}
+            raise ValueError(f"unsupported web command: {command_type}")
+
+        def _web_snapshot() -> dict[str, Any]:
+            tasks = get_task_journal().snapshot()
+            return {
+                "version": 1,
+                "revision": int(time.time()),
+                "connection": "connected",
+                "title": "Charlie is working" if active_turn_id else "Charlie is ready",
+                "summary": active_operation_name
+                or ("Working on your request." if active_turn_id else "Ready when you are."),
+                "details": [
+                    {
+                        "label": str(task.get("title", "Task")),
+                        "value": str(task.get("current_action") or task.get("status", "running")),
+                    }
+                    for task in tasks[:6]
+                ],
+                "conversation": {
+                    "state": "working" if active_turn_id else "ready",
+                    "label": "Working" if active_turn_id else "Ready when you are",
+                    "caption": active_operation_name or "",
+                },
+                "tasks": tasks,
+                "active_turn_id": active_turn_id,
+                "active_task_id": active_task_id,
+            }
+
         def on_console_text(text: str):
             request = _allocate_turn_request(text, current_session_id, "console")
             _schedule_process(_dispatch_or_queue(request), loop)
@@ -3859,6 +3923,19 @@ async def main() -> int:
                     print(chunk, end="", flush=True)
                     sentence_buffer += chunk
                     full_reply_buffer += chunk
+                    if event_bus:
+                        _submit_event_task(
+                            event_bus.emit(
+                                "token",
+                                {"text": chunk, "session_id": session_id},
+                                meta=EventMeta(
+                                    source=EventSource.BRAIN,
+                                    task_id=task_id,
+                                    session_id=session_id,
+                                    turn_id=request.turn_id,
+                                ),
+                            )
+                        )
 
                     # Progressive flush: sentence boundary > clause boundary > force-flush.
                     flushed = False
@@ -4618,6 +4695,38 @@ async def main() -> int:
         async with EventBus(pub_port=5555) as bus:
             event_bus = bus
             _main_event_bus = bus
+            # The web gateway is a presentation surface, not a runtime
+            # dependency. An optional HTTP listener must never be able to end
+            # the voice/Telegram runtime: Docker Desktop reserves port ranges
+            # and commonly holds 8001, and an unhandled bind error here used to
+            # propagate out of main() and kill the whole process. Degrade to
+            # "gateway unavailable" and keep the assistant running.
+            web_gateway = None
+            try:
+                web_gateway = RuntimeWebGateway(
+                    loop=loop,
+                    command_handler=_web_command,
+                    snapshot_getter=_web_snapshot,
+                    static_dir=Path(__file__).resolve().parent / "frontend" / "dist",
+                    port=int(os.getenv("CHARLIE_WEB_PORT", "8000")),
+                )
+                web_gateway.start()
+            except OSError as exc:
+                logger.warning(
+                    "Charlie web gateway unavailable on port %s (%s); continuing without it. "
+                    "Set CHARLIE_WEB_PORT to a free port to re-enable the web surface.",
+                    os.getenv("CHARLIE_WEB_PORT", "8000"),
+                    exc,
+                )
+                _set_subsystem_health("web_gateway", HealthStatus.DEGRADED)
+                web_gateway = None
+            if web_gateway is not None:
+                # Subscribe only once the listener exists, so the bus never
+                # holds a publish method belonging to a gateway that never
+                # started.
+                bus.subscribe(web_gateway.publish)
+                logger.info("Charlie web gateway listening on http://127.0.0.1:%s", web_gateway.port)
+                _set_subsystem_health("web_gateway", HealthStatus.RUNNING)
             await _publish_subsystem_health(bus)
             bus.set_state_listener(_on_event_for_state)
             voice.set_event_bus(bus)
@@ -5007,6 +5116,12 @@ async def main() -> int:
         exit_code = 1
         logger.error("Charlie runtime startup/execution failed: %s", e, exc_info=True)
     finally:
+        if web_gateway is not None:
+            try:
+                web_gateway.close()
+            except Exception:
+                logger.warning("Web gateway shutdown error", exc_info=True)
+            web_gateway = None
         _begin_shutdown()
         _stop_watcher()
         logger.info("main_shutdown_begin | exit_code=%s", exit_code)
