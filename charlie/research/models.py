@@ -139,7 +139,10 @@ class ResearchReport:
     media: List[MediaResult] = field(default_factory=list)
     answer: str = ""
     suggested_open_url: Optional[str] = None
-    confidence: float = 0.0
+    # None means "not measurable", which is not the same claim as 0.0.
+    # Nothing in the pipeline may populate this from item counts; see
+    # charlie.research.engine.compute_confidence for what is actually measurable.
+    confidence: Optional[float] = None
     stop_reason: str = ""
     errors: List[str] = field(default_factory=list)
     duration_ms: float = 0.0

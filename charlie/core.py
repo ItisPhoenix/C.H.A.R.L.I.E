@@ -287,7 +287,24 @@ _RESEARCH_ACTION_CONTINUATION_RE = re.compile(
     r"send|post|click|type|navigate|visit|launch)\b",
     re.IGNORECASE,
 )
-_NO_FETCHED_RESEARCH_EVIDENCE_STOPS = frozenset({"no-results", "insufficient-evidence", "search-snippets-only"})
+# Only a terminal reason that means the engine actually produced fetched evidence may be
+# synthesized. Anything else (no-results, insufficient-evidence, search-snippets-only,
+# timeout, error, cancelled, or any reason added later) must refuse rather than answer
+# from parametric memory -- so this is a positive allow-list that fails closed.
+_FETCHED_RESEARCH_EVIDENCE_STOPS = frozenset({"evidence-sufficient"})
+# Failure reasons get a truthful cause; a missing reason must not imply "no sources exist".
+_RESEARCH_NO_EVIDENCE_REFUSALS = {
+    "timeout": "I ran out of time researching that before I could verify anything reliable.",
+    "error": "That research attempt failed before I could verify anything reliable.",
+    "cancelled": "I stopped that research before it finished verifying anything reliable.",
+}
+
+
+def _research_no_evidence_refusal(stop_reason: str) -> str:
+    return _RESEARCH_NO_EVIDENCE_REFUSALS.get(
+        stop_reason,
+        "I couldn't find sufficient reliable evidence to answer that research question.",
+    )
 # Narrower sibling of router.SCREEN_QUERY_RE: phrasing that implies the user wants
 # graphical/visual understanding (an icon, photo, game frame) that OCR/UIA
 # marks can't describe. When this matches and a vision model is configured,
@@ -5230,11 +5247,12 @@ class Brain:
             if research_report is not None:
                 turn_research_reports.append(research_report)
                 search_results = research_report.prompt_context()
-                if research_report.stop_reason in _NO_FETCHED_RESEARCH_EVIDENCE_STOPS:
+                if research_report.stop_reason not in _FETCHED_RESEARCH_EVIDENCE_STOPS:
                     search_results = (
-                        "RESEARCH STATUS: insufficient evidence.\n"
+                        f"RESEARCH STATUS: no fetched evidence (stop_reason="
+                        f"{research_report.stop_reason or 'unknown'}).\n"
                         "Do not answer this research question from model memory. "
-                        "State that reliable evidence was not found."
+                        "State that reliable evidence could not be verified."
                     )
                 elif research_report.stop_reason == "search-snippets-only":
                     search_results = (
@@ -5259,8 +5277,8 @@ class Brain:
             )
 
         def finalize_research_answer(answer: str) -> str:
-            if research_report is not None and research_report.stop_reason in _NO_FETCHED_RESEARCH_EVIDENCE_STOPS:
-                answer = "I couldn't find sufficient reliable evidence to answer that research question."
+            if research_report is not None and research_report.stop_reason not in _FETCHED_RESEARCH_EVIDENCE_STOPS:
+                answer = _research_no_evidence_refusal(research_report.stop_reason)
             elif research_report is not None:
                 answer = strip_invalid_citations(answer, research_report.citations)
             if research_report is not None:

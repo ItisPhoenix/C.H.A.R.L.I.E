@@ -23,7 +23,11 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --locked --extra dev --extra desktop --extra telegram --extra browser --extra research
+        # No `--extra research`: that extra held only crawl4ai, which was removed
+        # because it cannot start Playwright on the research path and costs
+        # seconds per source for a null result. See the comment block above
+        # `browser = [...]` in pyproject.toml. Do not re-add it casually.
+        run: uv sync --locked --extra dev --extra desktop --extra telegram --extra browser
 
       - name: Install Playwright Chromium
         run: uv run playwright install --with-deps chromium

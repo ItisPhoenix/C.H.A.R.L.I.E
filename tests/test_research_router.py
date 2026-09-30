@@ -1,7 +1,10 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
+from charlie import core
+from charlie.config import Config
 from charlie.research.citations import (
     assign_citations,
     strip_citation_markers,
@@ -10,7 +13,14 @@ from charlie.research.citations import (
 )
 from charlie.research.engine import ResearchEngine
 from charlie.research.fetch import validate_public_url
-from charlie.research.models import ResearchMode, ResearchReport, SearchResult, SourceDocument
+from charlie.research.models import (
+    Citation,
+    EvidenceItem,
+    ResearchMode,
+    ResearchReport,
+    SearchResult,
+    SourceDocument,
+)
 from charlie.research.router import is_briefing_query, is_sustained_research_query, route
 from charlie.research.search import build_plan, clean_query
 
@@ -378,3 +388,311 @@ async def test_standard_research_reports_insufficient_evidence_without_extracted
     assert report.stop_reason == "insufficient-evidence"
     assert report.citations == []
     assert report.prompt_context() == ""
+
+
+_BUDGET_QUERY = "current browser agent security"
+
+
+def _verbose_document(source_id: str, url: str, matching: int = 45) -> SourceDocument:
+    """A source with more unique matching sentences than the old global budget."""
+    body = " ".join(
+        f"Browser agent security finding {index} describes the current browser agent "
+        f"security posture for this deployment."
+        for index in range(matching)
+    )
+    return SourceDocument(
+        source_id=source_id,
+        url=url,
+        canonical_url=url,
+        title="Browser agent security review",
+        domain=url.split("//", 1)[1].split("/", 1)[0],
+        content=f"{body} Gardening tips are unrelated to this topic.",
+        quality_score=0.8,
+    )
+
+
+def test_evidence_budget_is_per_source_not_first_document_wins():
+    from charlie.research.evidence import build_evidence
+
+    documents = [
+        _verbose_document(f"S{index}", f"https://site{index}.example/report")
+        for index in range(1, 7)
+    ]
+
+    evidence = build_evidence(documents, _BUDGET_QUERY)
+
+    grounded = {item.source_id for item in evidence}
+    assert grounded == {f"S{index}" for index in range(1, 7)}
+    counts = {source_id: sum(1 for item in evidence if item.source_id == source_id) for source_id in grounded}
+    # One verbose page must not consume a budget the other sources never see.
+    assert max(counts.values()) <= 6
+    assert min(counts.values()) >= 1
+
+
+def test_evidence_keeps_best_matching_sentences_per_source():
+    from charlie.research.evidence import build_evidence
+
+    url = "https://site1.example/report"
+    document = SourceDocument(
+        source_id="S1",
+        url=url,
+        canonical_url=url,
+        title="Browser agent security review",
+        domain="site1.example",
+        content=(
+            "A passing note that mentions browser once. "
+            "Browser agent security is the current browser agent security topic. "
+            "Another low signal that says agent only. "
+            "Current security guidance for deployments. "
+            "Gardening tips are unrelated to this topic. "
+        ),
+        quality_score=0.8,
+    )
+
+    evidence = build_evidence([document], _BUDGET_QUERY, per_source_max=2)
+
+    assert [item.relevance for item in evidence] == [1.0, 0.5]
+    assert evidence[0].statement.startswith("Browser agent security is the current")
+    assert evidence[1].statement.startswith("Current security guidance")
+
+
+def test_evidence_dedupes_repeated_sentences_within_a_source():
+    from charlie.research.evidence import build_evidence
+
+    document = _verbose_document("S1", "https://site1.example/report")
+    document.content = f"{document.content} {document.content}"
+
+    evidence = build_evidence([document], _BUDGET_QUERY, per_source_max=50)
+
+    statements = [item.statement for item in evidence]
+    assert len(statements) == 45
+    assert len(statements) == len(set(statements))
+
+
+@pytest.mark.asyncio
+async def test_standard_research_keeps_every_fetched_source_that_produced_evidence(monkeypatch):
+    config = SimpleNamespace(
+        research_enabled=True,
+        research_max_search_queries=3,
+        research_max_sources=6,
+        research_max_pages_per_domain=6,
+        research_max_concurrency=3,
+        research_market="IN",
+        research_locale="en-IN",
+        research_fetch_timeout_s=1,
+        research_crawl_enabled=False,
+        research_total_timeout_standard_s=10,
+        research_currency="INR",
+    )
+
+    class Provider:
+        name = "fake"
+
+        async def search(self, query, *, limit, domain_filters=None):
+            return [
+                SearchResult(
+                    f"Browser agent security {index}",
+                    f"https://site{index}.example/report",
+                    "Current browser agent security review",
+                )
+                for index in range(1, 7)
+            ]
+
+    async def fake_fetch(result, **_kwargs):
+        return _verbose_document("", result.url)
+
+    monkeypatch.setattr("charlie.research.engine.fetch_document", fake_fetch)
+    engine = ResearchEngine(config)
+    monkeypatch.setattr(engine, "_providers", lambda: [Provider()])
+
+    report = await engine.run("research current browser agent security", "standard")
+
+    assert len(report.search_results) == 6
+    assert len(report.sources) == 6
+    assert len(report.citations) == 6
+    assert {item.source_id for item in report.evidence} == {f"S{index}" for index in range(1, 7)}
+    assert {citation.domain for citation in report.citations} == {
+        f"site{index}.example" for index in range(1, 7)
+    }
+    assert report.stop_reason == "evidence-sufficient"
+
+
+@pytest.mark.asyncio
+async def test_standard_research_keeps_every_fetched_source_that_produced_evidence(monkeypatch):
+    config = SimpleNamespace(
+        research_enabled=True,
+        research_max_search_queries=3,
+        research_max_sources=6,
+        research_max_pages_per_domain=6,
+        research_max_concurrency=3,
+        research_market="IN",
+        research_locale="en-IN",
+        research_fetch_timeout_s=1,
+        research_crawl_enabled=False,
+        research_total_timeout_standard_s=10,
+        research_currency="INR",
+    )
+
+    class Provider:
+        name = "fake"
+
+        async def search(self, query, *, limit, domain_filters=None):
+            return [
+                SearchResult(
+                    f"Browser agent security {index}",
+                    f"https://site{index}.example/report",
+                    "Current browser agent security review",
+                )
+                for index in range(1, 7)
+            ]
+
+    async def fake_fetch(result, **_kwargs):
+        return _verbose_document("", result.url)
+
+    monkeypatch.setattr("charlie.research.engine.fetch_document", fake_fetch)
+    engine = ResearchEngine(config)
+    monkeypatch.setattr(engine, "_providers", lambda: [Provider()])
+
+    report = await engine.run("research current browser agent security", "standard")
+
+    assert len(report.search_results) == 6
+    assert len(report.sources) == 6
+    assert len(report.citations) == 6
+    assert {item.source_id for item in report.evidence} == {f"S{index}" for index in range(1, 7)}
+    assert {citation.domain for citation in report.citations} == {
+        f"site{index}.example" for index in range(1, 7)
+    }
+    assert report.stop_reason == "evidence-sufficient"
+
+
+
+
+# --- Research stop-reason refusal contract -----------------------------------------
+# A research turn that produced no usable fetched evidence must refuse, never answer
+# from parametric memory. Only a terminal reason that means evidence was actually
+# fetched may be synthesized; everything else fails closed.
+
+_FRESH_QUERY = "what is the latest AI trend right now"
+# No citation marker on purpose: an ungrounded turn has its invented [Sn] markers
+# silently stripped, so the surviving text is the bare confident claim. Matching the
+# marker would hide the exact hallucination this guards against.
+_UNGROUNDED_MODEL_ANSWER = "The latest AI trend is agentic coding"
+
+
+@pytest.fixture
+def brain_config(tmp_path):
+    return Config(
+        llm_url="http://localhost:11434",
+        llm_key="no-key",
+        llm_model="dummy",
+        native_tool_calling=False,
+        router_classifier_enabled=False,
+        session_db_path=str(tmp_path / "sessions.db"),
+        world_model_db_path=str(tmp_path / "world.db"),
+    )
+
+
+async def _run_research_turn(brain, text=_FRESH_QUERY):
+    return [
+        chunk
+        async for chunk in brain.chat_stream(
+            text,
+            platform="web",
+            session_id="session-research-stop",
+            task_id="task-research-stop",
+            turn_id="turn-research-stop",
+            skip_pre_search=False,
+        )
+    ]
+
+
+def _stub_ungrounded_completion(seen):
+    async def fake_completion(payload, _generation):
+        seen["prompt"] = payload
+        return f"{_UNGROUNDED_MODEL_ANSWER} [S1]", []
+
+    return fake_completion
+
+
+@pytest.mark.asyncio
+async def test_research_timeout_refuses_instead_of_answering_from_memory(monkeypatch, brain_config):
+    """Real engine, real timeout: the bare question must not reach the model ungrounded."""
+    brain_config.research_total_timeout_standard_s = 0.05
+    seen: dict = {}
+    brain = core.Brain(brain_config, register_panic_hotkey=False)
+
+    async def hanging_search(_self, _plan):
+        await asyncio.sleep(30)
+        return []
+
+    monkeypatch.setattr(ResearchEngine, "_search", hanging_search)
+    monkeypatch.setattr(brain, "_stream_completion", _stub_ungrounded_completion(seen))
+    try:
+        chunks = await _run_research_turn(brain)
+    finally:
+        await brain.close()
+
+    assert chunks, "a research turn must still produce an answer chunk"
+    joined = "".join(chunks)
+    assert _UNGROUNDED_MODEL_ANSWER not in joined, (
+        f"an ungrounded answer escaped a timeout refusal: {joined!r}"
+    )
+    assert "time" in joined.lower(), f"timeout refusal must name the timeout, got: {joined!r}"
+    assert "sufficient reliable evidence" not in joined, (
+        "a timeout must not be reported as 'no sources exist'"
+    )
+    assert "[S1]" not in joined, "invented citations must not survive a refusal"
+
+
+@pytest.mark.asyncio
+async def test_research_stop_reasons_refuse_or_answer(monkeypatch, brain_config):
+    """Every non-evidence stop reason refuses; evidence-sufficient is answered."""
+    cases = [
+        ("no-results", True),
+        ("insufficient-evidence", True),
+        ("search-snippets-only", True),
+        ("error", True),
+        ("cancelled", True),
+        ("evidence-sufficient", False),
+    ]
+    for stop_reason, expect_refusal in cases:
+        seen: dict = {}
+        brain = core.Brain(brain_config, register_panic_hotkey=False)
+        citations = []
+        if stop_reason == "evidence-sufficient":
+            citations = [Citation(source_id="S1", url="https://example.com/a", title="A", domain="example.com")]
+        report = ResearchReport(
+            query=_FRESH_QUERY,
+            mode=ResearchMode.STANDARD,
+            sources=[SourceDocument(source_id="S1", url="https://example.com/a", title="A")]
+            if stop_reason == "evidence-sufficient"
+            else [],
+            evidence=[EvidenceItem(source_id="S1", statement="Fetched statement.")]
+            if stop_reason == "evidence-sufficient"
+            else [],
+            citations=citations,
+            stop_reason=stop_reason,
+        )
+
+        async def fake_research(*_args, **_kwargs):
+            return report
+
+        monkeypatch.setattr(brain, "_run_research_for_turn", fake_research)
+        monkeypatch.setattr(brain, "_stream_completion", _stub_ungrounded_completion(seen))
+        try:
+            chunks = await _run_research_turn(brain)
+        finally:
+            await brain.close()
+
+        joined = "".join(chunks)
+        assert joined.strip(), f"stop_reason={stop_reason!r} produced no answer at all"
+        refused = _UNGROUNDED_MODEL_ANSWER not in joined
+        assert refused is expect_refusal, (
+            f"stop_reason={stop_reason!r} expected refuse={expect_refusal}, got chunks={chunks!r}"
+        )
+        if stop_reason == "evidence-sufficient":
+            assert "sufficient reliable evidence" not in joined
+        if stop_reason in {"error", "cancelled"}:
+            assert "sufficient reliable evidence" not in joined, (
+                f"{stop_reason} must not claim there were no sources, got: {joined!r}"
+            )

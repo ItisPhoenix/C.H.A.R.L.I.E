@@ -12,7 +12,7 @@ from charlie import core, router
 from charlie.autonomy import Requirement, RiskClass
 from charlie.config import Config
 from charlie.fastpaths import FastPathResult
-from charlie.research.models import ResearchMode, ResearchReport, SourceDocument
+from charlie.research.models import Citation, EvidenceItem, ResearchMode, ResearchReport, SourceDocument
 from charlie.research.router import ResearchDecision
 from charlie.turn_contracts import IntentDecision, ResultEnvelope, TurnContractError, TurnRequest
 
@@ -276,7 +276,16 @@ async def test_research_turn_records_research_and_live_freshness(
     monkeypatch: pytest.MonkeyPatch, brain_config: Config
 ) -> None:
     request = _request("Research the latest NVIDIA security news")
-    report = ResearchReport(query=request.input, mode=ResearchMode.STANDARD)
+    # Mirror real engine output: a terminal "evidence-sufficient" report with fetched
+    # evidence. A report without evidence must now refuse instead of being synthesized.
+    report = ResearchReport(
+        query=request.input,
+        mode=ResearchMode.STANDARD,
+        sources=[SourceDocument(source_id="S1", url="https://example.com/advisory", title="Advisory")],
+        evidence=[EvidenceItem(source_id="S1", statement="Fetched statement.")],
+        citations=[Citation(source_id="S1", url="https://example.com/advisory", title="Advisory", domain="example.com")],
+        stop_reason="evidence-sufficient",
+    )
     decisions: list[IntentDecision] = []
     brain = core.Brain(brain_config, on_intent_decision=decisions.append, register_panic_hotkey=False)
 

@@ -796,8 +796,13 @@ class TestNormalRoundTrips:
             return report
 
         async def fabricated_completion(payload, generation):
-            serialized = json.dumps(payload)
-            assert "insufficient evidence" in serialized.lower()
+            serialized = json.dumps(payload).lower()
+            # The runtime must tell the model the research came back empty AND
+            # forbid answering from parametric memory. Assert the contract
+            # (the actual stop reason plus the prohibition), not one literal
+            # sentence -- the wording is not the guarantee.
+            assert "stop_reason=insufficient-evidence" in serialized
+            assert "do not answer this research question from model memory" in serialized
             return "QZ-4819 was verified in 2026. [S1]", []
 
         monkeypatch.setattr(brain, "_run_research", run_research)
