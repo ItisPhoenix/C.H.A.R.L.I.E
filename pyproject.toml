@@ -53,8 +53,13 @@ browser = [
 research = [
     "crawl4ai>=0.4",
 ]
+# `rate-limiter` is the official PTB extra backing telegram.ext.AIORateLimiter. PTB owns the
+# aiolimiter pin (currently <1.3,>=1.1); expressing it as the extra keeps that bound coupled to
+# the installed PTB instead of duplicating it here where it would drift. Without it,
+# charlie/telegram_bot.py:build_rate_limiter() degrades to None and client-side 429 smoothing
+# never runs.
 telegram = [
-    "python-telegram-bot>=21.0",
+    "python-telegram-bot[rate-limiter]>=21.0",
 ]
 
 [tool.pytest.ini_options]

@@ -48,6 +48,17 @@ async def test_thumbnail_is_encoded_for_media_results():
 
 
 def test_volume_snapshot_degrades_without_windows_audio_endpoint(monkeypatch):
+    """A machine with no reachable audio endpoint must report None, not raise.
+
+    Nulling the cached ``_audio_endpoint`` is not enough to create that
+    condition: ``_get_audio_endpoint()`` re-fetches from ``AudioUtilities`` on
+    the next call, so on a host where pycaw is installed the real endpoint came
+    straight back and the snapshot reported a live volume. Neutralize the
+    resolver itself so the absence is the thing under test.
+    """
     from charlie.media_adapter import _volume_snapshot
+
     monkeypatch.setattr("charlie.media_adapter._audio_endpoint", None)
+    monkeypatch.setattr("charlie.media_adapter.AudioUtilities", None)
+    monkeypatch.setattr("charlie.media_adapter._get_audio_endpoint", lambda: None)
     assert _volume_snapshot() == {"volume_percent": None, "muted": None}
