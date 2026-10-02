@@ -13,6 +13,9 @@ from urllib.parse import urlparse
 from charlie.research.cache import TTLCache
 from charlie.research.citations import assign_citations, assign_search_citations
 from charlie.research.crawler import crawl_document
+from charlie.research.credibility import (
+    organisational_domain as _organisational_domain,
+)
 from charlie.research.evidence import build_evidence
 from charlie.research.fetch import fetch_document
 from charlie.research.media import media_results
@@ -28,6 +31,7 @@ from charlie.research.models import (
 from charlie.research.ranking import rank_documents, rank_search_results
 from charlie.research.router import ResearchDecision, route
 from charlie.research.search import build_plan, search_plan
+from charlie.research.semantics import gather_semantic_scores
 from charlie.research.shopping import extract_products, is_shopping_query
 
 logger = logging.getLogger("charlie.research.engine")
@@ -67,68 +71,58 @@ BrowserFetchCallback = Callable[[SearchResult], Awaitable[Optional[SourceDocumen
 #   * when the signal cannot be measured at all the result is None, so callers
 #     can tell "low confidence" apart from "not measurable".
 
-_TWO_LABEL_PUBLIC_SUFFIXES = frozenset(
-    {
-        "ac.in", "ac.uk", "co.in", "co.jp", "co.kr", "co.nz", "co.uk", "co.za",
-        "com.au", "com.br", "com.cn", "com.mx", "com.sg", "com.tr", "com.tw",
-        "gov.in", "gov.uk", "net.au", "net.in", "ne.jp", "or.jp", "org.au",
-        "org.in", "org.uk",
-    }
-)
-
 # Denominator offset for n / (n + k).  k = 2 puts a single domain at 0.33 and
 # three domains at 0.60, so corroboration is required before the number can
 # even reach the middle of the range.
 _CONFIDENCE_HALF_WEIGHT = 2.0
 
+# Credibility scales the diversity curve rather than adding to it. Additive
+# blending broke the corroboration contract: one highly credible source scored
+# 0.54, above the single-source ceiling, even though nothing corroborated it.
+# Multiplicative keeps corroboration necessary and credibility marginal.
+CREDIBILITY_FLOOR = 0.4
+
 
 def organisational_domain(host: str) -> str:
-    """Reduce a host to the identity that could count as an independent source.
+    """Re-exported from charlie.research.credibility, which owns publisher identity.
 
-    Subdomains are collapsed (``blog.example.com`` == ``www.example.com``)
-    because they are the same publisher, and counting them as corroborating
-    sources is the exact failure mode this replaces.  Two-label public suffixes
-    are handled with a small curated set rather than a full public-suffix list;
-    ranking.py already takes shortcuts of this kind, and the error direction
-    here is conservative - undercounting publishers lowers the reported
-    confidence, it never inflates it.
+    engine.py imports ranking.py, so ranking.py cannot import engine.py without
+    a cycle. The implementation therefore lives in the shared module and is
+    re-exported here so the existing public import path keeps working.
     """
-    cleaned = (host or "").strip().lower()
-    if not cleaned:
-        return ""
-    cleaned = cleaned.split("@")[-1]
-    if cleaned.startswith("["):  # IPv6 literal, not a publisher identity.
-        return ""
-    cleaned = cleaned.split(":")[0].rstrip(".")
-    labels = [label for label in cleaned.split(".") if label]
-    if len(labels) < 2:
-        return ".".join(labels)
-    if len(labels) >= 3 and ".".join(labels[-2:]) in _TWO_LABEL_PUBLIC_SUFFIXES:
-        return ".".join(labels[-3:])
-    return ".".join(labels[-2:])
+    return _organisational_domain(host)
 
 
 def compute_confidence(
     evidence: Sequence[EvidenceItem],
     sources: Iterable[SourceDocument],
 ) -> Optional[float]:
-    """Return a source-diversity confidence for a research report.
+    """Return a corroborated, credibility-weighted confidence for a report.
 
-    Counts only the domains of sources that actually contributed at least one
+    Count only the domains of sources that actually contributed at least one
     surviving evidence item, so a fetched-but-unused page cannot raise the
-    number.
+    number.  Corroboration across independent publishers sets the ceiling;
+    the mean content credibility of those same sources then scales it down, so
+    piling up many low-credibility domains cannot earn a high score.  No amount
+    of single-source quality can lift one publisher past the diversity curve on
+    its own.
 
     Returns None when the signal is not measurable at all - no evidence, or
     evidence whose source cannot be traced to a resolvable domain.  A caller
     that receives None must treat the result as "unknown", never as "zero".
     """
+    documents = list(sources)
     domain_by_source: dict[str, str] = {}
-    for document in sources:
+    quality_by_source: dict[str, float] = {}
+    for document in documents:
         host = organisational_domain(document.domain) or organisational_domain(
             urlparse(document.url).netloc
         )
         if host and document.source_id:
             domain_by_source[document.source_id] = host
+            quality_by_source[document.source_id] = max(
+                0.0, min(1.0, document.quality_score)
+            )
 
     grounded = {
         domain_by_source[item.source_id]
@@ -137,8 +131,23 @@ def compute_confidence(
     }
     if not grounded:
         return None
+
     count = float(len(grounded))
-    return count / (count + _CONFIDENCE_HALF_WEIGHT)
+    diversity = count / (count + _CONFIDENCE_HALF_WEIGHT)
+
+    contributing = [
+        quality_by_source[item.source_id]
+        for item in evidence
+        if item.source_id in quality_by_source
+    ]
+    if not contributing:
+        return None
+    credibility = sum(contributing) / len(contributing)
+
+    combined = diversity * (
+        CREDIBILITY_FLOOR + (1.0 - CREDIBILITY_FLOOR) * credibility
+    )
+    return min(1.0, max(0.0, combined))
 
 
 def grounded_domain_count(
@@ -416,6 +425,36 @@ class ResearchEngine:
             self.document_cache.set(cache_key, document, 300.0 if mode is ResearchMode.DEEP else 900.0)
         return document
 
+    async def _rank_sources(
+        self,
+        documents: Sequence[SourceDocument],
+        plan: ResearchPlan,
+        mode: ResearchMode,
+    ) -> List[SourceDocument]:
+        """Rank fetched documents, adding semantic relevance when available.
+
+        Token overlap alone cannot separate a page about the topic from a page
+        that merely shares vocabulary, so the embedding service is asked for a
+        second opinion. It is strictly optional: any failure falls back to
+        token overlap, and QUICK mode skips it to stay fast.
+        """
+        limit = int(getattr(self.config, "research_max_sources", 12))
+        if not documents or mode is ResearchMode.QUICK:
+            return await rank_documents(documents, plan, limit)
+
+        pairs = [
+            (document.source_id, f"{document.title}. {document.content[:600]}")
+            for document in documents
+            if document.source_id
+        ]
+        semantic = await gather_semantic_scores(
+            plan.goal,
+            pairs,
+            base_url=getattr(self.config, "memory_embedding_url", ""),
+            model=getattr(self.config, "memory_embedding_model", ""),
+        )
+        return await rank_documents(documents, plan, limit, semantic=semantic)
+
     async def _fetch_sources(self, results: List[SearchResult], mode: ResearchMode) -> List[SourceDocument]:
         max_sources = int(getattr(self.config, "research_max_sources", 12))
         max_per_domain = max(1, int(getattr(self.config, "research_max_pages_per_domain", 4)))
@@ -492,11 +531,8 @@ class ResearchEngine:
 
         if mode is not ResearchMode.QUICK:
             await self._notify(ResearchProgress("reading", "Reading selected sources", mode=mode))
-            report.sources = rank_documents(
-                await self._fetch_sources(report.search_results, mode),
-                plan,
-                int(getattr(self.config, "research_max_sources", 12)),
-            )
+            documents = await self._fetch_sources(report.search_results, mode)
+            report.sources = await self._rank_sources(documents, plan, mode)
         report.citations = (
             assign_citations(report.sources)
             if report.sources
@@ -534,11 +570,7 @@ class ResearchEngine:
             extra_docs = await self._fetch_sources(extra, mode)
             existing_urls = {old.url for old in report.search_results}
             report.search_results.extend(item for item in extra if item.url not in existing_urls)
-            report.sources = rank_documents(
-                report.sources + extra_docs,
-                plan,
-                int(getattr(self.config, "research_max_sources", 12)),
-            )
+            report.sources = await self._rank_sources(report.sources + extra_docs, plan, mode)
             report.citations = assign_citations(report.sources)
             report.evidence = self._extract_evidence(report.sources, query)
 

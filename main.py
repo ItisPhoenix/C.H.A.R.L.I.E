@@ -166,6 +166,10 @@ from charlie.session_store import (
     SessionStore,
 )
 from charlie.results import ResultsStore
+from charlie.self_extension.approval_bridge import (
+    ApprovalChannelRegistry,
+    sanitize_approval_reason,
+)
 from charlie.settings_service import (
     SettingsService,
 )
@@ -373,6 +377,7 @@ async def _reconcile_mcp_extension_runtime(
                 plugin_manager,
                 mcp_client,
                 list(getattr(runtime_config, "plugin_allow_dirs", []) or []),
+                mcp_enabled=bool(getattr(runtime_config, "mcp_enabled", False)),
             )
             extension.enabled = True
             extension.tool_names = list(tool_names)
@@ -735,6 +740,11 @@ def _build_runtime_introspector(
 
 _main_event_bus: Optional[Any] = None
 
+# The constructed Brain, exposed at module scope so main-owned health publication can
+# read the degradations Brain records. Brain is otherwise a local of the startup
+# function, which made those degradations unobservable to any real health surface.
+_main_brain: Optional[Any] = None
+
 
 @dataclasses.dataclass(frozen=True)
 class _TrackedThreadsafeSubmission:
@@ -974,8 +984,52 @@ def _close_runtime_stores(audit_store: Any, store: Any, *, quiescent: bool) -> N
             logger.warning("SessionStore close error: %s", exc)
 
 
+# Which subsystem each Brain degradation belongs to. A degradation is a property of
+# the subsystem that lost truth, not of the brain as a whole.
+_BRAIN_DEGRADATION_SUBSYSTEM = {
+    "llm_health_delivery": "llm",
+    "session_history": "brain",
+    "context_tier": "memory",
+    "correction_persistence": "memory",
+}
+
+
+def _project_brain_degradations() -> None:
+    """Surface Brain-owned degradations on the main-owned health registry.
+
+    Brain records what it could not read, deliver, or persist, but cannot write to
+    the runtime HealthRegistry -- it only publishes LLM transitions through a sink.
+    Without this projection the health surface kept showing the last *successfully
+    delivered* state, which is a silent false-healthy signal.
+
+    Degradations for a subsystem the registry does not know are skipped rather than
+    inventing a subsystem, and a failure here must never take health publication down.
+    """
+    brain = _main_brain
+    if brain is None:
+        return
+    try:
+        degradations = brain.health_degradations()
+    except Exception:
+        logger.warning("Could not read Brain health degradations", exc_info=True)
+        return
+    for key in degradations or {}:
+        subsystem = _BRAIN_DEGRADATION_SUBSYSTEM.get(key)
+        if subsystem is None:
+            continue
+        try:
+            _set_subsystem_health(
+                subsystem,
+                HealthStatus.DEGRADED,
+                public_detail=f"degraded: {key}",
+            )
+        except Exception:
+            logger.debug("Degradation not projectable: %s", subsystem, exc_info=True)
+
+
 async def _publish_subsystem_health(bus: Optional[EventBus] = None) -> None:
     """Publish legacy subsystem projection plus canonical runtime truth."""
+    _project_brain_degradations()
     if bus is None:
         return
     event = _runtime_health.event()
@@ -1448,6 +1502,7 @@ def apply_extension_operation(
                 plugin_manager=plugin_manager,
                 mcp_client=mcp_client,
                 plugin_allow_dirs=list(getattr(runtime_config, "plugin_allow_dirs", []) or []),
+                mcp_enabled=bool(getattr(runtime_config, "mcp_enabled", False)),
             )
             if kind == "skill":
                 from charlie.extensions.skills import format_skill_block, parse_skill_md
@@ -1469,6 +1524,14 @@ def apply_extension_operation(
                 )
         elif operation == "enable":
             if kind == "mcp":
+                # Enabling a server starts a subprocess, so it is gated by the same
+                # enablement flag as installation. Previously this path reached
+                # enable_server directly and bypassed the check entirely.
+                if not bool(getattr(runtime_config, "mcp_enabled", False)):
+                    raise RuntimeError(
+                        "MCP is disabled: refusing to enable MCP server "
+                        f"{name!r}. Set MCP_ENABLED=true (config.mcp_enabled) to allow it."
+                    )
                 if mcp_client is None:
                     raise RuntimeError("Main MCP client is unavailable.")
                 tool_names = mcp_client.enable_server(tool_registry, name)
@@ -1493,6 +1556,7 @@ def apply_extension_operation(
                     plugin_manager=plugin_manager,
                     mcp_client=mcp_client,
                     plugin_allow_dirs=list(getattr(runtime_config, "plugin_allow_dirs", []) or []),
+                    mcp_enabled=bool(getattr(runtime_config, "mcp_enabled", False)),
                 )
                 if kind == "skill":
                     from charlie.extensions.skills import format_skill_block, parse_skill_md
@@ -1600,6 +1664,7 @@ def apply_extension_operation(
                         plugin_manager=plugin_manager,
                         mcp_client=mcp_client,
                         plugin_allow_dirs=list(getattr(runtime_config, "plugin_allow_dirs", []) or []),
+                        mcp_enabled=bool(getattr(runtime_config, "mcp_enabled", False)),
                     )
                 if kind == "skill" and before_skill_block is not None:
                     brain.add_installed_skill_block(name, before_skill_block)
@@ -3177,6 +3242,78 @@ async def main() -> int:
             _set_subsystem_health("llm", HealthStatus.DEGRADED, "Probe error")
             _set_subsystem_health("brain", HealthStatus.DEGRADED, "Primary LLM unavailable")
 
+        # Self-extension owner approval.
+        # The seam in charlie.tools is synchronous (it is reached from executor
+        # threads), while the canonical owner above is async. The bridge submits
+        # the owner's decision to THIS loop and waits for the answer; if it is ever
+        # called from the loop thread it refuses rather than deadlocking the loop
+        # that has to deliver the answer.
+        #
+        # The self-extension seam carries no turn identity, so the channel that can
+        # answer is resolved from the turns main is currently serving. Raising the
+        # prompt on a channel nobody can answer would park the single global
+        # approval slot for the whole timeout and decline every other gated tool
+        # call meanwhile, so an unknown or ambiguous channel refuses without
+        # prompting at all.
+        approval_channels = ApprovalChannelRegistry()
+        try:
+            from charlie.core import ApprovalDecision as _ApprovalDecision
+            from charlie.self_extension.approval_bridge import (
+                build_self_extension_approval_callback,
+            )
+            from charlie.tools import set_self_extension_approval_callback
+
+            async def _self_extension_owner_decision(
+                payload: dict[str, Any]
+            ) -> Optional[str]:
+                binding = str(payload.get("approval_binding") or "")
+                argv = [str(item) for item in (payload.get("argv") or [])]
+                if not binding or not argv:
+                    return None
+                channel = approval_channels.resolve()
+                if channel is None:
+                    # Fail closed FAST: no prompt is parked, so the single approval
+                    # slot stays free for other gated calls.
+                    logger.debug(
+                        "Self-extension approval channel is not knowable; refusing "
+                        "without prompting."
+                    )
+                    return None
+                # The reason is built from an LLM-planned request and reaches the
+                # owner verbatim: self_extension_proposal has no hardened preview
+                # channel, so it is sanitized here before it can structure or
+                # answer the owner's question.
+                reason = sanitize_approval_reason(
+                    payload.get("reason") or "Approve this self-extension change?"
+                )
+                if not reason:
+                    return None
+                decision = await brain._request_tool_approval_decision(
+                    "self_extension_proposal",
+                    {"command": argv},
+                    reason,
+                    platform=channel,
+                    risk_class="security_sensitive",
+                )
+                if getattr(decision, "value", decision) != _ApprovalDecision.APPROVED.value:
+                    return None
+                return binding
+
+            set_self_extension_approval_callback(
+                build_self_extension_approval_callback(
+                    _self_extension_owner_decision,
+                    loop=loop,
+                    # The bridge must always give up before the owner's own wait so
+                    # the owner's finally clears the global approval slot.
+                    owner_timeout=getattr(brain, "_approval_timeout", None),
+                )
+            )
+        except Exception:
+            logger.warning(
+                "Self-extension approval bridge unavailable; proposals will refuse",
+                exc_info=True,
+            )
+
         # Canonical memory facade wiring stays owned by main's composition root.
         _wire_memory_service(memory_service)
         # The SAME registry the LLM calls, so when PLUGINS_ENABLED=true the
@@ -3526,7 +3663,7 @@ async def main() -> int:
                 resolved = _resolve_tool_approval_and_notify(
                     request_id,
                     command_type == "approve",
-                    expected_platform=None,
+                    expected_platform="web",
                 )
                 if not resolved:
                     raise ValueError("approval was not accepted")
@@ -3564,12 +3701,20 @@ async def main() -> int:
             _schedule_process(_dispatch_or_queue(request), loop)
 
         def _cleanup_intent_decision(processor):
-            """Release interactive route metadata after every processing outcome."""
+            """Release interactive route metadata after every processing outcome.
+
+            Also publishes the turn's channel for the duration of the turn. The
+            self-extension approval seam is synchronous and carries no turn id, so
+            this is the only place that can tell the bridge which channel is able
+            to answer an approval raised from inside the turn.
+            """
 
             async def wrapped(request: TurnRequest, process_brain, process_voice):
+                approval_channels.begin(request.turn_id, request.channel)
                 try:
                     return await processor(request, process_brain, process_voice)
                 finally:
+                    approval_channels.end(request.turn_id)
                     finalizer = getattr(process_brain, "finalize_intent_decision", None)
                     if callable(finalizer):
                         finalizer(request.turn_id)
@@ -4695,6 +4840,12 @@ async def main() -> int:
         async with EventBus(pub_port=5555) as bus:
             event_bus = bus
             _main_event_bus = bus
+            # Expose Brain so main-owned health publication can project the
+            # degradations it records (unreadable context files, lost session
+            # history, undeliverable LLM transitions). Assigned at module scope
+            # deliberately: without it those losses are unobservable.
+            global _main_brain
+            _main_brain = brain
             # The web gateway is a presentation surface, not a runtime
             # dependency. An optional HTTP listener must never be able to end
             # the voice/Telegram runtime: Docker Desktop reserves port ranges
@@ -4718,15 +4869,15 @@ async def main() -> int:
                     os.getenv("CHARLIE_WEB_PORT", "8000"),
                     exc,
                 )
-                _set_subsystem_health("web_gateway", HealthStatus.DEGRADED)
                 web_gateway = None
             if web_gateway is not None:
                 # Subscribe only once the listener exists, so the bus never
                 # holds a publish method belonging to a gateway that never
-                # started.
+                # started. The gateway is a presentation surface and is not a
+                # registered runtime subsystem, so it reports through the log
+                # rather than the subsystem health registry.
                 bus.subscribe(web_gateway.publish)
                 logger.info("Charlie web gateway listening on http://127.0.0.1:%s", web_gateway.port)
-                _set_subsystem_health("web_gateway", HealthStatus.RUNNING)
             await _publish_subsystem_health(bus)
             bus.set_state_listener(_on_event_for_state)
             voice.set_event_bus(bus)

@@ -8,12 +8,49 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from charlie.mcp_client import mcp_tool_risk_class, server_declared_policy
 from charlie.self_extension.models import ExtensionKind
 
 logger = logging.getLogger("charlie.self_extension.registry")
 
 _DEFAULT_MANIFEST_PATH = Path("data/extensions.json")
 _SECRET_KEYS = frozenset({"api_key", "token", "secret", "password", "auth", "private_key", "key"})
+
+_MCP_DISABLED_REFUSAL = (
+    "MCP server {name!r} cannot be installed: MCP is disabled "
+    "(config.mcp_enabled / MCP_ENABLED=false). Nothing was registered and no "
+    "external process was started."
+)
+
+
+def mcp_enablement_allowed(configured: Optional[bool] = None) -> bool:
+    """The one MCP-enablement predicate for the self-extension subsystem.
+
+    ``charlie.extensions.install`` and main's ``enable`` gate both check
+    ``MCP_ENABLED``, but the self-extension adapters can also reach
+    ``MCPClient.add_server`` / ``enable_server`` directly, and those paths start a
+    subprocess. Enablement therefore has to be checked here too, or the flag is
+    only honoured at some composition roots rather than as an invariant.
+
+    ``None`` means the caller did not state enablement, so the canonical
+    ``Config.mcp_enabled`` decides -- which is itself ``MCP_ENABLED`` and is
+    ``false`` unless it is explicitly turned on. An unstated flag therefore fails
+    closed, never open.
+    """
+    if configured is not None:
+        return bool(configured)
+    try:
+        from charlie.config import Config
+
+        return bool(Config().mcp_enabled)
+    except Exception:
+        logger.warning("Could not resolve MCP enablement; refusing MCP work", exc_info=True)
+        return False
+
+
+def mcp_disabled_refusal(name: str) -> str:
+    """The canonical operator-facing refusal text for a disabled MCP subsystem."""
+    return _MCP_DISABLED_REFUSAL.format(name=str(name))
 
 
 @dataclass
@@ -88,9 +125,11 @@ class ExtensionRegistry:
         self,
         manifest_path: Optional[Path] = None,
         capability_index: Optional[Any] = None,
+        mcp_enabled: Optional[bool] = None,
     ) -> None:
         self._manifest_path = manifest_path or _DEFAULT_MANIFEST_PATH
         self._capability_index = capability_index
+        self._mcp_enabled = mcp_enabled
         self._entries: Dict[str, ExtensionEntry] = {}
         self.reload()
 
@@ -161,6 +200,8 @@ class ExtensionRegistry:
         tool_registry: Any = None,
         activate_mcp: bool = True,
         runtime_extension_operation: Optional[Callable[..., Dict[str, Any]]] = None,
+        *,
+        mcp_enabled: Optional[bool] = None,
     ) -> RehydrationReport:
         """Restore capabilities from the durable manifest into *capability_index*.
 
@@ -174,6 +215,9 @@ class ExtensionRegistry:
           - SKILL: registers a read-only capability descriptor.
           - MCP_TOOL: attempts reconnect via mcp_client if available; on failure
             marks entry verification_status=failed but does NOT remove the entry.
+            ``mcp_enabled`` (this call, else the instance value, else canonical
+            ``MCP_ENABLED``) is checked first, because reconnecting starts a
+            subprocess.
           - No duplicate ownership: re-registration replaces any stale descriptor.
         """
         report = RehydrationReport()
@@ -200,6 +244,7 @@ class ExtensionRegistry:
                         mcp_client,
                         tool_registry,
                         runtime_extension_operation,
+                        mcp_enabled if mcp_enabled is not None else self._mcp_enabled,
                     )
                 else:
                     # CONFIG / ARCHITECTURE_LARGE: no runtime capability descriptor needed
@@ -340,6 +385,7 @@ class ExtensionRegistry:
         mcp_client: Any,
         tool_registry: Any,
         runtime_extension_operation: Optional[Callable[..., Dict[str, Any]]] = None,
+        mcp_enabled: Optional[bool] = None,
     ) -> None:
         from charlie.capabilities import CapabilityDescriptor, CapabilityOperation
 
@@ -363,6 +409,12 @@ class ExtensionRegistry:
             return
 
         if mcp_client is not None:
+            # The canonical seam above is main-authoritative and enforces MCP_ENABLED
+            # on its own path. This fallback talks to MCPClient directly, which
+            # starts a subprocess, so the flag has to be honoured here or it is
+            # only enforced at some composition roots rather than as an invariant.
+            if not mcp_enablement_allowed(mcp_enabled):
+                raise RuntimeError(mcp_disabled_refusal(name))
             try:
                 from charlie.mcp_client import MCPServerConfig
                 meta = entry.metadata or {}
@@ -393,6 +445,17 @@ class ExtensionRegistry:
                 return False
             return _client.health_check().get(_name, False)
 
+        # Server-declared hints are untrusted metadata, collected here only so the
+        # risk floor can see an explicit permission *claim*. Advisory hints are
+        # not claims and never change policy.
+        annotations_by_tool: Dict[str, Any] = {}
+        if _client is not None:
+            try:
+                for tool in _client.list_tools():
+                    annotations_by_tool[tool.name] = getattr(tool, "annotations", None)
+            except Exception:
+                annotations_by_tool = {}
+
         ops: Dict[str, Any] = {}
         for t in discovered:
             _t = t
@@ -413,7 +476,10 @@ class ExtensionRegistry:
                 name=t,
                 description=f"[{name}] MCP tool",
                 parameters_schema={"type": "object"},
-                risk_class="safe" if policy == "allow" else "security_sensitive",
+                risk_class=mcp_tool_risk_class(
+                    policy,
+                    declared_policy=server_declared_policy(annotations_by_tool.get(t)),
+                ),
                 func=_invoke,
             )
 

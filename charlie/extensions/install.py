@@ -131,8 +131,16 @@ def install_extension(
     mcp_client: Any,
     plugin_allow_dirs: List[str],
     script_runner: Optional[Callable[[str, List[str]], str]] = None,
+    *,
+    mcp_enabled: bool = True,
 ) -> Tuple[List[str], Any]:
     """Parse and register an approved extension into `registry`.
+
+    ``mcp_enabled`` mirrors ``Config.mcp_enabled`` (the ``MCP_ENABLED`` setting).
+    When it is off, the MCP branch refuses to add, start, or enable a server
+    instead of silently spawning a process the owner disabled.  It defaults to
+    ``True`` so existing callers that have no config in scope keep their current
+    behaviour; a caller holding the runtime Config must pass the real value.
 
     Returns (registered_tool_names, mcp_client) -- `mcp_client` is handed
     back since the "mcp" branch may lazily construct one; callers must store
@@ -150,12 +158,18 @@ def install_extension(
         if kind == "mcp":
             from charlie.mcp_client import MCPClient
 
+            if not mcp_enabled:
+                raise ValueError(
+                    f"MCP is disabled: refusing to install and start MCP server '{name}'. "
+                    "Set MCP_ENABLED=true (config.mcp_enabled) to allow MCP servers."
+                )
             cfg = parsed_mcp_config(name, source, raw_text)
             if mcp_client is None:
                 mcp_client = MCPClient()
             mcp_client.add_server(cfg)
             return mcp_client.enable_server(registry, name), mcp_client
         if kind == "skill":
+
             from charlie.extensions.skills import parse_skill_md, register_skill_scripts
 
             manifest = parse_skill_md(raw_text)

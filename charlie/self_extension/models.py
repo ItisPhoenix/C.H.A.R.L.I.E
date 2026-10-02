@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import json
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -43,6 +45,25 @@ class RiskClass(StrEnum):
     REVERSIBLE = "reversible"
     DANGEROUS = "dangerous"
     CRITICAL = "critical"
+
+
+def approval_binding(kind: Any, name: Optional[str], argv: Optional[List[str]]) -> str:
+    """Stable identity of the exact executable an approval is granted for.
+
+    An approval is only ever valid for one (kind, name, argv) triple: a
+    different command or a different argument list is a different decision and
+    must be re-approved.  An empty argv yields an empty binding, which can
+    never authorise anything.
+    """
+    argv_list = [str(item) for item in (argv or [])]
+    if not argv_list:
+        return ""
+    payload = json.dumps(
+        [str(getattr(kind, "value", kind)), str(name or ""), argv_list],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 @dataclass
@@ -139,20 +160,34 @@ class GuardDecision:
     requires_approval: bool
     reason: str
     risk_class: RiskClass = RiskClass.REVERSIBLE
+    approved_argv: List[str] = field(default_factory=list)
+    """Exact argv this decision was made about. Empty means nothing is bound."""
+    approval_binding: str = ""
+    """Digest of (kind, name, approved_argv). Empty means the decision is unbound."""
+
+    def binds_plan(self, plan: Optional["ExtensionPlan"]) -> bool:
+        """True only when this decision was made for exactly this plan's argv."""
+        if not self.approval_binding or plan is None:
+            return False
+        return self.approval_binding == plan.approval_binding()
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
         d["risk_class"] = self.risk_class.value
+        d["approved_argv"] = list(self.approved_argv)
         return d
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> GuardDecision:
+    def from_dict(cls, data: Dict[str, Any]) -> "GuardDecision":
         return cls(
             is_authorized=bool(data.get("is_authorized", False)),
             requires_approval=bool(data.get("requires_approval", False)),
             reason=str(data.get("reason", "")),
             risk_class=RiskClass(data.get("risk_class", RiskClass.REVERSIBLE.value)),
+            approved_argv=[str(item) for item in (data.get("approved_argv") or [])],
+            approval_binding=str(data.get("approval_binding", "") or ""),
         )
+
 
 
 @dataclass
@@ -204,6 +239,42 @@ class ExtensionPlan:
     mcp_declared_tools: Optional[List[str]] = None
     """Tool names exposed by the MCP server for capability indexing."""
 
+    launch_argv: List[str] = field(default_factory=list)
+    """Exact argv that will be executed for this plan, captured at planning time.
+
+    When empty, :meth:`resolve_argv` derives it from the MCP payload fields so a
+    hand-built plan is still bound to a real executable.  When it is set it must
+    AGREE with those fields, because the orchestrator executes ``mcp_command`` /
+    ``mcp_args`` and not this field."""
+
+    def _executed_argv(self) -> List[str]:
+        """The argv the orchestrator will actually hand to the process launcher."""
+        if self.kind != ExtensionKind.MCP_TOOL or not self.mcp_command:
+            return []
+        return [str(self.mcp_command), *(str(item) for item in (self.mcp_args or []))]
+
+    def resolve_argv(self) -> List[str]:
+        """Return the exact argv this plan will run, or [] when there is none.
+
+        ``launch_argv`` and the executed ``mcp_command`` / ``mcp_args`` are two
+        independent deserialisation targets (``from_dict`` reads both), so a
+        hand-edited or merged persisted plan can make them disagree.  Rather than
+        bind an approval digest to the field that is *not* executed, divergence
+        resolves to nothing: the guard then leaves the decision unbound and the
+        orchestrator can never be satisfied.  Fail closed.
+        """
+        executed = self._executed_argv()
+        if self.launch_argv:
+            recorded = [str(item) for item in self.launch_argv]
+            if executed and recorded != executed:
+                return []
+            return recorded
+        return executed
+
+    def approval_binding(self) -> str:
+        """Digest an approval must match to authorise this exact plan."""
+        return approval_binding(self.kind, self.mcp_name or self.tool_name, self.resolve_argv())
+
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
         d["kind"] = self.kind.value
@@ -237,6 +308,7 @@ class ExtensionPlan:
                 if data.get("mcp_declared_tools") is not None
                 else None
             ),
+            launch_argv=[str(item) for item in (data.get("launch_argv") or [])],
         )
 
 

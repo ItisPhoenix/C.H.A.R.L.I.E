@@ -136,9 +136,9 @@ class TestClassifyActionPath:
         assert risk == RiskClass.SAFE
         assert reason == ""
 
-    def test_ordinary_path_outside_approved_roots_requires_approval(self, tmp_path):
+    def test_ordinary_path_outside_approved_roots_requires_approval(self, outside_approved_root_path):
         risk, reason = classify_action(
-            "file_read", {"path": str(tmp_path / "notes.txt")}
+            "file_read", {"path": str(outside_approved_root_path("notes.txt"))}
         )
         assert risk == RiskClass.SECURITY_SENSITIVE
         assert "outside" in reason.lower()

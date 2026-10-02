@@ -1,3 +1,4 @@
+import contextvars
 import enum
 import logging
 import os
@@ -5,7 +6,10 @@ import re
 import shutil
 import subprocess
 import sys
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from charlie.core import ApprovalDecision
 
 logger = logging.getLogger("charlie.recovery")
 
@@ -19,6 +23,14 @@ class FailureClass(enum.Enum):
 from charlie.config import config
 
 system_root: str = config.system_root
+# Guards the file_write redirect below: routing it through the canonical tool
+# path re-enters recover_tool for the same tool name, which would otherwise
+# recurse forever on the same basename. ContextVar, so it is per-task.
+_RECOVERY_IN_PROGRESS: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "charlie_recovery_in_progress", default=False
+)
+
+
 _BLOCKED_RECOVERY_PATHS: List[str] = [
     system_root,
     os.path.join(system_root, "system32"),
@@ -77,6 +89,67 @@ class RecoveryResult:
         self.command = command
         self.message = message
         self.error = error
+
+
+class RecoveryOutcome(str):
+    """One approved recovery, carrying the answer to "did anything run?".
+
+    A ``str`` subclass, so the human-readable message contract callers already
+    rely on is preserved, plus the one fact a caller must never have to infer
+    from prose:
+
+    ``executed``
+        ``True`` only when recovery itself performed the work and ``result``
+        holds the real output. An approved *proposal* is not an execution.
+        Recovery locates or rewrites a command and asks the canonical owner for
+        the decision; the tool layer stays the only place a command executes,
+        and therefore stays the place that holds the capability lease, applies
+        policy, and runs the semantic verifier. Executing here would be a
+        second, unguarded execution path (charlie/AGENTS.md 1, 4).
+    ``instruction``
+        What the caller should do next -- e.g. the resolved command to retry.
+    ``result``
+        The real tool output. Present only when ``executed`` is ``True``.
+
+    A caller must treat anything without ``executed is True`` as a proposal
+    that changed nothing, so a recovery can never launder a failure into a
+    success.
+    """
+
+    executed: bool
+    instruction: str
+    result: Any
+
+    def __new__(
+        cls,
+        message: str,
+        *,
+        executed: bool,
+        instruction: str = "",
+        result: Any = None,
+    ) -> "RecoveryOutcome":
+        outcome = super().__new__(cls, message)
+        outcome.executed = bool(executed)
+        outcome.instruction = str(instruction or "")
+        outcome.result = result
+        return outcome
+
+
+def _approved_retry_only(
+    proposed_command: str,
+    explanation: str,
+    source: str,
+) -> RecoveryOutcome:
+    """Approved for a retry that recovery itself does not perform."""
+
+    return RecoveryOutcome(
+        explanation,
+        executed=False,
+        instruction=(
+            f"{explanation} The {source} resolution did not run anything: retry "
+            f"shell_execute with this command instead: {proposed_command}"
+        ),
+    )
 
 def normalize_exception(e: Exception) -> Dict[str, Any]:
     """Standardizes Python / OS exceptions into unified schema."""
@@ -141,28 +214,75 @@ def run_command_safe(command: str) -> subprocess.CompletedProcess:
 _event_bus: Any = None
 
 async def request_recovery_approval(
+    brain: Any,
     original_command: str,
     proposed_command: str,
     failure_class: str,
     explanation: str,
     source: str,
     execution_context: Optional[Any] = None,
-) -> Optional[str]:
-    """Fail closed when recovery lacks an owner approval callback.
+) -> "ApprovalDecision":
+    """Take the canonical approval decision for one proposed recovery.
 
-    Normal tool calls use Brain's voice or owner-channel approval flow. This
-    lower-level helper has no Brain reference, so it must not create a second
-    approval authority or wait for a removed client.
+    ``Brain._request_tool_approval_decision`` returning
+    ``charlie.core.ApprovalDecision`` is the single authoritative owner of the
+    approval outcome: the same function gates ordinary tool calls in
+    ``_execute_operation_primitive``. Recovery asks that owner instead of
+    inventing a second approval protocol of its own.
+
+    Every path that cannot reach the owner fails closed with
+    ``ApprovalDecision.UNAVAILABLE``; this helper never derives a permissive
+    outcome from a bool, from free text, or from the absence of an answer.
+    Turn/task/session identity and the approval platform are deliberately left
+    to the owner, which owns that context.
     """
+    from charlie.core import ApprovalDecision
+
     if execution_context is not None and execution_context.cancellation_requested:
-        return None
-    logger.warning(
-        "Recovery approval unavailable; no owner-channel callback is wired for the lower-level recovery helper. "
-        "Failing closed for source=%s command=%s",
-        source,
-        original_command,
-    )
-    return None
+        logger.warning(
+            "Recovery approval cancelled for source=%s command=%s",
+            source,
+            original_command,
+        )
+        return ApprovalDecision.UNAVAILABLE
+
+    canonical = getattr(brain, "_request_tool_approval_decision", None)
+    if canonical is None:
+        logger.warning(
+            "Recovery approval unavailable; no canonical decision owner is wired for source=%s "
+            "command=%s. Failing closed.",
+            source,
+            original_command,
+        )
+        return ApprovalDecision.UNAVAILABLE
+
+    try:
+        decision = await canonical(
+            "shell_execute",
+            {"command": proposed_command},
+            f"recovery ({source}) after a {failure_class} failure: {explanation}",
+        )
+    except Exception as approval_exc:
+        logger.warning(
+            "Canonical approval decision failed for source=%s command=%s: %s. Failing closed.",
+            source,
+            original_command,
+            approval_exc,
+        )
+        return ApprovalDecision.UNAVAILABLE
+
+    if not isinstance(decision, ApprovalDecision):
+        logger.warning(
+            "Canonical approval decision returned %s instead of ApprovalDecision for source=%s "
+            "command=%s. Failing closed.",
+            type(decision).__name__,
+            source,
+            original_command,
+        )
+        return ApprovalDecision.UNAVAILABLE
+
+    return decision
+
 
 async def recover_tool(
     brain: Any,
@@ -171,14 +291,24 @@ async def recover_tool(
     e: Exception,
     *,
     execution_context: Optional[Any] = None,
-) -> Optional[str]:
-    """Universal recovery coordinator. Tries cache, strategies, then fallback LLM.
-    Returns the result of the successful recovery, or None if failed.
+) -> Optional[RecoveryOutcome]:
+    """Universal recovery coordinator. Tries cache, then strategies.
+
+    Every proposed recovery is gated on the canonical approval decision owned by
+    ``Brain._request_tool_approval_decision``; recovery contributes the proposal,
+    never the verdict. Returns a :class:`RecoveryOutcome` when a recovery was
+    approved, or ``None`` when none was, so the caller reports the original
+    failure truthfully.
+
+    Approval is not execution. A ``RecoveryOutcome`` with ``executed=False``
+    means the resolution is ready for the caller's next tool call and nothing
+    was run; a caller must keep reporting the failure.
     """
     if execution_context is not None and execution_context.cancellation_requested:
         return None
 
     failure = normalize_exception(e)
+
     failure_class = failure["failure_class"]
     error_msg = failure["message"]
 
@@ -205,19 +335,57 @@ async def recover_tool(
 
                 logger.info("Redirecting file_write from %s to safe path %s", old_path, new_path)
 
-                # Execute the write tool with new safe path
-                from charlie.tools import file_write
-                res = file_write(new_path, arguments.get("content", ""))
+                # Route through the canonical tool path so the write is subject to
+                # the registry policy layer, capability leases, and the approval
+                # decision -- a recovery redirect must not be a privileged write.
+                if _RECOVERY_IN_PROGRESS.get():
+                    logger.warning(
+                        "Recovery file_write redirect re-entered itself; refusing."
+                    )
+                    return None
+                if brain is None or not hasattr(brain, "execute_tool_operation"):
+                    logger.warning(
+                        "No canonical tool owner available for the file_write "
+                        "redirect; refusing rather than writing unapproved."
+                    )
+                    return None
+                token = _RECOVERY_IN_PROGRESS.set(True)
+                try:
+                    outcome = await brain.execute_tool_operation(
+                        "file_write",
+                        {
+                            "path": new_path,
+                            "content": arguments.get("content", ""),
+                        },
+                    )
+                finally:
+                    _RECOVERY_IN_PROGRESS.reset(token)
+                res = getattr(outcome, "result", None)
+                status = getattr(outcome, "status", None)
+                status_value = str(getattr(status, "value", status) or "")
+                if status_value != "completed":
+                    logger.warning(
+                        "Canonical file_write redirect did not complete (status=%s); "
+                        "reporting the failure.",
+                        status_value or "unknown",
+                    )
+                    return None
+                res = str(res or "")
                 if not res.startswith("Error"):
-                    return (
+                    return RecoveryOutcome(
                         f"Redirected save: I couldn't write to the system folder due to "
-                        f"permissions, so I saved the file to '{new_path}' instead."
+                        f"permissions, so I saved the file to '{new_path}' instead.",
+                        executed=True,
+                        result=res,
+                        instruction=f"The file was saved to '{new_path}' instead.",
                     )
         except Exception as redirect_exc:
             logger.warning("Failed to redirect file_write: %s", redirect_exc)
 
     # 2. Handle shell_execute (command recovery logic)
     if tool_name == "shell_execute":
+        from charlie.core import ApprovalDecision
+
         command = arguments.get("command", "")
         if not command:
             return None
@@ -225,17 +393,29 @@ async def recover_tool(
         # Check local cache
         from charlie.recovery_cache import get_cached_resolution, set_cached_resolution
         cached_cmd = get_cached_resolution(command, failure_class.value, error_msg)
+        if cached_cmd and not is_safe_to_recover(cached_cmd):
+            logger.warning(
+                "Safety Guardrail: cached recovery resolution is unsafe; refusing it. cached=%s",
+                cached_cmd,
+            )
+            cached_cmd = None
         if cached_cmd:
-            approval_res = await request_recovery_approval(
+            explanation = "Resolution retrieved from local command recovery cache."
+            approval_decision = await request_recovery_approval(
+                brain,
                 original_command=command,
                 proposed_command=cached_cmd,
                 failure_class=failure_class.value,
-                explanation="Resolution retrieved from local command recovery cache.",
+                explanation=explanation,
                 source="cache",
                 execution_context=execution_context,
             )
-            if approval_res is not None:
-                return approval_res
+            if approval_decision is ApprovalDecision.APPROVED:
+                return _approved_retry_only(cached_cmd, explanation, "cache")
+            logger.info(
+                "Cached resolution was not approved (%s); trying strategies.",
+                approval_decision.value,
+            )
 
         # Try strategies
         for strategy in RECOVERY_REGISTRY:
@@ -246,6 +426,14 @@ async def recover_tool(
                     if execution_context is not None and execution_context.cancellation_requested:
                         return None
                     if res.success and res.command:
+                        if not is_safe_to_recover(res.command):
+                            logger.warning(
+                                "Safety Guardrail: recovery strategy %s proposed an unsafe "
+                                "command; refusing it. proposed=%s",
+                                type(strategy).__name__,
+                                res.command,
+                            )
+                            continue
                         if res.command == command:
                             logger.info(
                                 "Skipping automatic retry of unchanged command after %s; "
@@ -257,7 +445,8 @@ async def recover_tool(
                             res.message or
                             f"Recovery strategy {type(strategy).__name__} resolved command executable."
                         )
-                        approval_res = await request_recovery_approval(
+                        approval_decision = await request_recovery_approval(
+                            brain,
                             original_command=command,
                             proposed_command=res.command,
                             failure_class=failure_class.value,
@@ -265,14 +454,14 @@ async def recover_tool(
                             source="strategy",
                             execution_context=execution_context,
                         )
-                        if approval_res is not None:
-                            if "rejected" not in approval_res.lower() and "error" not in approval_res.lower():
-                                set_cached_resolution(command, failure_class.value, error_msg, res.command)
-                            return approval_res
+                        if approval_decision is ApprovalDecision.APPROVED:
+                            set_cached_resolution(command, failure_class.value, error_msg, res.command)
+                            return _approved_retry_only(res.command, explanation, "strategy")
                 except Exception as strat_exc:
                     logger.warning("Strategy execution failed: %s", strat_exc)
 
         logger.info("All recovery strategies exhausted.")
+
         return None
 
 

@@ -299,8 +299,13 @@ class SelfExtensionOrchestrator:
                 mcp_command=command,
                 mcp_args=args,
                 mcp_env=env,
+                launch_argv=[command, *args],
             )
             request.affected_capabilities = [f"mcp_{name}"]
+            # The launcher is a new external executable on this host, so the
+            # request declares it as a dependency. This is what makes guard
+            # Rule 3 (external dependency additions) live for MCP requests.
+            request.required_dependencies = [command]
         elif kind == ExtensionKind.CODE_SMALL:
             code_plan = self._build_code_plan(prompt)
             if code_plan is None:
@@ -622,7 +627,23 @@ class SelfExtensionOrchestrator:
     # Generic execute_transaction entry point
     # ─────────────────────────────────────────────────────────────────────────
 
-    def execute_transaction(self, request: ExtensionRequest) -> ExtensionResult:
+    @staticmethod
+    def _approval_covers(guard_decision: Any, approved_binding: Optional[str]) -> bool:
+        """An approval only counts when it matches the argv just reviewed.
+
+        An unbound decision (no resolvable argv) is never covered, so an
+        approval recorded for one command cannot authorise another.
+        """
+        if not approved_binding or not guard_decision.approval_binding:
+            return False
+        return approved_binding == guard_decision.approval_binding
+
+    def execute_transaction(
+        self,
+        request: ExtensionRequest,
+        *,
+        approved_binding: Optional[str] = None,
+    ) -> ExtensionResult:
         """
         Process a generic extension request through classification, guard evaluation,
         and type-specific execution.
@@ -630,6 +651,10 @@ class SelfExtensionOrchestrator:
         CODE_SMALL and MCP_TOOL require a validated ExtensionPlan with the actual
         structured payload attached.  Raw user_prompt is never treated as executable
         code or server config.  ARCHITECTURE_LARGE always requires explicit approval.
+
+        ``approved_binding`` is the approval digest the owner granted.  It only
+        authorises the request when it matches the exact argv the guard just
+        reviewed; a different command or argument list is a different decision.
         """
         tx_id = f"tx-{uuid.uuid4().hex[:8]}"
         tx = ExtensionTransaction(transaction_id=tx_id, request=request)
@@ -649,17 +674,26 @@ class SelfExtensionOrchestrator:
         tx.guard_decision = guard_decision
 
         if guard_decision.requires_approval or not guard_decision.is_authorized:
-            tx.status = TransactionStatus.APPROVAL_REQUIRED
-            self._emit(
-                EventType.SELF_EXTENSION_APPROVAL_REQUIRED,
-                {"tx_id": tx_id, "reason": guard_decision.reason},
-            )
-            return ExtensionResult(
-                success=False,
-                transaction_id=tx_id,
-                status=TransactionStatus.APPROVAL_REQUIRED,
-                message=guard_decision.reason,
-            )
+            approved = self._approval_covers(guard_decision, approved_binding)
+            if not approved:
+                reason = guard_decision.reason
+                if approved_binding:
+                    reason = (
+                        "APPROVAL_MISMATCH: the recorded approval does not cover this exact command "
+                        f"('{' '.join(guard_decision.approved_argv) or 'unresolved'}'). A different "
+                        "executable or argument list is a different decision; review it again."
+                    )
+                tx.status = TransactionStatus.APPROVAL_REQUIRED
+                self._emit(
+                    EventType.SELF_EXTENSION_APPROVAL_REQUIRED,
+                    {"tx_id": tx_id, "reason": reason},
+                )
+                return ExtensionResult(
+                    success=False,
+                    transaction_id=tx_id,
+                    status=TransactionStatus.APPROVAL_REQUIRED,
+                    message=reason,
+                )
 
         self._emit(EventType.SELF_EXTENSION_PLANNED, {"tx_id": tx_id})
 

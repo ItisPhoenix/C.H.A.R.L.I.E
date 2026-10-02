@@ -368,6 +368,74 @@ async def test_provider_fallback_continues_after_failure():
     assert results[0].url == "https://example.com"
 
 
+@pytest.mark.asyncio
+async def test_provider_merge_keeps_secondary_provider_coverage():
+    class Narrow:
+        name = "narrow"
+
+        async def search(self, query, *, limit, domain_filters=None):
+            return [SearchResult("Narrow hit", "https://a.example/one", "s", provider="narrow")]
+
+    class Broad:
+        name = "broad"
+
+        async def search(self, query, *, limit, domain_filters=None):
+            return [
+                SearchResult("Broad hit", "https://b.example/two", "s", provider="broad"),
+                SearchResult("Third", "https://c.example/three", "s", provider="broad"),
+            ]
+
+    results = await search_with_fallback([Narrow(), Broad()], "q", limit=10)
+
+    # A non-empty first provider must not suppress the others.
+    assert {r.url for r in results} == {
+        "https://a.example/one",
+        "https://b.example/two",
+        "https://c.example/three",
+    }
+    # Provider priority orders the merged list without dropping coverage.
+    assert results[0].provider == "narrow"
+
+
+@pytest.mark.asyncio
+async def test_provider_merge_dedupes_across_providers():
+    shared = "https://dup.example/page"
+
+    class First:
+        name = "first"
+
+        async def search(self, query, *, limit, domain_filters=None):
+            return [
+                SearchResult("Canonical", "https://dup.example/page", "s", provider="first"),
+                SearchResult("Only first", "https://one.example/", "s", provider="first"),
+            ]
+
+    class Second:
+        name = "second"
+
+        async def search(self, query, *, limit, domain_filters=None):
+            return [
+                SearchResult("Same page, different form", f"{shared}/?utm=1#frag", "s", provider="second"),
+            ]
+
+    results = await search_with_fallback([First(), Second()], "q", limit=10)
+    dupes = [r for r in results if "dup.example" in r.url]
+    assert len(dupes) == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_merge_respects_limit_and_empty_input():
+    class Many:
+        name = "many"
+
+        async def search(self, query, *, limit, domain_filters=None):
+            return [SearchResult(f"R{i}", f"https://x.example/{i}", "s", provider="many") for i in range(10)]
+
+    results = await search_with_fallback([Many()], "q", limit=4)
+    assert len(results) == 4
+    assert await search_with_fallback([], "q", limit=4) == []
+
+
 def test_read_url_rejects_private_target_before_playwright(monkeypatch):
     monkeypatch.setattr(
         "charlie.browser.actions.controller.run",

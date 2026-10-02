@@ -39,6 +39,16 @@ class TakeoverStatus:
     session_owner: Optional[str] = None
 
 
+@dataclass
+class TakeoverHalt:
+    """Truthful outcome of a takeover halt -- never claimed without evidence."""
+
+    dispatch_halted: bool
+    fenced_owners: tuple[str, ...]
+    fenced_capabilities: tuple[str, ...]
+    error: Optional[str] = None
+
+
 class UserTakeoverDetector:
     """Detects user physical mouse/keyboard takeover without invasive hooking or keylogging."""
 
@@ -100,21 +110,60 @@ class UserTakeoverDetector:
 
             return False
 
-    def _trigger_halt(self) -> None:
-        """Halt actions and revoke the canonical desktop lease."""
+    def _trigger_halt(self) -> TakeoverHalt:
+        """Cancel physical control and fence the canonical desktop lease.
+
+        Two independent postconditions, both required:
+        1. dispatch is halted -- ``actions.halt()`` makes every effector raise
+           ``DesktopHalted``, so no further synthetic input reaches the OS;
+        2. the capability is fenced, not transferred -- ``manual_takeover``
+           revokes admission so a second holder cannot be admitted while the
+           prior owner's work is still unwinding.
+
+        Returns what actually happened so callers and logs never claim a
+        postcondition that was not reached.
+        """
+        from charlie.resource_locks import current_owner, get_revocations
+
+        errors: list[str] = []
+        dispatch_halted = False
         try:
             from charlie.desktop import actions
 
             actions.halt()
-        except Exception:
+            dispatch_halted = actions.is_halted()
+            if not dispatch_halted:
+                raise RuntimeError("desktop actions did not enter the halted state")
+        except Exception as exc:
+            errors.append(f"desktop dispatch halt failed: {exc}")
             logger.error("Failed to halt desktop actions during user takeover", exc_info=True)
 
         try:
             from charlie.resource_locks import default_lease_manager
 
             default_lease_manager.manual_takeover(("desktop",))
-        except Exception:
+        except Exception as exc:
+            errors.append(f"desktop lease fence failed: {exc}")
             logger.error("Failed to revoke canonical desktop lease during user takeover", exc_info=True)
+
+        revocations = get_revocations()
+        revocation = revocations.get("desktop")
+        owner = current_owner("desktop")
+
+        outcome = TakeoverHalt(
+            dispatch_halted=dispatch_halted,
+            fenced_owners=(owner,) if owner else (),
+            fenced_capabilities=("desktop",) if revocation is not None else (),
+            error="; ".join(errors) or None,
+        )
+        logger.warning(
+            "Takeover halt complete: dispatch_halted=%s fenced_owners=%s fenced=%s error=%s",
+            outcome.dispatch_halted,
+            outcome.fenced_owners,
+            outcome.fenced_capabilities,
+            outcome.error,
+        )
+        return outcome
 
     def is_physical_control_active(self) -> bool:
         with self._lock:

@@ -42,8 +42,10 @@ class TestCheckToolCallPathContainment:
         result = check_tool_call("file_read", {"path": str(workspace_path("notes.txt"))})
         assert result.needs_approval is False
 
-    def test_path_outside_approved_roots_requires_approval(self, tmp_path):
-        result = check_tool_call("file_read", {"path": str(tmp_path / "notes.txt")})
+    def test_path_outside_approved_roots_requires_approval(self, outside_approved_root_path):
+        result = check_tool_call(
+            "file_read", {"path": str(outside_approved_root_path("notes.txt"))}
+        )
         assert result.needs_approval is True
         assert "outside Charlie's workspace" in result.reason
 

@@ -8,6 +8,7 @@ an effector. This is the one place that walks the accessibility tree.
 
 import logging
 import threading
+import time
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -49,22 +50,67 @@ class Element:
 _controls: Dict[int, Any] = {}
 _lock = threading.Lock()
 
-# Screen rect of the most recent ocr.capture() grab, for image-to-screen coord mapping.
+# Screen rect of the most recent ocr.capture() grab, for image-to-screen coord mapping,
+# plus the monotonic clock reading at which that grab was taken.
 _LAST_CAPTURE_BOUNDS: Optional[Tuple[int, int, int, int]] = None
+_LAST_CAPTURE_AT: Optional[float] = None
+
+# How long an image-space coordinate mapping stays valid. Image coords are only
+# meaningful against the exact screen rect they were captured from: once a window
+# moves, resizes, or the screen layout changes, an old rect silently turns a
+# click into a miss (or worse, a click on whatever now occupies those pixels).
+# The default is sized for the slowest legitimate path -- capture, a full LLM
+# reasoning round-trip, then dispatch -- with margin, while still bounding how
+# long a stale rect can be acted on. Refusing a stale capture costs one
+# re-observe; trusting one costs a mis-click the user has to undo.
+CAPTURE_STALENESS_SECONDS = 30.0
 
 
 def set_last_capture_bounds(bounds: Optional[Tuple[int, int, int, int]]) -> None:
-    global _LAST_CAPTURE_BOUNDS
+    global _LAST_CAPTURE_BOUNDS, _LAST_CAPTURE_AT
     _LAST_CAPTURE_BOUNDS = bounds
+    # Clearing the bounds must clear the clock too, or a later capture-less read
+    # would see a fresh-looking timestamp.
+    _LAST_CAPTURE_AT = None if bounds is None else time.monotonic()
 
 
 def get_last_capture_bounds() -> Optional[Tuple[int, int, int, int]]:
     return _LAST_CAPTURE_BOUNDS
 
 
+def capture_age_seconds() -> Optional[float]:
+    """Monotonic age of the recorded capture, or None if there is no capture."""
+    if _LAST_CAPTURE_BOUNDS is None or _LAST_CAPTURE_AT is None:
+        return None
+    return max(0.0, time.monotonic() - _LAST_CAPTURE_AT)
+
+
+def last_capture_staleness() -> Optional[str]:
+    """None when the recorded capture is usable; otherwise why it is not.
+
+    Returned as an explainable reason so a refusal can be traced to the capture
+    rather than surfacing as an opaque "no capture bounds".
+    """
+    if _LAST_CAPTURE_BOUNDS is None or _LAST_CAPTURE_AT is None:
+        return "no capture recorded"
+    age = capture_age_seconds()
+    if age is not None and age > CAPTURE_STALENESS_SECONDS:
+        return (
+            f"capture is stale ({age:.1f}s old, limit {CAPTURE_STALENESS_SECONDS:.0f}s) -- "
+            "screen may have moved or resized"
+        )
+    return None
+
+
 def image_to_screen(x: int, y: int) -> Optional[Tuple[int, int]]:
-    """Translate captured-image pixel coords to absolute screen coords."""
-    if _LAST_CAPTURE_BOUNDS is None:
+    """Translate captured-image pixel coords to absolute screen coords.
+
+    Returns None for a missing *or* stale capture, so click_at/move_to/drag
+    cannot dispatch against a screen rect that no longer describes the display.
+    """
+    reason = last_capture_staleness()
+    if reason is not None:
+        logger.warning("Refusing image-space coordinate (%s,%s): %s", x, y, reason)
         return None
     left, top, _right, _bottom = _LAST_CAPTURE_BOUNDS
     return left + x, top + y

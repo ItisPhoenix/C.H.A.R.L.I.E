@@ -144,23 +144,34 @@ async def test_recover_tool_file_write_redirect(monkeypatch):
 
     e = PermissionError("[WinError 5] Access is denied")
 
+    routed = []
+
+    class _Completed:
+        """Minimal canonical-envelope stand-in exposing only what recovery reads."""
+
+        status = "completed"
+        result = "Successfully wrote"
+
     class DummyBrain:
         _fallback_client = None
+
+        async def execute_tool_operation(self, tool_name, arguments, *a, **kw):
+            # The redirect MUST take the canonical tool path so it is subject to the
+            # registry policy layer, capability leases, and the approval decision.
+            # Calling charlie.tools.file_write directly is what this test used to
+            # assert, and it was an unapproved write.
+            routed.append((tool_name, dict(arguments)))
+            return _Completed()
 
     brain = DummyBrain()
     args = {"path": "C:\\Windows\\test.txt", "content": "I am Charlie"}
 
-    redirected_path = None
-    def mock_file_write(path, content):
-        nonlocal redirected_path
-        redirected_path = path
-        return "Successfully wrote"
-
-    monkeypatch.setattr("charlie.tools.file_write", mock_file_write)
-
     res = await recover_tool(brain, "file_write", args, e)
 
+    assert routed, "the redirect bypassed the canonical tool path entirely"
+    tool_name, arguments = routed[0]
+    assert tool_name == "file_write"
+    assert "Documents" in arguments["path"]
+    assert arguments["content"] == "I am Charlie"
     assert res is not None
     assert "Redirected save" in res
-    assert redirected_path is not None
-    assert "Documents" in redirected_path

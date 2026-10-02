@@ -22,6 +22,7 @@ from types import SimpleNamespace
 import pytest
 
 from charlie.research.engine import (
+    CREDIBILITY_FLOOR,
     ResearchEngine,
     compute_confidence,
     grounded_domain_count,
@@ -120,6 +121,18 @@ async def _run(monkeypatch, results, bodies, **config_overrides):
 # --------------------------------------------------------------------------
 
 
+def _expected(domains, credibility=0.8):
+    """Mirror of compute_confidence's shape, kept explicit so a formula change
+    has to be deliberate in both places.
+
+    diversity is n/(n+2); credibility scales it multiplicatively so that no
+    amount of single-source quality can lift one publisher past the diversity
+    curve on its own.
+    """
+    diversity = domains / (domains + 2)
+    return diversity * (CREDIBILITY_FLOOR + (1 - CREDIBILITY_FLOOR) * credibility)
+
+
 def test_single_source_with_forty_evidence_items_is_not_high_confidence():
     """The exact measured failure: 1 source, 40 evidence, previously 1.00."""
     evidence = [EvidenceItem("S1", GOOD_SENTENCE) for _ in range(40)]
@@ -128,8 +141,9 @@ def test_single_source_with_forty_evidence_items_is_not_high_confidence():
 
     assert confidence is not None
     assert confidence < 0.5, f"one source reported confidence {confidence}"
-    # 40 items from one publisher is still one publisher.
-    assert confidence == pytest.approx(1 / 3)
+    # 40 items from one publisher is still one publisher, and no credibility
+    # value may lift a single publisher into the middle of the range.
+    assert confidence == pytest.approx(_expected(1))
 
 
 @pytest.mark.asyncio
@@ -153,7 +167,7 @@ def test_subdomains_of_one_publisher_do_not_count_as_corroboration():
         _source("S3", "docs.example.com"),
     ]
 
-    assert compute_confidence(evidence, sources) == pytest.approx(1 / 3)
+    assert compute_confidence(evidence, sources) == pytest.approx(_expected(1))
 
 
 def test_organisational_domain_collapses_subdomains_and_two_label_suffixes():
@@ -183,7 +197,7 @@ def test_three_distinct_domains_outrank_one_domain_all_else_equal():
 
     assert single is not None and multi is not None
     assert multi > single
-    assert multi == pytest.approx(0.6)
+    assert multi == pytest.approx(_expected(3))
 
 
 def test_confidence_increases_monotonically_with_independent_domains():
@@ -218,7 +232,7 @@ def test_fetched_but_ungrounded_pages_cannot_inflate_confidence(monkeypatch):
         _source("S2", "fetched-but-unused.example"),
     ]
 
-    assert compute_confidence(evidence, sources) == pytest.approx(1 / 3)
+    assert compute_confidence(evidence, sources) == pytest.approx(_expected(1))
 
 
 # --------------------------------------------------------------------------
@@ -289,7 +303,13 @@ def test_sanitiser_keeps_legitimate_prose_that_looks_like_junk():
 
     cleaned = sanitize_source_text(keep)
 
-    for phrase in ("null hypothesis", "null result", "Undefined behaviour", "40 nanometres", "Loading the battery model"):
+    for phrase in (
+        "null hypothesis",
+        "null result",
+        "Undefined behaviour",
+        "40 nanometres",
+        "Loading the battery model",
+    ):
         assert phrase in cleaned, f"dropped legitimate prose: {phrase!r} -> {cleaned!r}"
 
 
@@ -316,8 +336,6 @@ def test_junk_document_yields_no_evidence_item_containing_junk(monkeypatch):
 
 def _fetch_document_probe(document):
     """Fetch one document through the engine's real _fetch_one seam."""
-    import asyncio
-
     async def run():
         engine = ResearchEngine(_config())
         result = SearchResult("Page", document.url)

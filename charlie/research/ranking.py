@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import logging
+import math
 import re
 from datetime import datetime, timezone
-from typing import Iterable, List
+from typing import Iterable, List, Optional
+from urllib.parse import urlparse
 
+from charlie.research.credibility import organisational_domain, rank_prior
 from charlie.research.fetch import canonicalize_url
 from charlie.research.models import ResearchPlan, SearchResult, SourceDocument
+from charlie.research.semantics import SemanticRelevance
+
+logger = logging.getLogger("charlie.research.ranking")
 
 _TOKEN_RE = re.compile(r"[a-z0-9]{3,}", re.I)
 _PRIMARY_HINTS = (".gov", ".edu", "github.com", "python.org", "openai.com", "x.com", "twitter.com")
@@ -50,7 +57,7 @@ def _score(query: str, result: SearchResult) -> float:
             (datetime.now(timezone.utc).timestamp() - _freshness_timestamp(result.published_at)) / 86400,
         )
         freshness = max(-0.35, 0.35 - min(age_days, 30) * 0.02)
-    return overlap + primary + freshness + max(0.0, 0.04 - (result.rank * 0.005))
+    return overlap + primary + freshness + rank_prior(result.rank)
 
 
 def rank_search_results(results: Iterable[SearchResult], plan: ResearchPlan, limit: int) -> List[SearchResult]:
@@ -74,7 +81,50 @@ def rank_search_results(results: Iterable[SearchResult], plan: ResearchPlan, lim
     return ranked[: max(1, limit)]
 
 
-def rank_documents(documents: Iterable[SourceDocument], plan: ResearchPlan, limit: int) -> List[SourceDocument]:
+def _document_score(document: SourceDocument) -> float:
+    """Balance topical relevance against content credibility.
+
+    Ranking on relevance alone put a cybersecurity page at the top of an AI
+    query, because bag-of-words overlap cannot tell a page about the topic from
+    a page that merely shares vocabulary. Ranking on credibility alone would
+    prefer a credible page that never answers the question. The geometric mean
+    requires both to be decent: a page cannot win on one axis alone, and a
+    perfect score on one axis cannot mask a poor score on the other.
+    """
+    relevance = max(0.0, min(1.0, document.relevance_score))
+    credibility = max(0.0, min(1.0, document.quality_score))
+    return math.sqrt(relevance * credibility)
+
+
+def _normalise_semantic(scores: dict) -> dict:
+    """Map raw cosine similarities onto [0, 1].
+
+    Embedding backends cluster most related pairs above ~0.5, so a raw cosine
+    of 0.55 is already a good match and must not be discarded as "no overlap".
+    """
+    if not scores:
+        return {}
+    low = min(scores.values())
+    high = max(scores.values())
+    if high - low < 1e-6:
+        return {key: 1.0 for key in scores}
+    span = high - low
+    return {key: (value - low) / span for key, value in scores.items()}
+
+
+def _token_relevance(query_tokens: set, document: SourceDocument) -> float:
+    content_tokens = _tokens(f"{document.title} {document.content}")
+    return len(query_tokens & content_tokens) / max(1, len(query_tokens))
+
+
+async def rank_documents(
+    documents: Iterable[SourceDocument],
+    plan: ResearchPlan,
+    limit: int,
+    *,
+    max_per_domain: int = 2,
+    semantic: Optional[SemanticRelevance] = None,
+) -> List[SourceDocument]:
     unique: dict[str, SourceDocument] = {}
     for document in documents:
         key = document.canonical_url or document.url
@@ -83,20 +133,59 @@ def rank_documents(documents: Iterable[SourceDocument], plan: ResearchPlan, limi
     query_tokens = _tokens(plan.goal) - _STOPWORDS
     numeric_tokens = {token for token in query_tokens if any(char.isdigit() for char in token)}
     requires_identifier = bool(_IDENTIFIER_RE.search(plan.goal))
+
+    semantic_scores = _normalise_semantic(semantic.scores) if semantic else {}
+    semantic_mode = semantic.mode if semantic else "disabled"
+
     for document in unique.values():
         content_tokens = _tokens(f"{document.title} {document.content}")
         if requires_identifier and numeric_tokens and not numeric_tokens.intersection(content_tokens):
             document.relevance_score = 0.0
             continue
-        overlap = len(query_tokens & content_tokens) / max(1, len(query_tokens))
-        document.relevance_score = overlap
-        document.quality_score = min(1.0, document.quality_score + overlap * 0.4)
-    return sorted(
-        (item for item in unique.values() if item.relevance_score > 0),
+        overlap = _token_relevance(query_tokens, document)
+        # Take whichever signal is more generous. Token overlap cannot detect a
+        # shared topic with different vocabulary, and cosine cannot detect an
+        # exact rare-token match, so the stronger evidence wins per document.
+        semantic_score = semantic_scores.get(document.source_id)
+        document.relevance_score = (
+            max(overlap, semantic_score) if semantic_score is not None else overlap
+        )
+
+    candidates = [item for item in unique.values() if item.relevance_score > 0]
+    candidates.sort(
         key=lambda item: (
-            item.relevance_score,
+            _document_score(item),
             _freshness_timestamp(item.published_at),
-            item.quality_score,
         ),
         reverse=True,
-    )[:limit]
+    )
+    logger.debug(
+        "Document ranking used %s relevance across %d candidate(s).",
+        semantic_mode,
+        len(candidates),
+    )
+
+    # Independence: one publisher cannot fill the citation list with its own
+    # pages and masquerade as corroboration while alternatives remain. The cap
+    # is relaxed only when the whole candidate set is smaller than the limit,
+    # because returning fewer sources is worse than a repeated publisher, and
+    # confidence counts distinct publishers so extra pages cannot inflate it.
+    capped: List[SourceDocument] = []
+    per_domain: dict[str, int] = {}
+    deferred: List[SourceDocument] = []
+    for document in candidates:
+        host = organisational_domain(document.domain) or organisational_domain(
+            urlparse(document.url).netloc
+        )
+        used = per_domain.get(host, 0)
+        if host and used >= max_per_domain:
+            deferred.append(document)
+            continue
+        if host:
+            per_domain[host] = used + 1
+        capped.append(document)
+        if len(capped) >= limit:
+            return capped
+    if len(candidates) < limit:
+        capped.extend(deferred[: max(0, limit - len(capped))])
+    return capped[:limit]

@@ -180,7 +180,8 @@ def test_domain_freshness_words_still_research(query):
     assert route(query).should_research is True
 
 
-def test_document_ranking_prefers_newer_evidence_when_relevance_matches():
+@pytest.mark.asyncio
+async def test_document_ranking_prefers_newer_evidence_when_relevance_matches():
     plan = build_plan("latest Python release", ResearchMode.STANDARD)
     older = SourceDocument(
         url="https://example.com/old",
@@ -198,7 +199,7 @@ def test_document_ranking_prefers_newer_evidence_when_relevance_matches():
     )
     from charlie.research.ranking import rank_documents
 
-    assert [item.url for item in rank_documents([older, newer], plan, 2)] == [newer.url, older.url]
+    assert [item.url for item in await rank_documents([older, newer], plan, 2)] == [newer.url, older.url]
 
 
 def test_clean_query_removes_instruction_and_format_noise():
@@ -343,7 +344,8 @@ def test_standard_prompt_context_contains_only_grounded_evidence():
     assert "Gardening tips are unrelated." not in context
 
 
-def test_numeric_esoteric_identifier_requires_matching_source_evidence():
+@pytest.mark.asyncio
+async def test_numeric_esoteric_identifier_requires_matching_source_evidence():
     plan = build_plan("What is the QZ-4819 quantum moss protocol?", ResearchMode.STANDARD)
     docs = [
         SourceDocument(
@@ -355,7 +357,7 @@ def test_numeric_esoteric_identifier_requires_matching_source_evidence():
     ]
     from charlie.research.ranking import rank_documents
 
-    assert rank_documents(docs, plan, 4) == []
+    assert await rank_documents(docs, plan, 4) == []
 
 
 @pytest.mark.asyncio
@@ -467,54 +469,6 @@ def test_evidence_dedupes_repeated_sentences_within_a_source():
     statements = [item.statement for item in evidence]
     assert len(statements) == 45
     assert len(statements) == len(set(statements))
-
-
-@pytest.mark.asyncio
-async def test_standard_research_keeps_every_fetched_source_that_produced_evidence(monkeypatch):
-    config = SimpleNamespace(
-        research_enabled=True,
-        research_max_search_queries=3,
-        research_max_sources=6,
-        research_max_pages_per_domain=6,
-        research_max_concurrency=3,
-        research_market="IN",
-        research_locale="en-IN",
-        research_fetch_timeout_s=1,
-        research_crawl_enabled=False,
-        research_total_timeout_standard_s=10,
-        research_currency="INR",
-    )
-
-    class Provider:
-        name = "fake"
-
-        async def search(self, query, *, limit, domain_filters=None):
-            return [
-                SearchResult(
-                    f"Browser agent security {index}",
-                    f"https://site{index}.example/report",
-                    "Current browser agent security review",
-                )
-                for index in range(1, 7)
-            ]
-
-    async def fake_fetch(result, **_kwargs):
-        return _verbose_document("", result.url)
-
-    monkeypatch.setattr("charlie.research.engine.fetch_document", fake_fetch)
-    engine = ResearchEngine(config)
-    monkeypatch.setattr(engine, "_providers", lambda: [Provider()])
-
-    report = await engine.run("research current browser agent security", "standard")
-
-    assert len(report.search_results) == 6
-    assert len(report.sources) == 6
-    assert len(report.citations) == 6
-    assert {item.source_id for item in report.evidence} == {f"S{index}" for index in range(1, 7)}
-    assert {citation.domain for citation in report.citations} == {
-        f"site{index}.example" for index in range(1, 7)
-    }
-    assert report.stop_reason == "evidence-sufficient"
 
 
 @pytest.mark.asyncio

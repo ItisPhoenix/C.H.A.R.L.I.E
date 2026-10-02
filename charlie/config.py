@@ -1,9 +1,19 @@
+import logging
 import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from dotenv import load_dotenv
+
+logger = logging.getLogger("charlie.config")
+
+# Environment variables an httpx client honours only when trust_env=True. On the
+# client that carries LLM_API_KEY these are an interception surface, not a
+# convenience: HTTPS_PROXY redirects the request, and SSL_CERT_FILE /
+# REQUESTS_CA_BUNDLE replace the trust store that is supposed to authenticate
+# the endpoint receiving the key.
+TRUST_ENV_HONOURED_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
 
 # Tests must never inherit or overwrite production configuration from the
 # repository .env. The pytest conftest sets this process-local guard before
@@ -37,6 +47,12 @@ def _meta(
     file-loaded, not user-editable .env values, and are simply skipped.
     """
     return {"env": env, "group": group, "secret": secret, "restart": restart}
+
+
+# Config is constructed more than once during startup, and the LLM_TRUST_ENV risk
+# warning is a process-level fact rather than a per-instance one. Emitting it once
+# keeps a real security signal from reading as repeated noise.
+_TRUST_ENV_RISK_WARNED = False
 
 
 @dataclass
@@ -538,6 +554,40 @@ class Config:
     def __post_init__(self) -> None:
         if self.kokoro_lang == "en":
             self.kokoro_lang = "en-us"
+        self._warn_if_trust_env_risky()
+
+    def llm_trust_env_report(self) -> Dict[str, Any]:
+        """Describe the resolved LLM_TRUST_ENV state and what it exposes.
+
+        Exposed so the unsafe state is inspectable at runtime rather than only
+        inferable from reading ``.env``. ``unsafe`` is False when no key is
+        configured, because with no credential there is nothing to intercept.
+        """
+        key_configured = bool(self.llm_key) and self.llm_key != "no-key"
+        return {
+            "llm_trust_env": bool(self.llm_trust_env),
+            "llm_key_configured": key_configured,
+            "unsafe": bool(self.llm_trust_env) and key_configured,
+            "env_vars_honoured": list(TRUST_ENV_HONOURED_VARS) if self.llm_trust_env else [],
+        }
+
+    def _warn_if_trust_env_risky(self) -> None:
+        global _TRUST_ENV_RISK_WARNED
+        if _TRUST_ENV_RISK_WARNED:
+            return
+        report = self.llm_trust_env_report()
+        if not report["unsafe"]:
+            return
+        _TRUST_ENV_RISK_WARNED = True
+        logger.warning(
+            "LLM_TRUST_ENV=true is active: the client carrying LLM_API_KEY will honour %s "
+            "from the environment, so HTTPS_PROXY can redirect the request and "
+            "SSL_CERT_FILE/REQUESTS_CA_BUNDLE can replace the trust store that authenticates "
+            "the endpoint receiving the key. Set LLM_TRUST_ENV=false unless a proxy or a "
+            "custom CA is required, and never set it globally on a machine that handles a "
+            "live LLM_API_KEY.",
+            ", ".join(TRUST_ENV_HONOURED_VARS),
+        )
 
     @classmethod
     def editable_field_specs(cls) -> List[Dict[str, Any]]:
@@ -593,6 +643,10 @@ class Config:
             restart = f.metadata.get("restart")
             if restart:
                 touched.add(restart)
+        # A runtime settings write can enable the unsafe state without touching
+        # .env, so it must be surfaced here too rather than only at boot.
+        if "LLM_TRUST_ENV" in updates:
+            self._warn_if_trust_env_risky()
         return touched
 
     def validate_env_updates(self, updates: Dict[str, Any]) -> None:

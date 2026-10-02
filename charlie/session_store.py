@@ -88,6 +88,10 @@ class SessionStore:
         self._connections: set[sqlite3.Connection] = set()
         self._connections_lock = threading.Lock()
         self._closed = False
+        # Reason the most recent degrading read fell back to an empty result,
+        # or None while reads are succeeding. A caller must be able to tell
+        # "no history stored" from "history could not be read".
+        self.last_read_error: Optional[str] = None
         self.init_db()
 
     @property
@@ -132,6 +136,17 @@ class SessionStore:
                 logger.error(f"Failed to connect to session DB at {self.db_path}: {e}")
                 raise
 
+    def _note_read_degradation(self, op_name: str, exc: BaseException) -> None:
+        """Record a read that degraded to an empty result instead of raising.
+
+        Read-only queries return ``None`` on a non-locked ``sqlite3.Error`` so
+        callers keep working, which means a lost durable read is otherwise
+        indistinguishable from "this session genuinely has no history". The
+        reason is kept here so a caller that cares can tell the two apart.
+        """
+
+        self.last_read_error = f"{op_name}: {type(exc).__name__}: {exc}"
+
     def _with_retry(
         self,
         op: "Callable[[], T]",
@@ -141,11 +156,13 @@ class SessionStore:
         """Run a DB operation, retrying once on 'database is locked'.
 
         On a non-locked failure, log and either re-raise (mutations) or return
-        None (read-only queries that should degrade gracefully).
+        None (read-only queries that should degrade gracefully). A degrading
+        read records the reason in ``last_read_error``; a succeeding one clears
+        it, so the marker never outlives the failure.
         """
         for attempt in range(2):
             try:
-                return op()
+                result = op()
             except sqlite3.OperationalError as e:
                 if "database is locked" in str(e) and attempt == 0:
                     logger.warning("Database locked during %s, retrying...", op_name)
@@ -154,13 +171,20 @@ class SessionStore:
                 logger.error("%s failed: %s", op_name, e)
                 if reraise:
                     raise
+                self._note_read_degradation(op_name, e)
                 return None
 
             except sqlite3.Error as e:
                 logger.error("%s failed: %s", op_name, e)
                 if reraise:
                     raise
+                self._note_read_degradation(op_name, e)
                 return None
+
+            if not reraise:
+                self.last_read_error = None
+            return result
+        return None
 
     def _mutate(self, op: Callable[[_WriteContext], T], op_name: str) -> T:
         """Run stage-aware transaction; never replay DML after uncertain commit."""
@@ -407,6 +431,8 @@ class SessionStore:
         args: dict,
         result: Any,
         session_id: str = "default",
+        *,
+        approval_status: Optional[str] = None,
     ) -> None:
         """Append a tool execution result as a role='tool' row.
 
@@ -414,6 +440,11 @@ class SessionStore:
         callers remain supported at this history-rendering boundary.
         Truncated save to prevent DB bloat: tool name + args + first
         _TOOL_PERSIST_MAX_CHARS chars of result.
+
+        The approval outcome is persisted alongside the row. An approval that
+        was granted, refused, or bypassed is the part of a tool record that has
+        to stay explainable after the fact, so it must not be reconstructible
+        only from memory of the request.
         """
         import json as _json
 
@@ -422,9 +453,14 @@ class SessionStore:
             args_str = _json.dumps(args, ensure_ascii=False)
         except (TypeError, ValueError):
             args_str = str(args)
+        if approval_status is None and isinstance(result, ResultEnvelope):
+            data = getattr(result, "data", None)
+            if isinstance(data, dict):
+                approval_status = data.get("approval_status")
+        status_suffix = f" approval={approval_status}" if approval_status else ""
         result_text = result.result if isinstance(result, ResultEnvelope) else result
         truncated_result = str(result_text or "")[:max_chars]
-        content = f"[{tool_name} args={args_str}] result: {truncated_result}"
+        content = f"[{tool_name} args={args_str}]{status_suffix} result: {truncated_result}"
         self.append("tool", content, session_id=session_id, turn_id=turn_id)
 
     def search(

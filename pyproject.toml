@@ -99,7 +99,9 @@ telegram = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# No addopts: a bare "-q" here combines with an operator's own "pytest -q" to
+# reach verbose == -2, which suppresses the pass/fail count line entirely and
+# makes a green run indistinguishable from a silent collection failure.
 pythonpath = ["."]
 
 [tool.coverage.run]

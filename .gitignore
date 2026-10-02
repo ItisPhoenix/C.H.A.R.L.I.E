@@ -41,6 +41,9 @@ pet_position.json
 # holds pending-review skills. Runtime state, never source.
 data/extensions.json
 data/skills/
+# Runtime single-instance lock. It holds a live PID, so it is per-run state and
+# committing it would pin a dead process id into the repository.
+data/charlie.lock
 
 # === ML Models (large files) ===
 models/
@@ -66,6 +69,14 @@ desktop.ini
 dist/
 playwright-report/
 test-results/
+# === Node / frontend dependencies ===
+# The frontend workspace ships thousands of vendored packages; without this a
+# plain `git add -A` stages all of them alongside the real source changes.
+node_modules/
+frontend/node_modules/
+.npm/
+*.tsbuildinfo
+
 # === Build & test output ===
 
 # === Temp, Scratch & Cache ===
@@ -106,3 +117,9 @@ CLAUDE.md
 design-system.md
 CHARLIE_V1_*.md
 scratch/
+
+# === Working plans / local audit artifacts ===
+# Session-scoped planning and audit ledgers. They track in-progress review
+# state rather than shipped behaviour, so they stay out of the repository.
+Plan.md
+V1-PHASE-PLAN.md

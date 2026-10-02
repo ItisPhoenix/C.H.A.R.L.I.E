@@ -126,6 +126,10 @@ def test_mcp_rehydration_keeps_unallowlisted_tools_approval_gated(tmp_path, monk
             capability_index,
             mcp_client=mcp_client,
             tool_registry=tool_registry,
+            # Rehydration is fail-closed when MCP is disabled, so this test must
+            # declare that precondition explicitly. What it actually verifies is the
+            # risk floor on an unallowlisted tool, which requires a live install.
+            mcp_enabled=True,
         )
 
         capability = capability_index.get_capability("mcp_sqlite")

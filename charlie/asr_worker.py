@@ -2,17 +2,169 @@ import logging
 import multiprocessing as mp
 import os
 import queue
+import threading
 import time
 from typing import Any, Optional
 
 import numpy as np
-from faster_whisper import WhisperModel
 
 from charlie.voice_diagnostics import VoiceDiagnostics
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily expose ``WhisperModel`` without paying its ~6s import at spawn.
+
+    ``faster_whisper`` pulls ctranslate2 and onnxruntime, which costs several seconds
+    on a spawned child. Importing it at module scope would spend that whole window
+    before :func:`install_parent_death_watchdog` could arm, so a parent killed during
+    startup left a live orphan. Resolving it on first attribute access keeps the
+    module-level name available (including for patching in tests) while moving the
+    cost to after the watchdog is watching.
+    """
+    if name == "WhisperModel":
+        from faster_whisper import WhisperModel as _WhisperModel
+
+        return _WhisperModel
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # Set up logging for the worker process
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("charlie.asr_worker")
+
+
+# Exit status used when the worker terminates itself because the process that
+# spawned it died. Distinct so a surviving log line is diagnosable.
+PARENT_DEATH_EXIT_CODE = 75
+_PARENT_DEATH_POLL_SECONDS = 1.0
+
+
+class ParentDeathWatchdog:
+    """Terminate this worker when the process that spawned it dies.
+
+    On Windows a ``spawn`` child is an independent process created by
+    ``CreateProcess`` with no job object attached, so the OS ties nothing
+    about its lifetime to the parent. ``daemon=True`` only buys cleanup via
+    ``multiprocessing.util._exit_function``, which runs from ``atexit`` in the
+    *parent* -- and ``TerminateProcess`` (``Stop-Process -Force``,
+    ``taskkill /F``) skips ``atexit``, ``finally`` blocks, and every other
+    user-mode cleanup path. A parent-side ``finally`` therefore cannot cover a
+    hard parent kill; only the child noticing can. That is the whole reason
+    this runs here instead of in the parent.
+
+    The parent is watched through ``multiprocessing.parent_process()``, whose
+    ``sentinel`` is the parent's OS handle on Windows (opened ``SYNCHRONIZE`` by
+    ``spawn_main``) and its pipe sentinel on POSIX. It is therefore
+    handle-based rather than pid-based, so a recycled pid can never keep an
+    orphaned worker alive.
+
+    The watchdog is a daemon thread, so it can never itself hold the process
+    open, and it stays inert while the parent is alive -- the worker remains
+    fully stoppable through its normal input-queue sentinel.
+    """
+
+    def __init__(
+        self,
+        *,
+        poll_seconds: float = _PARENT_DEATH_POLL_SECONDS,
+        exit_code: int = PARENT_DEATH_EXIT_CODE,
+    ) -> None:
+        self._poll_seconds = max(0.01, float(poll_seconds))
+        self._exit_code = int(exit_code)
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._parent_pid: Optional[int] = None
+
+    @staticmethod
+    def _watched_parent():
+        """Return the spawning parent, or None when there is nothing to watch."""
+
+        try:
+            parent = mp.parent_process()
+        except Exception:
+            return None
+        if parent is None:
+            return None
+        # ``sentinel`` is None when this process was not started by
+        # multiprocessing (e.g. tests that call the worker in-process).
+        if getattr(parent, "sentinel", None) is None:
+            return None
+        return parent
+
+    def start(self) -> Optional["ParentDeathWatchdog"]:
+        parent = self._watched_parent()
+        if parent is None:
+            return None
+        if self._thread is not None:
+            return self
+        self._parent_pid = getattr(parent, "pid", None)
+        thread = threading.Thread(
+            target=self._watch,
+            args=(parent,),
+            daemon=True,
+            name="ASRParentDeathWatchdog",
+        )
+        self._thread = thread
+        thread.start()
+        logger.info(
+            "ASR parent-death watchdog armed | parent_pid=%s | poll_s=%.2f",
+            self._parent_pid,
+            self._poll_seconds,
+        )
+        return self
+
+    def _watch(self, parent: Any) -> None:
+        while not self._stop.is_set():
+            try:
+                # Blocks in the kernel on the parent's handle/fd and returns as
+                # soon as the parent is signalled, so a hard kill is observed
+                # within one poll interval instead of never.
+                parent.join(timeout=self._poll_seconds)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("ASR parent-death watchdog poll failed: %s", exc)
+                self._stop.wait(self._poll_seconds)
+                continue
+            if self._stop.is_set():
+                return
+            try:
+                parent_alive = bool(parent.is_alive())
+            except Exception:  # pragma: no cover - defensive
+                return
+            if not parent_alive:
+                self._exit_orphaned()
+                return
+
+    def _exit_orphaned(self) -> None:
+        logger.error(
+            "ASR worker exiting: spawning parent %s is gone | exit_code=%d",
+            self._parent_pid,
+            self._exit_code,
+        )
+        # Hard exit on purpose: the process that owned this worker's queues,
+        # model and lifecycle is already dead, so there is nobody left to drain
+        # toward or report to.
+        os._exit(self._exit_code)
+
+    def stop(self) -> None:
+        """Disarm the watchdog so a deliberate shutdown is never interrupted."""
+
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=max(0.2, self._poll_seconds * 2))
+
+    @property
+    def armed(self) -> bool:
+        return self._thread is not None
+
+    @property
+    def parent_pid(self) -> Optional[int]:
+        return self._parent_pid
+
+
+def install_parent_death_watchdog() -> ParentDeathWatchdog:
+    """Arm the worker-side parent-death watchdog; inert when not a child."""
+
+    return ParentDeathWatchdog().start() or ParentDeathWatchdog()
 
 
 # Match openai/whisper CLI's own hallucination-suppression defaults
@@ -283,6 +435,22 @@ def asr_worker_process(
     """
     compute_type = "float16" if device == "cuda" else "int8"
     logger.info(f"ASR Worker started. Loading model: {model_size} on {device}")
+    # Armed before the model load: a Whisper load is long enough that a parent
+    # killed mid-load would otherwise leave a multi-second orphan behind.
+    watchdog = install_parent_death_watchdog()
+    # ``faster_whisper`` is imported HERE rather than at module scope on purpose.
+    # Importing it costs ~6s (ctranslate2 + onnxruntime), and a module-level
+    # import would spend that entire window before the watchdog above could arm --
+    # so a parent killed during startup left a live orphan behind. The watchdog now
+    # arms within milliseconds of the child starting, and the heavy import happens
+    # only after parent death is already being watched.
+    # Resolve through the module namespace so a test that patches
+    # ``charlie.asr_worker.WhisperModel`` is honoured; fall back to the lazy import
+    # only when nothing has supplied it.
+    whisper_model_cls = globals().get("WhisperModel")
+    if whisper_model_cls is None:
+        from faster_whisper import WhisperModel as whisper_model_cls
+
     startup_started = time.perf_counter()
     model_load_ms = None
     warmup_inference_ms = None
@@ -291,7 +459,7 @@ def asr_worker_process(
     try:
         try:
             # Load WhisperModel once
-            whisper = WhisperModel(
+            whisper = whisper_model_cls(
                 model_size,
                 device=device,
                 compute_type=compute_type,
@@ -302,7 +470,7 @@ def asr_worker_process(
                 f"ASR Worker: Local load failed for {model_size}, attempting download: {e}"
             )
             try:
-                whisper = WhisperModel(
+                whisper = whisper_model_cls(
                     model_size,
                     device=device,
                     compute_type=compute_type,
@@ -311,7 +479,7 @@ def asr_worker_process(
                 logger.warning(
                     f"ASR Worker: Failed to load {model_size}: {e2}. Falling back to large-v3."
                 )
-                whisper = WhisperModel(
+                whisper = whisper_model_cls(
                     "large-v3",
                     device=device,
                     compute_type=compute_type,
@@ -359,6 +527,7 @@ def asr_worker_process(
                 "metrics": metrics,
             }
         )
+        watchdog.stop()
         return
 
     asr_ready_ms = (time.perf_counter() - startup_started) * 1000
@@ -656,6 +825,7 @@ def asr_worker_process(
             error_flags["asr_error"] = type(e).__name__
             output_queue.put(("", 0.0, error_flags))
 
+    watchdog.stop()
     logger.info("ASR Worker: Shutting down.")
 
 

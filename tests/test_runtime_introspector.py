@@ -77,7 +77,10 @@ def mock_runtime():
 
     # Lease Manager
     from charlie.resource_locks import acquire as sync_acquire
-    sync_acquire("terminal", "task-test-01")
+    from charlie.resource_locks import release as sync_release
+
+    lease_owner = "task-test-01"
+    sync_acquire("terminal", lease_owner)
     lease_mgr = CapabilityLeaseManager()
 
     introspector = RuntimeIntrospector(
@@ -88,7 +91,18 @@ def mock_runtime():
         lease_manager=lease_mgr,
     )
 
-    return introspector, cfg
+    # ``sync_acquire`` above writes to charlie.resource_locks' process-global
+    # ownership map, which nothing else in this file would otherwise undo. Left
+    # dangling it kept ``terminal`` leased by this fixture's owner for the rest
+    # of the pytest process, so every later ``shell_execute`` hit the bounded
+    # lease timeout and returned
+    # ``"Error: Tool 'shell_execute' timed out after 30.0s"`` -- failing tests in
+    # six unrelated files under a random test order. Release it once the tests
+    # that need it are done.
+    try:
+        yield introspector, cfg
+    finally:
+        sync_release("terminal", lease_owner)
 
 
 def test_runtime_snapshot_structure(mock_runtime):

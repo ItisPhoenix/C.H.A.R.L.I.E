@@ -7,8 +7,14 @@ import json
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
+from charlie.mcp_client import mcp_tool_risk_class, server_declared_policy
 from charlie.self_extension.models import ExtensionKind
-from charlie.self_extension.registry import ExtensionEntry, ExtensionRegistry
+from charlie.self_extension.registry import (
+    ExtensionEntry,
+    ExtensionRegistry,
+    mcp_disabled_refusal,
+    mcp_enablement_allowed,
+)
 
 logger = logging.getLogger("charlie.self_extension.mcp_adapter")
 
@@ -37,12 +43,14 @@ class MCPAdapter:
         mcp_client: Optional[Any] = None,
         tool_registry: Optional[Any] = None,
         runtime_extension_operation: Optional[Callable[..., Dict[str, Any]]] = None,
+        mcp_enabled: Optional[bool] = None,
     ) -> None:
         self._registry = registry or ExtensionRegistry(capability_index=capability_index)
         self._capability_index = capability_index
         self._mcp_client = mcp_client
         self._tool_registry = tool_registry
         self._runtime_extension_operation = runtime_extension_operation
+        self._mcp_enabled = mcp_enabled
 
     def register_mcp_server(
         self,
@@ -66,6 +74,20 @@ class MCPAdapter:
             return MCPAdapterResult(
                 success=False,
                 message="MCP registration requires tool_registry for enable_server().",
+                server_name=name,
+            )
+
+        # The canonical EXT-1 seam is main-authoritative and enforces MCP_ENABLED
+        # on its own path, so it is not re-checked here. The fallback below calls
+        # MCPClient.add_server/enable_server directly and that starts a subprocess,
+        # so the flag has to be honoured here or it is only enforced at some
+        # composition roots rather than as an invariant. Unstated fails closed.
+        if self._runtime_extension_operation is None and not mcp_enablement_allowed(
+            self._mcp_enabled
+        ):
+            return MCPAdapterResult(
+                success=False,
+                message=mcp_disabled_refusal(name),
                 server_name=name,
             )
 
@@ -144,6 +166,17 @@ class MCPAdapter:
                     return False
                 return _client.health_check().get(_name, False)
 
+            # Server-declared hints are untrusted metadata. They are looked up so
+            # the risk floor can see an explicit permission *claim*; advisory hints
+            # are not claims and never change policy.
+            annotations_by_tool: Dict[str, Any] = {}
+            if _client is not None:
+                try:
+                    for tool in _client.list_tools():
+                        annotations_by_tool[tool.name] = getattr(tool, "annotations", None)
+                except Exception:
+                    annotations_by_tool = {}
+
             ops: Dict[str, CapabilityOperation] = {}
             for t in tool_names:
                 op_id = f"mcp.{name}.{t}"
@@ -165,7 +198,10 @@ class MCPAdapter:
                     name=t,
                     description=f"[{name}] MCP tool",
                     parameters_schema={"type": "object"},
-                    risk_class="safe" if policy == "allow" else "security_sensitive",
+                    risk_class=mcp_tool_risk_class(
+                        policy,
+                        declared_policy=server_declared_policy(annotations_by_tool.get(t)),
+                    ),
                     func=_invoke,
                 )
 

@@ -29,6 +29,7 @@ from urllib.parse import quote, urljoin, urlsplit
 from charlie.config import config
 from charlie.execution_context import ExecutionContext, get_current_execution_context, terminate_process_tree
 from charlie.known_apps import APP_REGISTRY
+from charlie.log_redaction import contains_sensitive_secret
 from charlie.results import ResultsStore
 from charlie.session_store import SessionStore
 from charlie.utils import is_process_running
@@ -1530,38 +1531,16 @@ def _memory_capacity_error(target: str, entries: list, max_chars: int, new_len: 
     )
 
 
-_MEMORY_SECRET_RE = re.compile(
-    r"(?i)\b(?:password|passcode|api[\s_-]?key|access[\s_-]?token|refresh[\s_-]?token|"
-    r"client[\s_-]?secret|secret|private[\s_-]?key|credential)\b\s*(?:is|:|=)\s*\S+"
-)
-_MEMORY_PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----", re.IGNORECASE)
-_MEMORY_GOV_ID_RE = re.compile(
-    r"(?i)\b(?:aadhaar|aadhar|uidai)\b.{0,24}\b\d{4}[ -]?\d{4}[ -]?\d{4}\b|"
-    r"\bPAN\b.{0,16}\b[A-Z]{5}\d{4}[A-Z]\b|"
-    r"\bSSN\b.{0,16}\b\d{3}-\d{2}-\d{4}\b|"
-    r"\bpassport(?:\s+(?:number|no\.?))?\b.{0,16}\b[A-Z]\d{7}\b"
-)
-_MEMORY_CARD_RE = re.compile(
-    r"(?i)\b(?:credit|debit)\s+card(?:\s+(?:number|no\.?))?\s*[:#-]?\s*"
-    r"\d[\d -]{11,22}\d\b|(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)"
-)
-
-
 def _contains_sensitive_memory_content(*values: str) -> bool:
-    """Refuse obvious secrets and regulated identifiers at the persistent-write boundary."""
-    text = " ".join(value for value in values if value)
-    if _MEMORY_SECRET_RE.search(text) or _MEMORY_PRIVATE_KEY_RE.search(text) or _MEMORY_GOV_ID_RE.search(text):
-        return True
-    for candidate in _MEMORY_CARD_RE.findall(text):
-        digits = [int(digit) for digit in re.sub(r"\D", "", candidate)]
-        if 13 <= len(digits) <= 19:
-            checksum = sum(
-                (digit * 2 - 9 if digit * 2 > 9 else digit * 2) if index % 2 else digit
-                for index, digit in enumerate(reversed(digits))
-            )
-            if checksum % 10 == 0:
-                return True
-    return False
+    """Refuse obvious secrets and regulated identifiers at the persistent-write boundary.
+
+    Delegates to :func:`charlie.log_redaction.contains_sensitive_secret` so the
+    memory write path and the log path share one detector and cannot drift apart.
+    The previous private regex set missed the credential formats that actually
+    occur in practice: bare ``sk-`` keys, AWS ``AKIA`` ids, Google ``AIza`` keys,
+    Slack ``xoxb-`` tokens, Telegram bot tokens and Hugging Face ``hf_`` tokens.
+    """
+    return contains_sensitive_secret(*values)
 
 
 @registry.register_tool(
@@ -2125,9 +2104,13 @@ _PLUGIN_ACTION_DESCRIPTIONS: Dict[str, str] = {
     "fs_list_dir": "List files and subdirectories inside a local directory.",
     "fs_search": "Search the local filesystem for files matching a glob pattern.",
     "code_exec_python": (
-        "Execute a snippet of Python in a sandboxed interpreter. "
-        "Network and system-level calls are blocked. Use only when the user "
-        "explicitly asks to run code."
+        "Execute a snippet of Python in a separate interpreter process. "
+        "Imports are refused, and an AST gate refuses dangerous builtins "
+        "(eval/exec/open/__import__/getattr/setattr/compile/globals/locals/...), "
+        "the __builtins__ namespace handle, and dunder attribute access. "
+        "That gate is a static check, not a hard sandbox: it is pattern-based, "
+        "with no OS-level isolation and no dedicated network control. "
+        "Use only when the user explicitly asks to run code."
     ),
 }
 
@@ -3340,6 +3323,30 @@ def charlie_doctor_diagnose() -> str:
     return doctor.format_report(report)
 
 
+# Synchronous owner-approval seam for self-extension transactions.
+#
+# Tools are invoked synchronously, so this callback is synchronous by contract.
+# Its return value is only ever an *approval digest*: the orchestrator
+# independently recomputes the binding from the argv it just reviewed and
+# refuses a mismatch, so a callback that returns anything other than the exact
+# digest it was shown cannot widen the grant. Returning None means "not
+# approved", which is always safe.
+#
+# The owner channel itself is async, so main.py installs a bridge that returns
+# None whenever it cannot prompt synchronously rather than blocking or guessing.
+_self_extension_approval: Optional[Callable[[dict], Optional[str]]] = None
+
+
+def set_self_extension_approval_callback(callback: Optional[Callable[[dict], Optional[str]]]) -> None:
+    """Install (or clear) the owner-approval callback for self-extension grants."""
+    global _self_extension_approval
+    _self_extension_approval = callback
+
+
+def get_self_extension_approval_callback() -> Optional[Callable[[dict], Optional[str]]]:
+    return _self_extension_approval
+
+
 @registry.register_tool(
     name="charlie_self_extension_propose",
     description=(
@@ -3369,9 +3376,62 @@ def charlie_self_extension_propose(prompt: str) -> str:
                 "message": "Self-extension runtime service is not initialized; no mutation was attempted.",
             }
         )
-    req = _self_extension_orchestrator.plan_request(prompt, explicit_user_request=True)
-    res = _self_extension_orchestrator.execute_transaction(req)
+    orchestrator = _self_extension_orchestrator
+    req = orchestrator.plan_request(prompt, explicit_user_request=True)
+    res = orchestrator.execute_transaction(req)
+
+    # A gated request needs an owner decision bound to the exact argv. Ask once,
+    # and only replay the digest the guard itself just produced.
+    if not res.success and str(getattr(res.status, "value", res.status)) == "approval_required":
+        binding, approved_argv, reason = _pending_self_extension_approval(req, res)
+        granted = None
+        callback = get_self_extension_approval_callback()
+        if callback is not None and binding:
+            try:
+                granted = callback(
+                    {
+                        "kind": str(getattr(req.classification, "kind", "") or ""),
+                        "prompt": prompt,
+                        "argv": list(approved_argv),
+                        "approval_binding": binding,
+                        "reason": reason,
+                    }
+                )
+            except Exception:
+                logger.warning("self-extension approval callback failed", exc_info=True)
+                granted = None
+        if granted == binding and binding:
+            res = orchestrator.execute_transaction(req, approved_binding=binding)
+        elif binding:
+            res.message = (
+                f"{res.message} The owner did not approve this exact command "
+                f"({' '.join(approved_argv) or 'unresolved'}). Nothing was installed or started."
+            )
     return json.dumps(res.to_dict())
+
+
+def _pending_self_extension_approval(
+    req: Any, res: Any
+) -> tuple[Optional[str], tuple[str, ...], str]:
+    """Name the exact argv and digest the guard reviewed for ``req``.
+
+    Read from the request's own plan, which is the same object ``AuthorizationGuard._bound``
+    used, so the digest cannot disagree with the one the guard will compare against.
+    The transaction's recorded decision is not used because the stored transaction
+    does not retain it.
+    """
+    plan = getattr(req, "plan", None)
+    if plan is None:
+        return None, (), ""
+    try:
+        argv = tuple(plan.resolve_argv() or ())
+        binding = plan.approval_binding()
+    except Exception:
+        logger.debug("could not read self-extension plan approval detail", exc_info=True)
+        return None, (), ""
+    if not argv or not binding:
+        return None, (), ""
+    return binding, argv, getattr(res, "message", "") or ""
 
 
 def set_pending_vision_image(url: Optional[str]) -> None:

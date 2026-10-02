@@ -63,6 +63,58 @@ _DESKTOP_EFFECTOR_TOOLS = frozenset({
     "desktop_move_window",
 })
 
+# Non-bypassable floor for physical key chords, expressed as the set of modifier
+# and key names that must all be present. A chord is prohibited when it *contains*
+# one of these signatures, so "win+ctrl+shift+esc" cannot smuggle the Task Manager
+# chord past the check by adding a modifier.
+#
+# These are system-control actions, not merely consequential ones. No approval can
+# make them acceptable, so there is deliberately no override, preference or
+# context branch that can downgrade them.
+_PROHIBITED_KEY_CHORD_SIGNATURES = (
+    frozenset({"ctrl", "alt", "delete"}),   # secure-attention / task manager
+    frozenset({"ctrl", "shift", "esc"}),    # task manager
+    frozenset({"win", "l"}),                # lock session
+)
+
+# Chords that can discard unsaved work or start an arbitrary process. A human must
+# approve these; they are gated rather than prohibited.
+_GATED_KEY_CHORD_SIGNATURES = (
+    frozenset({"alt", "f4"}),               # close window, may discard unsaved state
+    frozenset({"win", "r"}),                # Run dialog, launches an arbitrary process
+    frozenset({"ctrl", "w"}),               # close tab / window
+    frozenset({"delete"}),                  # destructive key
+    frozenset({"win", "shift", "s"}),       # snip, captures and writes to disk
+)
+
+
+def _key_chord_parts(keys: Any) -> frozenset[str]:
+    """Canonical part set for a "+"-separated key chord.
+
+    Mirrors ``desktop.actions.key_press``'s own parsing (split on "+", strip,
+    casefold) so the policy and the effector agree on what a chord *is*. Order
+    and casing are discarded: "CTRL+Alt+Delete" and "delete+alt+ctrl" are the
+    same chord.
+    """
+    if not isinstance(keys, str):
+        return frozenset()
+    parts = {part.strip().casefold() for part in keys.split("+") if part.strip()}
+    return frozenset(parts)
+
+
+def _matching_chord_signature(
+    keys: Any, signatures: Tuple[frozenset[str], ...]
+) -> Optional[frozenset[str]]:
+    """First signature fully contained in the chord, or None."""
+    parts = _key_chord_parts(keys)
+    if not parts:
+        return None
+    for signature in signatures:
+        if signature <= parts:
+            return signature
+    return None
+
+
 def classify_action(
     tool_name: str,
     arguments: Dict[str, Any],
@@ -92,6 +144,28 @@ def classify_action(
 
     if tool_name == "desktop_window" and str(arguments.get("action", "")).casefold() == "close":
         return RiskClass.DESTRUCTIVE, "closing a window may discard unsaved user state"
+
+    # The key-chord floor is evaluated before the desktop effector early return
+    # so it cannot be skipped by any path that reaches a physical keyboard.
+    if tool_name == "desktop_key":
+        prohibited = _matching_chord_signature(
+            arguments.get("keys"), _PROHIBITED_KEY_CHORD_SIGNATURES
+        )
+        if prohibited is not None:
+            chord = "+".join(sorted(prohibited))
+            return RiskClass.IRREVERSIBLE, (
+                f"the key chord '{chord}' is a system-control action and cannot be "
+                "approved, overridden or talked into by external text"
+            )
+        gated = _matching_chord_signature(
+            arguments.get("keys"), _GATED_KEY_CHORD_SIGNATURES
+        )
+        if gated is not None:
+            chord = "+".join(sorted(gated))
+            return RiskClass.DESTRUCTIVE, (
+                f"the key chord '{chord}' can discard unsaved work or start a "
+                "process, so it needs explicit approval"
+            )
 
     if tool_name in _DESKTOP_EFFECTOR_TOOLS:
         return RiskClass.SAFE, ""

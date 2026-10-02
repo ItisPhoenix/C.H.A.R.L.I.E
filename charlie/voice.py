@@ -1,10 +1,11 @@
-"""Charlie voice engine -- VAD, ASR, TTS (Kokoro), audio I/O.
+﻿"""Charlie voice engine -- VAD, ASR, TTS (Kokoro), audio I/O.
 
 All text arriving at speak() passes through _humanize_text() before
 phonemization. This is the single control point for prosody and pacing.
 """
 
 import asyncio
+import atexit
 import inspect
 import logging
 import multiprocessing as mp
@@ -32,6 +33,88 @@ logger = logging.getLogger("charlie.voice")
 
 PROCESSING_SAMPLE_RATE = 16000
 CAPTURE_BLOCK_SIZE = 1024
+
+
+# --- Owned ASR worker lifetime -------------------------------------------------
+# Every ASR worker this module spawns is tracked here so a shutdown path that
+# never reaches VoiceEngine.stop() still reclaims the child observably.
+#
+# This parent-side net covers *graceful* interpreter exit only. A hard parent
+# kill (Stop-Process -Force / taskkill /F / os._exit) skips atexit entirely, so
+# it is deliberately NOT the primary mechanism -- that is the child-side
+# watchdog in charlie.asr_worker, which is the only thing that can observe a
+# parent the parent can no longer clean up after.
+_live_asr_processes: "set[mp.process.BaseProcess]" = set()
+_asr_supervisor_registered = False
+
+
+def _asr_process_alive(process: Optional[mp.process.BaseProcess]) -> bool:
+    if process is None:
+        return False
+    try:
+        return bool(process.is_alive())
+    except Exception:
+        return False
+
+
+def _terminate_asr_process(process: Optional[mp.process.BaseProcess], reason: str) -> bool:
+    """Bounded terminate -> join -> kill -> join of an owned ASR worker.
+
+    Returns True only when the child is observed gone, so callers never report
+    a clean teardown they did not witness.
+    """
+
+    if not _asr_process_alive(process):
+        return True
+    logger.warning(
+        "ASR worker reclaim | pid=%s | reason=%s",
+        getattr(process, "pid", None),
+        reason,
+    )
+    for step in ("terminate", "kill"):
+        try:
+            if step == "terminate":
+                process.terminate()
+            else:
+                killer = getattr(process, "kill", None)
+                if not callable(killer):
+                    break
+                killer()
+        except Exception as exc:
+            logger.warning("ASR worker %s failed: %s", step, exc)
+            continue
+        try:
+            process.join(timeout=1.0)
+        except Exception as exc:
+            logger.warning("ASR worker join after %s failed: %s", step, exc)
+            continue
+        if not _asr_process_alive(process):
+            return True
+    return not _asr_process_alive(process)
+
+
+def _register_asr_process(process: mp.process.BaseProcess) -> None:
+    global _asr_supervisor_registered
+    _live_asr_processes.add(process)
+    if not _asr_supervisor_registered:
+        atexit.register(_reclaim_live_asr_processes)
+        _asr_supervisor_registered = True
+
+
+def _forget_asr_process(process: Optional[mp.process.BaseProcess]) -> None:
+    if process is not None:
+        _live_asr_processes.discard(process)
+
+
+def _reclaim_live_asr_processes() -> None:
+    for process in list(_live_asr_processes):
+        if not _terminate_asr_process(process, "atexit"):
+            logger.error(
+                "ASR worker still alive after bounded reclaim | pid=%s",
+                getattr(process, "pid", None),
+            )
+        else:
+            _live_asr_processes.discard(process)
 
 # --- TTS text humanization constants ---
 _MIN_TEXT_LEN = 3
@@ -642,6 +725,11 @@ class VoiceEngine:
                         errors.append(f"asr_kill_join: {type(exc).__name__}: {exc}")
             if asr_process_alive:
                 errors.append("ASR worker remained alive after bounded shutdown")
+            else:
+                # Observed gone, so the atexit net has nothing left to do. When it
+                # is still alive we deliberately keep it registered so shutdown
+                # makes one last attempt at reclaim.
+                _forget_asr_process(process)
             logger.info(
                 "ASR worker exited | pid=%s | stopped=%s",
                 getattr(process, "pid", None),
@@ -1851,6 +1939,23 @@ class VoiceEngine:
         )
 
     def _run(self):
+        """Own the capture loop's lifetime so it can never strand the ASR worker.
+
+        stop() is the graceful path and already quiesces the worker itself, so
+        it sets stop_event first and this finally stands aside. Anything else
+        that ends the loop -- an exception in device setup, stream handling or
+        the VAD state machine -- falls through here and reclaims the child
+        instead of leaving a live process nobody owns.
+        """
+        try:
+            self._run_capture_loop()
+        finally:
+            if not self.stop_event.is_set() and _terminate_asr_process(
+                self.asr_process, "capture_loop_exited"
+            ):
+                _forget_asr_process(self.asr_process)
+
+    def _run_capture_loop(self):
         samplerate = PROCESSING_SAMPLE_RATE
         block_size = CAPTURE_BLOCK_SIZE
         self._capture_rate_adapter = None
@@ -2015,6 +2120,9 @@ class VoiceEngine:
             daemon=True,
         )
         self.asr_process.start()
+        # Registered before anything else can fail so no later exception in this
+        # loop leaves a child that only the atexit net knows about.
+        _register_asr_process(self.asr_process)
         self.voice_diagnostics.start_resource_sampler(asr_worker_pid=self.asr_process.pid)
         self._set_asr_readiness("starting")
         logger.info("ASR worker process started.")

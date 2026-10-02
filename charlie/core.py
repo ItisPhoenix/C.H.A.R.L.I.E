@@ -107,7 +107,11 @@ async def _await_executor_quiescence(worker: asyncio.Future[Any]) -> None:
             await asyncio.shield(worker)
         except asyncio.CancelledError:
             continue
-        except BaseException:
+        except Exception:
+            # Only ordinary failures end the wait. SystemExit and
+            # KeyboardInterrupt must keep propagating: quiescence exists to wait
+            # for a worker, not to decide that an interpreter shutdown is
+            # merely another worker error.
             break
 
 
@@ -341,6 +345,43 @@ _ROUTER_CLASSIFIER_TIMEOUT_S = 0.6
 # headroom for the voice fallback's speak-prompt-then-listen round trip).
 _TOOL_APPROVAL_TIMEOUT_SEC = 45.0
 _TELEGRAM_TOOL_APPROVAL_TIMEOUT_SEC = 120.0
+# Transient upstream conditions that justify exactly one same-model retry before
+# any visible output or tool effect exists. Everything else -- 401/403/404, a
+# malformed request, a model that is simply unavailable to this key -- is a
+# permanent answer that must be reported truthfully rather than retried.
+_LLM_TRANSIENT_RETRY_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
+_LLM_RETRY_BACKOFF_SEC = 0.75
+# A Retry-After header is honoured but capped: a confused or hostile upstream must
+# not be able to park a voice turn for minutes behind one header value.
+_LLM_RETRY_AFTER_MAX_SEC = 8.0
+
+
+def _llm_retry_delay(exc: BaseException) -> Optional[float]:
+    """Seconds to wait before one same-model retry, or None when it must not retry.
+
+    Returns a delay for transient transport failures (every httpx timeout,
+    connect, pool and protocol error is an ``httpx.TransportError``) and for
+    retryable HTTP statuses. A ``Retry-After`` header overrides the default
+    backoff but is clamped; a non-numeric value, including an HTTP-date, falls
+    back to the default rather than guessing.
+    """
+    if isinstance(exc, httpx.TransportError):
+        return _LLM_RETRY_BACKOFF_SEC
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return None
+    response = exc.response
+    if response.status_code not in _LLM_TRANSIENT_RETRY_STATUS:
+        return None
+    delay = _LLM_RETRY_BACKOFF_SEC
+    raw = response.headers.get("Retry-After", "").strip()
+    if raw:
+        try:
+            delay = float(raw)
+        except (TypeError, ValueError):
+            delay = _LLM_RETRY_BACKOFF_SEC
+    return max(0.0, min(delay, _LLM_RETRY_AFTER_MAX_SEC))
+
+
 _REPEATED_TOOL_RESULT = (
     "Repeated identical tool call suppressed. Choose another valid capability or finish the response."
 )
@@ -732,14 +773,40 @@ def _detect_correction(query: str) -> bool:
     return bool(_CORRECTION_RE.search(query.strip()))
 
 
+def _report_persistence_error(
+    callback: Optional[Callable[[Optional[str]], None]],
+    error: Optional[str],
+) -> None:
+    """Report whether a fire-and-forget durable write actually landed."""
+
+    if callback is None:
+        return
+    try:
+        callback(error)
+    except Exception:
+        logger.warning("Correction persistence reporter failed", exc_info=True)
+
+
 def _apply_correction_to_memory(
-    query: str, assistant_response: str, opinions_path: str = "OPINIONS.md", world_model: Optional[Any] = None
+    query: str,
+    assistant_response: str,
+    opinions_path: str = "OPINIONS.md",
+    world_model: Optional[Any] = None,
+    on_persistence_error: Optional[Callable[[Optional[str]], None]] = None,
 ) -> Optional[str]:
     """Write a correction entry to OPINIONS.md, plus a structural rules-table
     row when world_model is given -- a queryable, confidence-scored row
     beats an unstructured markdown line. Returns the entry or None.
+
+    ``None`` is returned both for "there was nothing to write" and for "the
+    write was lost", so ``on_persistence_error`` reports which: it receives
+    ``None`` when the entry is stored or deliberately skipped, and the
+    exception type name when a durable write was lost. The caller is a
+    fire-and-forget executor future nobody awaits, so this callback is the only
+    place the loss can be represented.
     """
     if not _detect_correction(query):
+        _report_persistence_error(on_persistence_error, None)
         return None
     short_resp = assistant_response[:120].strip()
     if len(assistant_response) > 120:
@@ -752,18 +819,26 @@ def _apply_correction_to_memory(
         existing = p.read_text(encoding="utf-8") if p.exists() else ""
         if entry in existing:
             logger.debug("Correction already in opinions, skipping")
+            _report_persistence_error(on_persistence_error, None)
             return None
         with open(opinions_path, "a", encoding="utf-8") as f:
             if existing and not existing.endswith("\n"):
                 f.write("\n")
             f.write(f"{entry}\n")
         logger.info("Correction stored: %s", entry[:80])
-        if world_model is not None:
-            world_model.add_rule(f"Corrected: {query.strip()}", "correction")
-        return entry
     except Exception as exc:
         logger.warning("Failed to store correction: %s", exc)
+        _report_persistence_error(on_persistence_error, type(exc).__name__)
         return None
+    # The durable write landed. A graph failure is a separate loss and must not
+    # be reported as "the correction was not saved".
+    if world_model is not None:
+        try:
+            world_model.add_rule(f"Corrected: {query.strip()}", "correction")
+        except Exception:
+            logger.warning("Correction rule not added to the world model", exc_info=True)
+    _report_persistence_error(on_persistence_error, None)
+    return entry
 
 
 # --- Fast-path: close/open app (deterministic, no LLM needed) ---
@@ -1543,6 +1618,41 @@ def _verification_status_from_result(
     return None
 
 
+def _recovery_actually_executed(outcome: Any) -> bool:
+    """True only when an approved recovery genuinely ran the work.
+
+    Anything that is not an explicit ``charlie.recovery.RecoveryOutcome`` with
+    ``executed is True`` -- including a bare string -- is treated as a proposal
+    that changed nothing. This is the single guard that stops a recovery
+    explanation from being adopted as a tool result and published as a success.
+    """
+
+    return bool(getattr(outcome, "executed", False)) and getattr(outcome, "result", None) is not None
+
+
+def _recovery_proposal_data(outcome: Any) -> Dict[str, Any]:
+    """Structural record of an approved proposal that executed nothing."""
+
+    return {
+        "recovery": {
+            "executed": False,
+            "instruction": str(getattr(outcome, "instruction", "") or ""),
+        }
+    }
+
+
+def _recovery_model_suffix(outcome: Any) -> str:
+    """Model-facing text for an approved proposal that executed nothing.
+
+    ``_result_envelope_to_model_text`` projects only ``envelope.result``, so an
+    instruction that lives solely in ``envelope.data`` would never reach the
+    model. The real failure text is always kept as the prefix.
+    """
+
+    instruction = str(getattr(outcome, "instruction", "") or "")
+    return f" Recovery approved: {instruction}" if instruction else " "
+
+
 def _normalize_tool_result(
     tool_name: str,
     raw_result: Any,
@@ -2083,6 +2193,10 @@ class Brain:
         self._primary_llm_lock = threading.Lock()
         self._primary_llm_dispatch_generation: int = 0
         self._primary_llm_applied_generation: int = 0
+        # Degraded state, not telemetry: the last failure that stopped a health
+        # transition from reaching its sink. ``None`` means the most recent
+        # transition was published.
+        self.llm_health_delivery_error: Optional[str] = None
         self._chat_generation = 0
         # Per-turn halt; module-global _HALT is reserved for the physical panic hotkey.
         self._turn_halted: bool = False
@@ -2103,6 +2217,13 @@ class Brain:
                 logger.warning("Failed to start desktop panic hotkey listener", exc_info=True)
         self._tool_locks: Dict[str, asyncio.Lock] = {}
         self.history: List[Dict[str, Any]] = []
+        # Set when the durable session-history read failed for the current turn;
+        # ``None`` once a read has succeeded.
+        self.session_history_error: Optional[str] = None
+        # Set when a fire-and-forget user-correction write was lost. That write
+        # has no envelope, no awaited future, and no state of its own, so this
+        # is the only place the loss can be represented.
+        self.correction_persistence_error: Optional[str] = None
         self._intent_decisions: Dict[str, IntentDecision] = {}
         self.last_intent_decision: Optional[IntentDecision] = None
         self._history_max_turns = 5
@@ -2138,6 +2259,10 @@ class Brain:
         # Populated by add_installed_skill_block() when the main-owned extension
         # runtime activates a skill. The context tier remains Brain-owned.
         self._installed_skill_blocks: Dict[str, str] = {}
+        # Durable context files that could not be read for the last context-tier
+        # build. An unreadable MEMORY/USER/OPINIONS file degrades the tier to
+        # empty, which is otherwise indistinguishable from "no memory stored".
+        self.context_tier_read_errors: Dict[str, str] = {}
         max_chars = config.prompt_memory_max // 2
         memory_content = self._read_file_safe(config.memory_file, max_chars)
         user_content = self._read_file_safe(config.user_file, max_chars)
@@ -2189,9 +2314,49 @@ class Brain:
 
         self.world_model = WorldModel(db_path=config.world_model_db_path)
 
-    @staticmethod
-    def _read_file_safe(path: str, max_chars: int) -> str:
-        """Read a file, creating it if missing. Returns truncated content."""
+    def _record_correction_persistence(self, error: Optional[str]) -> None:
+        """Record whether the fire-and-forget correction write reached disk."""
+
+        if error is None:
+            self.correction_persistence_error = None
+            return
+        self.correction_persistence_error = error
+        logger.warning("Correction persistence degraded: %s", error)
+
+    def health_degradations(self) -> Dict[str, Any]:
+        """Every Brain-owned loss of truth currently recorded.
+
+        The runtime ``HealthRegistry`` is main-owned and has no process-wide
+        instance, so Brain cannot write to it: it publishes transitions through
+        the ``on_llm_health`` sink, and that sink is the only writer. This
+        snapshot is the projection source a main-owned health surface reads; an
+        empty mapping means Brain knows of nothing degraded. Values are copies,
+        so a consumer cannot corrupt Brain state by mutating the result.
+        """
+
+        degradations: Dict[str, Any] = {}
+        if self.llm_health_delivery_error:
+            degradations["llm_health_delivery"] = self.llm_health_delivery_error
+        if self.session_history_error:
+            degradations["session_history"] = self.session_history_error
+        if self.context_tier_read_errors:
+            degradations["context_tier"] = dict(self.context_tier_read_errors)
+        if self.correction_persistence_error:
+            degradations["correction_persistence"] = self.correction_persistence_error
+        return degradations
+
+    def is_health_degraded(self) -> bool:
+        """True when at least one Brain-owned truth loss is currently recorded."""
+
+        return bool(self.health_degradations())
+
+    def _read_file_safe(self, path: str, max_chars: int) -> str:
+        """Read a file, creating it if missing. Returns truncated content.
+
+        A read that fails still degrades to empty text, but the failure is kept
+        in ``context_tier_read_errors`` so a context tier that silently lost its
+        durable memory is distinguishable from one that genuinely has none.
+        """
         from pathlib import Path
 
         try:
@@ -2200,11 +2365,13 @@ class Brain:
                 p.write_text("", encoding="utf-8")
             return p.read_text(encoding="utf-8")[:max_chars]
         except Exception as e:
+            self.context_tier_read_errors[path] = type(e).__name__
             logger.warning("Error reading %s: %s", path, e)
             return ""
 
     def reload_context(self) -> None:
         """Re-read memory/user/opinions files into the context tier. Call after writes."""
+        self.context_tier_read_errors = {}
         max_chars = self.config.prompt_memory_max // 2
         memory_content = self._read_file_safe(self.config.memory_file, max_chars)
         user_content = self._read_file_safe(self.config.user_file, max_chars)
@@ -3507,7 +3674,19 @@ class Brain:
             if required_leases:
                 from charlie.resource_locks import default_lease_manager
 
-                async with await default_lease_manager.acquire_many(required_leases, execution_owner_id):
+                # A bounded, cancellable acquisition. Without it a fenced or wedged
+                # capability blocks this call forever instead of declining, because
+                # a user takeover now refuses to hand the lease to a second holder
+                # while the prior work may still be running. The bound turns a wedge into a
+                # decline. An asyncio cancel_event is deliberately not passed: the turn's
+                # cancellation is a threading.Event and bridging it here would need its own
+                # tested adapter.
+                lease_timeout = _tool_timeout(tool_name)
+                async with await default_lease_manager.acquire_many(
+                    required_leases,
+                    execution_owner_id,
+                    timeout=lease_timeout,
+                ):
                     return await _run_with_physical_input_session()
             if tool_registry.is_interactive(tool_name):
                 async with lock:
@@ -3546,8 +3725,21 @@ class Brain:
                         RuntimeError(_tool_result_text(raw_result)),
                         execution_context=execution_context,
                     )
-                if recovered_res is not None:
-                    raw_result = recovered_res
+                if _recovery_actually_executed(recovered_res):
+                    raw_result = recovered_res.result
+                elif recovered_res is not None:
+                    # Approved, but recovery only proposed a retry. The command
+                    # did not run, so the failure stands and the proposal is
+                    # handed on as an instruction.
+                    failure_text = _tool_result_text(raw_result)
+                    policy_status = ResultStatus.FAILED.value
+                    result_reason = (
+                        "Recovery was approved but executed nothing; the original "
+                        "tool call failed."
+                    )
+                    result_data.update(_recovery_proposal_data(recovered_res))
+                    result_errors.append(failure_text)
+                    raw_result = f"{failure_text}{_recovery_model_suffix(recovered_res)}"
         except asyncio.CancelledError as exc:
             raise OperationCancelled(
                 _finalize_cancelled(
@@ -3572,14 +3764,20 @@ class Brain:
                     exc,
                     execution_context=execution_context,
                 )
-                if recovered_res is not None:
-                    raw_result = recovered_res
+                timeout_text = f"Error: Tool '{tool_name}' timed out after {timeout}s"
+                result_data.update({"failure_kind": "timeout", "timeout_seconds": timeout})
+                # The timeout happened, so it is recorded. An approval
+                # explanation is not an error and is never recorded as one.
+                result_errors.append(timeout_text)
+                if _recovery_actually_executed(recovered_res):
+                    raw_result = recovered_res.result
                 else:
-                    raw_result = f"Error: Tool '{tool_name}' timed out after {timeout}s"
+                    raw_result = timeout_text
                     policy_status = ResultStatus.FAILED.value
                     result_reason = f"Tool '{tool_name}' timed out."
-                result_data.update({"failure_kind": "timeout", "timeout_seconds": timeout})
-                result_errors.append(_tool_result_text(raw_result))
+                    if recovered_res is not None:
+                        result_data.update(_recovery_proposal_data(recovered_res))
+                        raw_result = f"{raw_result}{_recovery_model_suffix(recovered_res)}"
             elif execution_context is not None and execution_context.cancellation_requested:
                 raw_result = f"Error: Tool '{tool_name}' timed out after {timeout}s"
                 policy_status = ResultStatus.FAILED.value
@@ -3614,14 +3812,18 @@ class Brain:
                     exc,
                     execution_context=execution_context,
                 )
-                if recovered_res is not None:
-                    raw_result = recovered_res
+                if _recovery_actually_executed(recovered_res):
+                    raw_result = recovered_res.result
                 else:
-                    raw_result = f"Error executing tool '{tool_name}': {exc}"
+                    failure_text = f"Error executing tool '{tool_name}': {exc}"
+                    raw_result = failure_text
                     policy_status = ResultStatus.FAILED.value
                     result_reason = f"Tool '{tool_name}' raised an exception."
                     result_data.update({"failure_kind": "exception", "exception_type": type(exc).__name__})
-                    result_errors.append(_tool_result_text(raw_result))
+                    result_errors.append(failure_text)
+                    if recovered_res is not None:
+                        result_data.update(_recovery_proposal_data(recovered_res))
+                        raw_result = f"{raw_result}{_recovery_model_suffix(recovered_res)}"
             else:
                 raw_result = f"Error executing tool '{tool_name}': {exc}"
                 policy_status = ResultStatus.FAILED.value
@@ -3711,8 +3913,14 @@ class Brain:
         if self._on_llm_health is not None:
             try:
                 self._on_llm_health(status, detail)
-            except Exception:
+            except Exception as exc:
+                # The sink owns the runtime's user-visible llm/brain status. If
+                # it raises, the transition never landed, so the failure is kept
+                # in state and the transition is not reported as applied.
+                self.llm_health_delivery_error = type(exc).__name__
                 logger.warning("Error in on_llm_health callback", exc_info=True)
+                return False
+            self.llm_health_delivery_error = None
         return True
 
     async def _record_llm_response(self, response: httpx.Response) -> None:
@@ -3770,34 +3978,75 @@ class Brain:
         generation: int,
         diagnostic_trace: Optional[Any] = None,
     ) -> tuple:
-        """Stream a chat completion. Returns (accumulated_text, tool_calls_list)."""
+        """Stream a chat completion. Returns (accumulated_text, tool_calls_list).
+
+        A transient transport failure or retryable HTTP status is retried exactly
+        once against the *same* model and the same payload. The retry completes
+        before this method returns, so the failed attempt can never have emitted
+        visible output or dispatched a tool: tools are only dispatched by callers
+        after this returns a tool_calls list, and those calls are never replayed.
+        A superseded turn (a newer chat generation exists) is not retried, so
+        barge-in and cancellation still win immediately.
+        """
         llm_gen = self._allocate_primary_llm_generation()
-        try:
-            async with self.client.stream(
-                "POST",
-                "chat/completions",
-                json=payload,
-                extensions={"primary_llm_generation": llm_gen},
-            ) as response:
-                response.raise_for_status()
-                accumulated, tc_by_index, cancelled = await parse_sse_stream(
-                    response,
-                    generation,
-                    lambda: self._chat_generation,
-                    on_content=(
-                        lambda _content: diagnostic_trace.mark_once(
-                            "first_llm_token",
-                            fields={"route": "primary", "token_length": len(_content)},
-                        )
-                        if diagnostic_trace is not None
-                        else None
-                    ),
+        accumulated = ""
+        tc_by_index: Dict[int, Any] = {}
+        cancelled = False
+        for attempt in range(2):
+            try:
+                async with self.client.stream(
+                    "POST",
+                    "chat/completions",
+                    json=payload,
+                    extensions={"primary_llm_generation": llm_gen},
+                ) as response:
+                    response.raise_for_status()
+                    accumulated, tc_by_index, cancelled = await parse_sse_stream(
+                        response,
+                        generation,
+                        lambda: self._chat_generation,
+                        on_content=(
+                            lambda _content: diagnostic_trace.mark_once(
+                                "first_llm_token",
+                                fields={"route": "primary", "token_length": len(_content)},
+                            )
+                            if diagnostic_trace is not None
+                            else None
+                        ),
+                    )
+                break
+            except Exception as exc:
+                # CancelledError is a BaseException, so it is never caught here.
+                if isinstance(exc, httpx.TransportError):
+                    # No response ever arrived, so the client's "response" event
+                    # hook never fires for this attempt -- record it here.
+                    telemetry.record_llm_call(success=False)
+                    self._notify_primary_llm_health(
+                        llm_gen, HealthStatus.DEGRADED, "Transport error"
+                    )
+                delay = _llm_retry_delay(exc)
+                superseded = self._chat_generation != generation
+                if attempt or delay is None or superseded:
+                    raise
+                logger.warning(
+                    "llm_transient_failure_retrying | attempt=%s | delay_s=%.2f | "
+                    "exc=%s | model_unchanged=%s",
+                    attempt + 1,
+                    delay,
+                    type(exc).__name__,
+                    payload.get("model"),
                 )
-        except httpx.TransportError:
-            # No response ever arrived, so the client's "response" event hook never fires -- record it here.
-            telemetry.record_llm_call(success=False)
-            self._notify_primary_llm_health(llm_gen, HealthStatus.DEGRADED, "Transport error")
-            raise
+                if diagnostic_trace is not None:
+                    diagnostic_trace.mark(
+                        "llm_transient_retry",
+                        fields={
+                            "attempt": attempt + 1,
+                            "delay_s": round(delay, 3),
+                            "error_type": type(exc).__name__,
+                            "model_unchanged": True,
+                        },
+                    )
+                await asyncio.sleep(delay)
         if cancelled:
             logger.info("stale_chat_generation_output_suppressed | generation=%s", generation)
             return ("", [])
@@ -4281,8 +4530,29 @@ class Brain:
                 self.history = []
                 for role, content in raw_messages:
                     self.history.append({"role": role, "content": content})
+                # A read that degraded to an empty result raises nothing, so the
+                # failure is only visible through the store's own reason. A lost
+                # durable read must not be answered from whatever the previous
+                # session left in memory, and must not be invisible.
+                degraded_read = str(getattr(self.session_store, "last_read_error", "") or "")
+                if degraded_read:
+                    self.session_history_error = degraded_read
+                    self.history = []
+                    logger.warning(
+                        "Durable session history for %s could not be read (%s); "
+                        "continuing with no history rather than stale history.",
+                        session_id,
+                        degraded_read,
+                    )
+                else:
+                    self.session_history_error = None
                 logger.debug("Loaded %d history messages for session: %s", len(self.history), session_id)
             except Exception as e:
+                # A lost durable read must not be answered from whatever the
+                # previous session left in memory, and must not be invisible:
+                # the in-memory history is dropped and the failure is kept.
+                self.session_history_error = type(e).__name__
+                self.history = []
                 logger.warning("Failed to load session history for %s: %s", session_id, e)
         recent_screen_context = any(
             message.get("role") == "user"
@@ -4304,6 +4574,7 @@ class Brain:
                     last_assistant,
                     self.config.opinions_file,
                     self.world_model,
+                    self._record_correction_persistence,
                 )
 
         generation = self._chat_generation
@@ -4854,12 +5125,13 @@ class Brain:
             op = capability_index.get_operation(fp_match.tool_name)
             leases = op.required_leases if op else ()
             v_res = None
+            v_error: Optional[str] = None
             fastpath_status: Optional[str | ResultStatus] = None
             fastpath_reason = ""
             fastpath_data: Optional[dict[str, Any]] = None
 
             async def _run_fast_path() -> tuple[str, Any]:
-                nonlocal v_res
+                nonlocal v_res, v_error
                 res = await asyncio.to_thread(execute_fast_path, fp_match)
                 if fp_match.verifier_name:
                     try:
@@ -4880,7 +5152,19 @@ class Brain:
                             v_res.message,
                         )
                     except Exception as ve:
-                        logger.debug("Fast-path verifier %s exception: %s", fp_match.verifier_name, ve)
+                        # A verifier that cannot run is not a passing verifier.
+                        # The bound semantic postcondition is unknown, so the
+                        # operation must not be published as an unqualified
+                        # completion; ``_normalize_tool_result`` downgrades it to
+                        # ``unverified`` through the canonical contract.
+                        v_res = None
+                        v_error = type(ve).__name__
+                        logger.warning(
+                            "Fast-path verifier %s failed: %s",
+                            fp_match.verifier_name,
+                            ve,
+                            exc_info=True,
+                        )
                 return res, v_res
 
             try:
@@ -4889,7 +5173,14 @@ class Brain:
                     from charlie.resource_locks import default_lease_manager
 
                     lease_owner = explicit_execution_owner_id or f"fastpath.{fp_match.intent}"
-                    async with await default_lease_manager.acquire_many(leases, lease_owner):
+                    # Bounded and cancellable for the same reason as the
+                    # registry-tool path: a fenced capability must decline rather
+                    # than block this coroutine forever.
+                    async with await default_lease_manager.acquire_many(
+                        leases,
+                        lease_owner,
+                        timeout=timeout,
+                    ):
                         fp_res, v_res = await asyncio.wait_for(_run_fast_path(), timeout=timeout)
                 else:
                     fp_res, v_res = await asyncio.wait_for(_run_fast_path(), timeout=timeout)
@@ -4911,12 +5202,26 @@ class Brain:
                     "message": v_res.message,
                 }
                 if v_res is not None
-                else None
+                else (
+                    {"verification_status": VerificationStatus.VERIFICATION_UNAVAILABLE.value}
+                    if v_error is not None
+                    else None
+                )
             )
             if fastpath_status is None and v_res is not None and not v_res.verified:
                 fastpath_status = v_res.status
                 fastpath_reason = v_res.message
-            fastpath_result_data = {**dict(getattr(fp_res, "data", {}) or {}), **(fastpath_data or {})}
+            if v_error is not None:
+                fastpath_result_data = {"verification_error": v_error}
+                if fastpath_reason == "":
+                    fastpath_reason = f"Fast-path verifier '{fp_match.verifier_name}' failed."
+            else:
+                fastpath_result_data = {}
+            fastpath_result_data = {
+                **dict(getattr(fp_res, "data", {}) or {}),
+                **fastpath_result_data,
+                **(fastpath_data or {}),
+            }
             if fastpath_status is None and (
                 fastpath_result_data.get("available") is False
                 or (

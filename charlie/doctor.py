@@ -44,6 +44,38 @@ class CheckSeverity(StrEnum):
     CRITICAL = "critical"
 
 
+# Owner ids the runtime mints for work that is live but was never journaled.
+# charlie/core.py builds `operation:<uuid4>` whenever task_id is None (the
+# ordinary chat/tool loop) and `fastpath.<intent>` for the fast path, so neither
+# ever appears in the TaskJournal. Journal membership alone is therefore not a
+# liveness signal -- deriving it that way reported every in-flight lease as an
+# orphan. An owner is only an orphan when it matches none of these shapes.
+LIVE_OWNER_PREFIXES = ("operation:", "fastpath.")
+# Retained from the original predicate: no current production site mints these,
+# but an external/extension caller still may, and dropping them would turn a
+# working lease into a reported fault.
+EXEMPT_OWNER_IDS = ("user",)
+EXEMPT_OWNER_PREFIXES = ("session_",)
+
+
+def is_live_lease_owner(owner: str, known_task_ids: Optional[set[str]] = None) -> bool:
+    """True when ``owner`` is a plausible live capability-lease holder.
+
+    Shared by the capability-lease check and its repair so the two can never
+    disagree -- a repair using a stricter predicate than the check would release
+    the very lease the check just cleared.
+    """
+    if not owner:
+        return False
+    if known_task_ids and owner in known_task_ids:
+        return True
+    if owner in EXEMPT_OWNER_IDS:
+        return True
+    if owner.startswith(LIVE_OWNER_PREFIXES):
+        return True
+    return owner.startswith(EXEMPT_OWNER_PREFIXES)
+
+
 @dataclass(frozen=True)
 class ProbeResult:
     """Verdict of a real dependency probe.
@@ -742,13 +774,20 @@ class CharlieDoctor:
         leases_info = self._introspector.get_leases_info()
         active_leases = leases_info.get("active_leases", {})
 
-        # Check for orphan leases (owner task no longer running)
+        # Liveness comes from the shape of the owner id plus the journal, never
+        # from journal membership alone: real owners are frequently `operation:*`
+        # or `fastpath.*` and are never journaled.
         tasks_info = self._introspector.get_tasks_info()
-        active_task_ids = {t["task_id"] for t in tasks_info.get("active_tasks", [])}
+        active_task_ids = {t["task_id"] for t in tasks_info.get("active_tasks", []) if t.get("task_id")}
 
         orphans = {}
+        unjournaled = {}
         for cap, owner in active_leases.items():
-            if owner not in active_task_ids and owner != "user" and not owner.startswith("session_"):
+            if owner in active_task_ids:
+                continue
+            if is_live_lease_owner(owner, active_task_ids):
+                unjournaled.setdefault(cap, owner)
+            else:
                 orphans[cap] = owner
 
         if orphans:
@@ -758,7 +797,10 @@ class CharlieDoctor:
                 status=CheckStatus.WARNING,
                 severity=CheckSeverity.MEDIUM,
                 summary=f"Orphan capability lease detected: {list(orphans.keys())}",
-                evidence=f"Leases held by terminated/unknown tasks: {orphans}.",
+                evidence=(
+                    f"Leases held by terminated/unknown owners: {orphans}. "
+                    f"Live non-journal owners (not counted as orphans): {unjournaled or 'none'}."
+                ),
                 probable_cause="A task terminated without explicitly releasing its capability lock.",
                 fix_hint="Execute lease cleanup to release stuck resource locks.",
                 repair_available=True,
@@ -772,7 +814,10 @@ class CharlieDoctor:
             status=CheckStatus.OK,
             severity=CheckSeverity.LOW,
             summary="Capability lease arbitration healthy",
-            evidence=f"{len(active_leases)} active leases, no orphan locks detected.",
+            evidence=(
+                f"{len(active_leases)} active leases, no orphan locks detected. "
+                f"Live non-journal owners: {unjournaled or 'none'}."
+            ),
         )
 
     def _check_mcp_subsystem(self) -> DiagnosticCheck:
@@ -1211,7 +1256,7 @@ class CharlieDoctor:
         try:
             # 1. Stale leases cleanup
             if repair_id == "repair_stale_leases":
-                from charlie.resource_locks import CapabilityLeaseManager, release
+                from charlie.resource_locks import CapabilityLeaseManager, force_release
                 from charlie.task_journal import TaskJournal
 
                 journal = self._introspector._get_task_journal()
@@ -1221,12 +1266,23 @@ class CharlieDoctor:
                 active_ids = {task.id for task in journal.list(include_terminal=False)}
                 stale = {
                     cap: owner for cap, owner in manager.snapshot().items()
-                    if owner not in active_ids and owner != "user" and not owner.startswith("session_")
+                    if not is_live_lease_owner(owner, active_ids)
                 }
+                # Re-check liveness immediately before each drop: a capability can
+                # be re-leased between the snapshot and the release. force_release
+                # (not the cooperative refcount-aware release) is correct here --
+                # a lease object surviving without a live owner shape or journal
+                # task is the definition of a terminated holder.
+                released = 0
                 for capability, owner in stale.items():
-                    release(capability, owner)
+                    if manager.current_owner(capability) != owner:
+                        continue
+                    if is_live_lease_owner(owner, active_ids):
+                        continue
+                    if force_release(capability, owner):
+                        released += 1
                 self.record_repair_attempt(repair_id, success=True)
-                return {"success": True, "repair_id": repair_id, "message": f"Released {len(stale)} stale leases."}
+                return {"success": True, "repair_id": repair_id, "message": f"Released {released} stale leases."}
 
             # 2. MCP servers reconnect
             elif repair_id == "repair_mcp_reconnect":

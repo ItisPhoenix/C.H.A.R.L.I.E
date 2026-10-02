@@ -64,6 +64,8 @@ class MCPTool:
     description: str
     input_schema: Dict[str, Any] = field(default_factory=dict)
     server_name: str = ""
+    annotations: Dict[str, Any] = field(default_factory=dict)
+    """Server-declared hints. Untrusted: recorded, never used as policy authority."""
 
 
 @dataclass
@@ -241,8 +243,47 @@ def load_config_file(path: str) -> List[MCPServerConfig]:
     return load_mcp_config(path)[0]
 
 
+MCP_TOOL_RISK_FLOOR = "security_sensitive"
+"""Lowest risk class an MCP tool may be registered with."""
+
+_SERVER_POLICY_KEYS = ("policy", "risk_class", "riskClass", "approval", "charlie_policy")
+"""Annotation keys with which a server tries to claim its own risk/permission."""
+
+
+def server_declared_policy(annotations: Any) -> Optional[str]:
+    """Return the permission a server claims for itself, if it claims one.
+
+    Advisory hints (``readOnlyHint``, ``destructiveHint``) are not permission
+    claims and stay out of policy entirely. A claim is recorded so it can be
+    floored, never honoured.
+    """
+    if not isinstance(annotations, dict):
+        return None
+    for key in _SERVER_POLICY_KEYS:
+        if key in annotations:
+            return str(annotations[key])
+    return None
+
+
+def mcp_tool_risk_class(policy: str, *, declared_policy: Optional[str] = None) -> str:
+    """Single authority for the risk class Charlie registers an MCP tool with.
+
+    ``safe`` means "runs without owner approval", so it is reserved for a policy
+    Charlie itself declared in ``mcpToolPolicies`` / ``MCP_READ_ONLY_TOOLS``.
+    A server-declared claim about its own permission is untrusted and is always
+    floored, so no external declaration can remove the approval requirement.
+    ``"ask"``, ``"deny"`` and unknown values are floored too.
+    """
+    if declared_policy is not None:
+        return MCP_TOOL_RISK_FLOOR
+    if str(policy or "").casefold() == "allow":
+        return "safe"
+    return MCP_TOOL_RISK_FLOOR
+
+
 def _safe_error(exc: Exception) -> str:
     """Keep transport diagnostics useful without echoing credential-bearing URLs."""
+
     if isinstance(exc, httpx.HTTPStatusError):
         return f"MCP HTTP request returned status {exc.response.status_code}"
     if isinstance(exc, httpx.RequestError):
@@ -479,9 +520,13 @@ class MCPClient:
                 description=f"[{tool.server_name}] {tool.description}",
                 schema=tool.input_schema or {"type": "object", "properties": {}},
                 owner="mcp",
-                risk_class="safe" if policy == "allow" else "security_sensitive",
+                risk_class=mcp_tool_risk_class(
+                    policy,
+                    declared_policy=server_declared_policy(getattr(tool, "annotations", None)),
+                ),
             )(_invoke)
             registered.append(full_name)
+
         self._registered_tools.setdefault(server_name, []).extend(registered)
         return registered
 
@@ -688,12 +733,16 @@ class _ManagedServer:
                 raise RuntimeError(f"MCP server '{self.config.name}' tools/list failed: {resp or 'timed out'}")
             result = resp.get("result", {})
             for item in result.get("tools", []):
+                annotations = item.get("annotations") if isinstance(item, dict) else None
                 tools.append(MCPTool(
                     name=item.get("name", ""),
                     description=item.get("description", ""),
                     input_schema=item.get("inputSchema", {}),
+                    # Untrusted: recorded, never used as policy authority.
+                    annotations=annotations if isinstance(annotations, dict) else {},
                 ))
             cursor = result.get("nextCursor")
+
             if not cursor:
                 break
             if cursor in seen_cursors:
@@ -944,7 +993,9 @@ class _ManagedHTTPServer:
                 raise RuntimeError(f"MCP server '{self.config.name}' returned invalid tools/list result")
             for item in result.get("tools", []):
                 if isinstance(item, dict) and item.get("name"):
-                    # Server annotations are untrusted hints; only schema and descriptive fields cross this boundary.
+                    # Server annotations are untrusted hints: recorded as evidence
+                    # only. They never become a policy (see mcp_tool_risk_class).
+                    annotations = item.get("annotations")
                     tools.append(MCPTool(
                         name=str(item["name"]),
                         description=str(item.get("description", "")),
@@ -953,8 +1004,12 @@ class _ManagedHTTPServer:
                             if isinstance(item.get("inputSchema", {}), dict)
                             else {}
                         ),
+                        annotations=(
+                            annotations if isinstance(annotations, dict) else {}
+                        ),
                     ))
             cursor = result.get("nextCursor")
+
             if not cursor:
                 return tools
             if cursor in seen_cursors:

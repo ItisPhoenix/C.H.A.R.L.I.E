@@ -453,11 +453,66 @@ class CalendarPlugin(Plugin):
 # Built-in Plugin: Code Executor
 # ---------------------------------------------------------------------------
 
-class CodeExecPlugin(Plugin):
-    """Sandboxed code execution for quick computations.
+# Builtins the sandbox refuses. Membership is identical to the original local
+# tuple; it lives at module scope so the AST walk below and the tests read the
+# same set.
+_BANNED_BUILTINS = frozenset(
+    {
+        "eval",
+        "exec",
+        "open",
+        "__import__",
+        "getattr",
+        "setattr",
+        "delattr",
+        "compile",
+        "type",
+        "globals",
+        "locals",
+        "vars",
+        "memoryview",
+        "os",
+        "sys",
+        "subprocess",
+        "builtins",
+        "importlib",
+        "ctypes",
+        "io",
+    }
+)
 
-    Executes Python or shell snippets in a subprocess with timeout.
-    Only allows safe, read-only-ish operations (no network, no file writes).
+# Names that must not even be *loaded*, never mind called. Aliasing a capability
+# (`f = open`, `table = {"go": eval}`) is the same grant as calling it, so the
+# banned-callable set is banned in load position too. `os`/`sys`/`subprocess`/`io`
+# stay out: with imports already refused they grant nothing on their own, and
+# banning them as identifiers would only reject harmless local names.
+#
+# The namespace handles are the other half. `python -c` seeds the child's globals
+# with `__builtins__`, and every banned callable is reachable off it as
+# `__builtins__.<name>` -- so leaving these out turns the whole list above into
+# decoration.
+_DISALLOWED_NAMES = frozenset(_BANNED_BUILTINS - {"os", "sys", "subprocess", "io"}) | {
+    "__builtins__",
+    "__loader__",
+    "__spec__",
+}
+
+# Dunders that are metadata about the running module rather than a handle on
+# anything. Reading `__name__` or `__doc__` reveals no callable and grants no
+# capability, so refusing them only rejected introspection that benign plugin
+# code performs. Every other `__`-prefixed name stays refused, in load position
+# AND in store position (rebinding a dunder rewrites the child module's own
+# identity metadata -- see the comment at the check).
+_BENIGN_DUNDER_NAMES = frozenset({"__name__", "__doc__"})
+
+
+class CodeExecPlugin(Plugin):
+    """Code execution for quick computations.
+
+    Executes a Python snippet in a subprocess with timeout and an empty
+    environment. Reach is limited by the AST gate in _exec_python -- imports,
+    dangerous builtins, the __builtins__ namespace handle and dunder access are
+    refused -- not by any OS-level sandbox, container, or network control.
     """
 
     def __init__(self, timeout: float = 10.0) -> None:
@@ -497,39 +552,52 @@ class CodeExecPlugin(Plugin):
         The sandbox is defense-in-depth only and is NOT a hard security
         boundary. It is disabled by default (PLUGINS_ENABLED=false) and must
         never be enabled for untrusted input.
+
+        The AST gate below is the only thing standing between a snippet and the
+        host, so it is written to survive indirection rather than to match
+        spellings: it refuses a name in load position as well as in call
+        position, and refuses a banned builtin reached as an attribute as well
+        as reached bare. A gate that only recognised `exec(...)` was bypassed by
+        `f = exec; f(...)` and by `__builtins__.exec(...)`.
         """
         import ast
 
-        _BANNED_BUILTINS = (
-            "eval",
-            "exec",
-            "open",
-            "__import__",
-            "getattr",
-            "setattr",
-            "delattr",
-            "compile",
-            "type",
-            "globals",
-            "locals",
-            "vars",
-            "memoryview",
-            "os",
-            "sys",
-            "subprocess",
-            "builtins",
-            "importlib",
-            "ctypes",
-            "io",
-        )
         try:
             tree = ast.parse(code)
             for node in ast.walk(tree):
                 if isinstance(node, (ast.Import, ast.ImportFrom)):
                     return {"error": "Rejected: imports are not allowed in sandbox."}
+                # Bare-name reference. A name in *load* position is a use of the
+                # builtin it collides with, so it is refused: `f = open`,
+                # `table = {"go": eval}` and, critically, `b = __builtins__`,
+                # which is just a Name. A name in *store* position only binds a
+                # local and reads nothing, so `type = 3` / `open = 1` /
+                # `[x for vars in xs]` are allowed. Reachable either way: the
+                # Load branch is what makes `exec = 1; exec(...)` still fail on
+                # the second occurrence.
+                if isinstance(node, ast.Name):
+                    if isinstance(node.ctx, ast.Load):
+                        if node.id in _DISALLOWED_NAMES:
+                            return {
+                                "error": f"Rejected: dangerous builtin '{node.id}' is blocked."
+                            }
+                        if (
+                            node.id.startswith("__")
+                            and node.id not in _BENIGN_DUNDER_NAMES
+                        ):
+                            return {
+                                "error": "Rejected: private attribute access not allowed."
+                            }
+                    elif node.id.startswith("__"):
+                        # Store/Del: a local named `__x` is a smell, and
+                        # rebinding `__name__`/`__doc__` rewrites the identity
+                        # metadata the snippet can read back. Refused.
+                        return {"error": "Rejected: private attribute access not allowed."}
                 if isinstance(node, ast.Attribute):
                     if node.attr.startswith("__"):
                         return {"error": "Rejected: private attribute access not allowed."}
+                    if node.attr in _BANNED_BUILTINS:
+                        return {"error": f"Rejected: dangerous builtin '.{node.attr}' is blocked."}
                 if isinstance(node, ast.Subscript):
                     slc = node.slice
                     if isinstance(slc, ast.Constant) and isinstance(slc.value, str) and slc.value.startswith("__"):
