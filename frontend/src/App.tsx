@@ -7,7 +7,10 @@ import { MicrophoneSlash } from "@phosphor-icons/react/dist/csr/MicrophoneSlash"
 import { Pulse } from "@phosphor-icons/react/dist/csr/Pulse";
 import type { OrbState } from "thinking-orbs";
 import { VoiceBeam } from "voice-glow";
-import { loadScene, orbStateForEvent, parseRuntimeEvent, postCommand, postRuntimeCommand, type ResearchSource, type RuntimeEvent, type RuntimeSetting, type SceneSnapshot } from "./runtime";
+import { loadScene, orbStateForEvent, parseRuntimeEvent, postCommand, postRuntimeCommand, type ResearchResultData, type ResearchSource, type RuntimeEvent, type RuntimeSetting, type SceneSnapshot } from "./runtime";
+import { readDashboardViewState, writeDashboardViewState, type DashboardViewState } from "./sessionView";
+import { SettingsSectionNav, type SettingsSectionId } from "./SettingsSectionNav";
+import { ResearchTabs } from "./ResearchTabs";
 import { Microphone } from "@phosphor-icons/react/dist/csr/Microphone";
 import { CrispThinkingOrb } from "./CrispThinkingOrb";
 
@@ -19,7 +22,6 @@ type FrontendSettings = {
   captions: boolean;
   speechPlayback: boolean;
   activityDensity: "focused" | "expanded";
-  localHistory: boolean;
 };
 
 const SETTINGS_KEY = "charlie-frontend-settings";
@@ -28,7 +30,6 @@ const DEFAULT_SETTINGS: FrontendSettings = {
   captions: true,
   speechPlayback: true,
   activityDensity: "focused",
-  localHistory: true,
 };
 
 function readFrontendSettings(): FrontendSettings {
@@ -41,7 +42,6 @@ function readFrontendSettings(): FrontendSettings {
       captions: value.captions !== false,
       speechPlayback: value.speechPlayback !== false,
       activityDensity: value.activityDensity === "expanded" ? "expanded" : "focused",
-      localHistory: value.localHistory !== false,
     };
   } catch { return DEFAULT_SETTINGS; }
 }
@@ -88,18 +88,22 @@ export function App() {
   const [captionSpeaker, setCaptionSpeaker] = useState<CaptionLine["kind"]>("stt");
   const [approvalBusy, setApprovalBusy] = useState(false);
   const [approvalError, setApprovalError] = useState("");
-  const [chatBubbles, setChatBubbles] = useState<ChatBubble[]>(() => {
-    try {
-      const saved: unknown = settings.localHistory ? JSON.parse(sessionStorage.getItem("charlie-chat") ?? "[]") : [];
-      return Array.isArray(saved) ? saved.filter((item) => item && typeof item.id === "string" && ["you", "charlie"].includes(item.role) && typeof item.text === "string") : [];
-    } catch { return []; }
-  });
+  const [chatBubbles, setChatBubbles] = useState<ChatBubble[]>([]);
   const [orbState, setOrbState] = useState<OrbState>("connecting");
   const [workPhase, setWorkPhase] = useState<"working" | "solving">("working");
   const [menuOpen, setMenuOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [researchOpen, setResearchOpen] = useState(false);
+  const [selectedResearchResultId, setSelectedResearchResultId] = useState<string | null>(null);
+  const [dismissedResearchResultIds, setDismissedResearchResultIds] = useState<string[]>([]);
+  const [viewHydratedSessionId, setViewHydratedSessionId] = useState<string | null>(null);
+  const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSectionId>("presence");
   const micMuted = scene?.voice?.mic_muted ?? true;
+  const researchResults = scene?.researchResults?.length
+    ? scene.researchResults
+    : scene?.researchResult ? [scene.researchResult] : [];
+  const selectedResearchResult = researchResults.find((result) => result.id === selectedResearchResultId)
+    ?? scene?.researchResult;
   const [settingsOpen, setSettingsOpen] = useState(false);
   const clearCaptionTimer = useRef<number | undefined>(undefined);
   const audioLevelRef = useRef(0);
@@ -109,13 +113,55 @@ export function App() {
   const replyId = useRef<string | null>(null);
   const presenceRef = useRef<HTMLButtonElement>(null);
   const seenEventIds = useRef(new Set<string>());
+  const hydratedSessionRef = useRef<string | null>(null);
+  const pendingResearchOpenRef = useRef<string | null>(null);
 
   useEffect(() => {
-    try {
-      if (settings.localHistory) sessionStorage.setItem("charlie-chat", JSON.stringify(chatBubbles));
-      else sessionStorage.removeItem("charlie-chat");
-    } catch { /* Storage may be disabled or full. */ }
-  }, [chatBubbles, settings.localHistory]);
+    if (!scene?.sessionId || viewHydratedSessionId === scene.sessionId) return;
+    const saved = readDashboardViewState(scene.sessionId);
+    const pendingResearchId = pendingResearchOpenRef.current;
+    const restored = pendingResearchId
+      ? {
+        ...saved,
+        researchOpen: true,
+        selectedResearchResultId: pendingResearchId,
+        dismissedResearchResultIds: saved.dismissedResearchResultIds.filter((id) => id !== pendingResearchId),
+      }
+      : saved;
+    hydratedSessionRef.current = scene.sessionId;
+    pendingResearchOpenRef.current = null;
+    setChatOpen(restored.chatOpen);
+    setDrawerOpen(restored.drawerOpen);
+    setSettingsOpen(restored.settingsOpen);
+    setActiveSettingsSection(restored.activeSettingsSection);
+    setResearchOpen(restored.researchOpen);
+    setSelectedResearchResultId(restored.selectedResearchResultId);
+    setDismissedResearchResultIds(restored.dismissedResearchResultIds);
+    setChatBubbles(scene.conversationHistory ?? []);
+    setActivity((current) => {
+      const seen = new Set(current.map((item) => item.key));
+      const restored = [...(scene.activity ?? [])].reverse().flatMap((item, index) => {
+        const key = item.id ?? `${item.type}-${item.timestamp ?? index}`;
+        return seen.has(key) ? [] : [{ ...item, key }];
+      });
+      return [...current, ...restored].slice(0, 40);
+    });
+    setViewHydratedSessionId(scene.sessionId);
+  }, [scene?.sessionId, viewHydratedSessionId]);
+
+  useEffect(() => {
+    if (!scene?.sessionId || viewHydratedSessionId !== scene.sessionId) return;
+    const state: DashboardViewState = {
+      chatOpen,
+      drawerOpen,
+      settingsOpen,
+      activeSettingsSection,
+      researchOpen,
+      selectedResearchResultId,
+      dismissedResearchResultIds,
+    };
+    writeDashboardViewState(scene.sessionId, state);
+  }, [scene?.sessionId, viewHydratedSessionId, chatOpen, drawerOpen, settingsOpen, activeSettingsSection, researchOpen, selectedResearchResultId, dismissedResearchResultIds]);
 
   useEffect(() => {
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* Preferences are optional. */ }
@@ -139,6 +185,18 @@ export function App() {
       }
       return next;
     });
+  }
+
+  function openResearchResult(id: string) {
+    if (!hydratedSessionRef.current) pendingResearchOpenRef.current = id;
+    setSelectedResearchResultId(id);
+    setResearchOpen(true);
+    setDismissedResearchResultIds((ids) => ids.filter((item) => item !== id));
+  }
+
+  function dismissResearchResult(id: string) {
+    setDismissedResearchResultIds((ids) => ids.includes(id) ? ids : [...ids, id].slice(-10));
+    if (selectedResearchResultId === id) setResearchOpen(false);
   }
 
   function queueCaptionClear(delay: number) {
@@ -210,13 +268,15 @@ export function App() {
       }
       if (event.type === "research_result" && event.channel !== "telegram") {
         if (event.researchResult) {
-          setScene((cur) => cur ? { ...cur, researchResult: event.researchResult } : cur);
+          const result = event.researchResult;
+          setScene((cur) => {
+            if (!cur) return cur;
+            const previous = cur.researchResults ?? (cur.researchResult ? [cur.researchResult] : []);
+            const next = [...previous.filter((item) => item.id !== result.id), result].slice(-10);
+            return { ...cur, researchResult: result, researchResults: next };
+          });
+          openResearchResult(result.id);
         }
-        if (event.text) {
-          replyId.current = null;
-          addChatBubble("charlie", event.text, `research:${event.resultId ?? event.id}`);
-        }
-        setResearchOpen(true);
       }
       if (event.type === "result_stored" && event.channel === "web" && event.text) {
         replyId.current = null;
@@ -265,13 +325,6 @@ export function App() {
       if (clearCaptionTimer.current !== undefined) window.clearTimeout(clearCaptionTimer.current);
     };
   }, [previewMode]);
-
-  useEffect(() => {
-    if (scene?.researchResult) {
-      addChatBubble("charlie", scene.researchResult.text, `research:${scene.researchResult.id}`);
-      setResearchOpen(true);
-    }
-  }, [scene?.researchResult?.id]);
 
   useEffect(() => {
     const working = sending || scene?.conversationState === "working" || Boolean(scene?.activeTurnId) || (scene?.tasks ?? []).some((task) => !["completed", "failed", "cancelled"].includes(task.status));
@@ -421,12 +474,14 @@ export function App() {
   const visibleOrbState = !connected ? "connecting" : runtimeWorking
     ? (["searching", "shaping", "weaving", "composing", "listening"].includes(orbState) ? orbState : workPhase)
     : orbState;
-  const visibleActivity = settings.activityDensity === "expanded" ? activity : activity.filter((item) => !["tool_call", "tool_result"].includes(item.type));
+  const focusedActivity = activity.filter((item) => !["tool_call", "tool_result"].includes(item.type));
+  const visibleActivity = settings.activityDensity === "expanded" || focusedActivity.length === 0 ? activity : focusedActivity;
+  const visibleResearchResults = researchResults.filter((result) => !dismissedResearchResultIds.includes(result.id));
   const pendingApproval = activity.find((item) => item.type === "tool_approval_request"
     && item.channel === "web" && item.requestId) ?? scene?.pendingApproval;
   return (
     <PageBeam>
-      <main className={`workspace ${chatOpen ? "is-chat-open" : ""} ${drawerOpen ? "is-drawer-open" : ""} ${researchOpen && scene?.researchResult ? "has-research" : ""} ${settings.reducedMotion ? "is-reduced-motion" : ""}`}>
+      <main className={`workspace ${chatOpen ? "is-chat-open" : ""} ${drawerOpen ? "is-drawer-open" : ""} ${researchOpen && selectedResearchResult ? "has-research" : ""} ${settings.reducedMotion ? "is-reduced-motion" : ""}`}>
       {!connected && <div className="runtime-notice" role="status">Reconnecting to Charlie. Previous messages are historical.</div>}
       {!chatOpen && commandNotice && <div className="runtime-notice" role="status">{commandNotice}</div>}
       <header className="topbar">
@@ -468,7 +523,7 @@ export function App() {
         </article> : <p className="empty-state">{sceneError}</p>}
       </section>
 
-      {settingsOpen && <SettingsPanel settings={settings} setSettings={setSettings} voice={scene?.voice} runtimeSettings={scene?.settings} onSaveSettings={saveRuntimeSettings} onVoiceState={setVoiceState} onClose={() => { setSettingsOpen(false); presenceRef.current?.focus(); }} />}
+      {settingsOpen && <SettingsPanel settings={settings} setSettings={setSettings} activeSection={activeSettingsSection} onSelectSection={setActiveSettingsSection} voice={scene?.voice} runtimeSettings={scene?.settings} onSaveSettings={saveRuntimeSettings} onVoiceState={setVoiceState} onClose={() => { setSettingsOpen(false); presenceRef.current?.focus(); }} />}
 
       {chatOpen && <div className="voice-composer-shell" style={{ "--composer-width": `${composerWidth}px` } as CSSProperties}>
         <ChatBubbles bubbles={chatBubbles.filter((bubble) => !bubble.id.startsWith("research:"))} />
@@ -483,19 +538,25 @@ export function App() {
         </VoiceBeam>
       </div>}
 
-      {!researchOpen && scene?.researchResult && (
-        <button
-          type="button"
-          className="research-reopen-pill"
-          onClick={() => setResearchOpen(true)}
-          aria-label="Reopen research answer"
-        >
-          <span className="research-reopen-tag">Research</span>
-          <span className="research-reopen-query">{scene.researchResult.query}</span>
-        </button>
+      {!researchOpen && visibleResearchResults.length > 0 && (
+        <ResearchTabs
+          results={visibleResearchResults}
+          selectedId={selectedResearchResultId}
+          onSelect={openResearchResult}
+          onDismiss={dismissResearchResult}
+        />
       )}
 
-      {researchOpen && scene?.researchResult && <ResearchPanel result={scene.researchResult} onClose={() => setResearchOpen(false)} />}
+      {researchOpen && selectedResearchResult && (
+        <ResearchPanel
+          result={selectedResearchResult}
+          results={visibleResearchResults}
+          selectedId={selectedResearchResultId}
+          onSelect={openResearchResult}
+          onDismiss={dismissResearchResult}
+          onClose={() => setResearchOpen(false)}
+        />
+      )}
 
       {pendingApproval?.requestId && <ApprovalPopup
         title={pendingApproval.operationPreview || "Allow this action?"}
@@ -506,10 +567,10 @@ export function App() {
 
       <aside id="activity-panel" className={`activity-panel ${drawerOpen ? "is-open" : ""}`} aria-label="Activity" aria-hidden={!drawerOpen}>
         <div className="drawer-heading"><h2>Activity</h2><button type="button" aria-label="Close activity" onClick={closeActivity}>Close</button></div>
-        {activeTasks.length || activity.length ? <ol className="activity-list">
+        {activeTasks.length || visibleActivity.length ? <ol className="activity-list">
           {activeTasks.map((task) => <li key={`task-${task.id}`}><strong>{task.title}</strong><span>{task.currentAction || task.status}</span><button type="button" onClick={() => void sendRuntimeControl({ type: "cancel_task", task_id: task.id })}>Cancel task</button>{task.updatedAt && <time dateTime={task.updatedAt}>{task.updatedAt}</time>}</li>)}
           {visibleActivity.map((item) => <li key={item.key}><strong>{activityLabel(item)}</strong>{item.summary && <span>{item.summary}</span>}{item.type === "tool_approval_request" && item.requestId && <div><button type="button" onClick={() => void sendRuntimeControl({ type: "approve", request_id: item.requestId })}>Approve</button><button type="button" onClick={() => void sendRuntimeControl({ type: "reject", request_id: item.requestId })}>Reject</button></div>}{item.timestamp && <time dateTime={item.timestamp}>{item.timestamp}</time>}</li>)}
-        </ol> : <p className="activity-empty">No active work or background tasks.</p>}
+        </ol> : <p className="activity-empty">No activity in this Charlie session yet.</p>}
       </aside>
       {drawerOpen && <button className="drawer-scrim" type="button" aria-label="Close activity" onClick={closeActivity} />}
       </main>
@@ -539,7 +600,7 @@ function activityLabel(item: ActivityItem): string {
   }
 }
 
-function SettingsPanel({ onClose, voice, onVoiceState, settings, setSettings, runtimeSettings, onSaveSettings }: { onClose: () => void; voice: SceneSnapshot["voice"]; onVoiceState: (type: "set_mic_state" | "set_audio_state", muted: boolean) => Promise<void>; settings: FrontendSettings; setSettings: Dispatch<SetStateAction<FrontendSettings>>; runtimeSettings: RuntimeSetting[] | undefined; onSaveSettings: (updates: Record<string, unknown>) => Promise<RuntimeSetting[]> }) {
+function SettingsPanel({ onClose, voice, onVoiceState, settings, setSettings, runtimeSettings, onSaveSettings, activeSection, onSelectSection }: { onClose: () => void; voice: SceneSnapshot["voice"]; onVoiceState: (type: "set_mic_state" | "set_audio_state", muted: boolean) => Promise<void>; settings: FrontendSettings; setSettings: Dispatch<SetStateAction<FrontendSettings>>; runtimeSettings: RuntimeSetting[] | undefined; onSaveSettings: (updates: Record<string, unknown>) => Promise<RuntimeSetting[]>; activeSection: SettingsSectionId; onSelectSection: (section: SettingsSectionId) => void }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -559,39 +620,39 @@ function SettingsPanel({ onClose, voice, onVoiceState, settings, setSettings, ru
     <dialog ref={dialogRef} className="settings-panel" aria-label="Charlie settings" onCancel={(event) => { event.preventDefault(); close(); }}>
       <div className="settings-panel__header">
         <div>
-          <span className="settings-panel__eyebrow">CHARLIE / PREFERENCES</span>
           <h2>Settings</h2>
-          <p>Runtime settings are saved to your .env file.</p>
+          <p>Runtime settings are saved to your .env file. Restart-required changes stay marked.</p>
         </div>
         <button type="button" aria-label="Close Settings" onClick={close}>Close</button>
       </div>
+      <SettingsSectionNav active={activeSection} onSelect={onSelectSection} />
       <div className="settings-panel__body">
-        <SettingsSection eyebrow="PRESENCE" title="How Charlie feels">
+        <SettingsSection id="settings-presence" title="Presence" hidden={activeSection !== "presence"}>
           <SettingToggle label="Reduced motion" description="Keep the orb and panel transitions still." checked={settings.reducedMotion} onChange={(value) => setSetting("reducedMotion", value)} />
           <SettingToggle label="Live captions" description="Show short transcript and response captions on the stage." checked={settings.captions} onChange={(value) => setSetting("captions", value)} />
           <SettingSelect label="Activity detail" description="Choose how much runtime work appears in the Activity drawer." value={settings.activityDensity} onChange={(value) => setSetting("activityDensity", value as FrontendSettings["activityDensity"])} options={[{ value: "focused", label: "Focused" }, { value: "expanded", label: "Expanded" }]} />
         </SettingsSection>
 
-        <SettingsSection eyebrow="VOICE" title="Speech and listening">
+        <SettingsSection id="settings-voice" title="Speech and listening" hidden={activeSection !== "voice"}>
           {voice?.enabled ? <>
             <SettingToggle label="Microphone" description="Control Charlie's native microphone input." checked={!voice.mic_muted} onChange={(value) => void onVoiceState("set_mic_state", !value)} />
             <SettingToggle label="Speech playback" description="Control Charlie's native speaker playback." checked={!voice.muted} onChange={(value) => void onVoiceState("set_audio_state", !value)} />
           </> : <p role="status">Native voice is unavailable.</p>}
         </SettingsSection>
 
-        <RuntimeSettingsEditor fields={runtimeSettings} onSave={onSaveSettings} />
+        <RuntimeSettingsEditor id="settings-runtime" hidden={activeSection !== "runtime"} fields={runtimeSettings} onSave={onSaveSettings} />
 
-        <SettingsSection eyebrow="PRIVACY" title="Local data">
-          <SettingToggle label="Keep local conversation history" description="Store the chat projection in this browser session." checked={settings.localHistory} onChange={(value) => setSetting("localHistory", value)} />
+        <SettingsSection id="settings-privacy" title="Session history" hidden={activeSection !== "privacy"}>
+          <p>Conversation, research, and activity history are kept with the active Charlie session and restored when this page reloads.</p>
         </SettingsSection>
 
-        <p className="settings-footnote">API keys remain hidden. Changes that need a restart stay marked until Charlie restarts.</p>
+        <p className="settings-footnote">API keys remain hidden.</p>
       </div>
     </dialog>
   );
 }
 
-function RuntimeSettingsEditor({ fields, onSave }: { fields: RuntimeSetting[] | undefined; onSave: (updates: Record<string, unknown>) => Promise<RuntimeSetting[]> }) {
+function RuntimeSettingsEditor({ id, hidden = false, fields, onSave }: { id: string; hidden?: boolean; fields: RuntimeSetting[] | undefined; onSave: (updates: Record<string, unknown>) => Promise<RuntimeSetting[]> }) {
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState<Record<string, string | boolean>>({});
   const [saving, setSaving] = useState(false);
@@ -616,16 +677,25 @@ function RuntimeSettingsEditor({ fields, onSave }: { fields: RuntimeSetting[] | 
       setNotice(error instanceof Error ? error.message : "Settings could not be saved.");
     } finally { setSaving(false); }
   }
-  return <section className="runtime-settings" aria-label="Runtime configuration">
+  return <section id={id} className="runtime-settings" aria-label="Runtime configuration" hidden={hidden}>
     <h3>Runtime configuration</h3>
     {fields ? <>
       <label className="runtime-settings-search">Find a setting<input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Model, voice, research…" /></label>
       {groups.map((group) => <details className="runtime-settings-group" key={group} open={search.trim() ? true : undefined}>
         <summary>{group}<span>{shown.filter((field) => field.group === group).length}</span></summary>
-        {shown.filter((field) => field.group === group).map((field) => <label className="runtime-setting" key={field.key}>
-          <span><strong>{field.label}</strong><small>{field.key}{field.pending ? " · Restart pending" : ""}</small></span>
-          {field.type === "bool" ? <input type="checkbox" checked={(draft[field.key] ?? displayValue(field)) === true} disabled={saving} onChange={(event) => setDraft((current) => ({ ...current, [field.key]: event.target.checked }))} /> : <input type={field.secret ? "password" : field.type === "int" || field.type === "float" ? "number" : "text"} step={field.type === "float" ? "any" : "1"} autoComplete="off" value={String(draft[field.key] ?? displayValue(field))} placeholder={field.secret ? field.isSet ? "Configured — enter to replace" : "Not configured" : undefined} disabled={saving} onChange={(event) => setDraft((current) => ({ ...current, [field.key]: event.target.value }))} />}
-        </label>)}
+        {shown.filter((field) => field.group === group).map((field) => field.type === "bool"
+          ? <SettingToggle
+            key={field.key}
+            label={field.label}
+            description={`${field.key}${field.pending ? " · Restart pending" : ""}`}
+            checked={(draft[field.key] ?? displayValue(field)) === true}
+            disabled={saving}
+            onChange={(value) => setDraft((current) => ({ ...current, [field.key]: value }))}
+          />
+          : <label className="runtime-setting" key={field.key}>
+            <span><strong>{field.label}</strong><small>{field.key}{field.pending ? " · Restart pending" : ""}</small></span>
+            <input type={field.secret ? "password" : field.type === "int" || field.type === "float" ? "number" : "text"} step={field.type === "float" ? "any" : "1"} autoComplete="off" value={String(draft[field.key] ?? displayValue(field))} placeholder={field.secret ? field.isSet ? "Configured — enter to replace" : "Not configured" : undefined} disabled={saving} onChange={(event) => setDraft((current) => ({ ...current, [field.key]: event.target.value }))} />
+          </label>)}
       </details>)}
       {!groups.length && <p>No matching settings.</p>}
       <div className="runtime-settings-save"><button type="button" disabled={saving || !Object.keys(changes).length} onClick={() => void save()}>{saving ? "Saving…" : "Save runtime settings"}</button><button type="button" disabled={saving || !Object.keys(changes).length} onClick={() => { setDraft({}); setNotice(""); }}>Discard edits</button></div>
@@ -634,12 +704,12 @@ function RuntimeSettingsEditor({ fields, onSave }: { fields: RuntimeSetting[] | 
   </section>;
 }
 
-function SettingsSection({ eyebrow, title, children }: { eyebrow: string; title: string; children: ReactNode }) {
-  return <section className="settings-section"><span className="settings-section__eyebrow">{eyebrow}</span><h3>{title}</h3><div>{children}</div></section>;
+function SettingsSection({ id, title, hidden = false, children }: { id: string; title: string; hidden?: boolean; children: ReactNode }) {
+  return <section id={id} className="settings-section" hidden={hidden}><h3>{title}</h3><div>{children}</div></section>;
 }
 
-function SettingToggle({ label, description, checked, onChange }: { label: string; description: string; checked: boolean; onChange: (value: boolean) => void }) {
-  return <label className="settings-toggle"><span><strong>{label}</strong><small>{description}</small></span><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><span className="settings-switch" aria-hidden="true" /></label>;
+function SettingToggle({ label, description, checked, disabled = false, onChange }: { label: string; description: string; checked: boolean; disabled?: boolean; onChange: (value: boolean) => void }) {
+  return <label className="settings-toggle"><span><strong>{label}</strong><small>{description}</small></span><input type="checkbox" role="switch" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} /><span className="settings-switch" aria-hidden="true" /></label>;
 }
 
 function SettingSelect({ label, description, value, onChange, options }: { label: string; description: string; value: string; onChange: (value: string) => void; options: Array<{ value: string; label: string }> }) {
@@ -648,22 +718,29 @@ function SettingSelect({ label, description, value, onChange, options }: { label
 
 function ChatBubbles({ bubbles }: { bubbles: ChatBubble[] }) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [faded, setFaded] = useState(false);
-  const latest = bubbles.at(-1);
-  useEffect(() => {
-    setFaded(false);
-    const timer = window.setTimeout(() => setFaded(true), 8000);
-    return () => window.clearTimeout(timer);
-  }, [latest?.id, latest?.text]);
   useEffect(() => { const node = scrollRef.current; if (node) node.scrollTop = node.scrollHeight; }, [bubbles]);
   if (!bubbles.length) return null;
   const rich = bubbles.slice(-2).some((bubble) => bubble.role === "charlie" && bubble.text.length > 900);
-  return <div ref={scrollRef} className={`chat-bubbles ${rich ? "is-rich" : ""} ${faded ? "is-faded" : ""}`} tabIndex={0} aria-label="Conversation history" aria-live="polite">
+  return <div ref={scrollRef} className={`chat-bubbles ${rich ? "is-rich" : ""}`} tabIndex={0} aria-label="Conversation history" aria-live="polite">
     {bubbles.map((bubble) => <div className={`chat-bubble chat-bubble--${bubble.role}`} key={bubble.id}>{bubble.text.split(/(https?:\/\/[^\s]+)/g).map((part, index) => /^https?:\/\//.test(part) ? <a key={index} href={part} target="_blank" rel="noreferrer">{part}</a> : part)}</div>)}
   </div>;
 }
 
-function ResearchPanel({ result, onClose }: { result: NonNullable<SceneSnapshot["researchResult"]>; onClose: () => void }) {
+function ResearchPanel({
+  result,
+  results,
+  selectedId,
+  onSelect,
+  onDismiss,
+  onClose,
+}: {
+  result: ResearchResultData;
+  results: ResearchResultData[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  onDismiss: (id: string) => void;
+  onClose: () => void;
+}) {
   const marker = result.text.lastIndexOf("\n\nSources:\n");
   const answer = result.answer || (marker >= 0 ? result.text.slice(0, marker) : result.text);
   // Coverage is rendered from the structured gap list below. Drop the legacy
@@ -725,6 +802,13 @@ function ResearchPanel({ result, onClose }: { result: NonNullable<SceneSnapshot[
         </div>
         <button type="button" onClick={onClose} aria-label="Close research answer">×</button>
       </header>
+      <ResearchTabs
+        results={results}
+        selectedId={selectedId}
+        onSelect={onSelect}
+        onDismiss={onDismiss}
+        placement="panel"
+      />
       <div className="research-body">
         {blocks}
         {result.gaps && result.gaps.length > 0 && (

@@ -11,6 +11,7 @@ import json
 import subprocess
 from unittest.mock import Mock
 
+import httpx
 import pytest
 
 
@@ -707,7 +708,9 @@ class TestNormalRoundTrips:
         calls = {"llm": 0, "research": 0}
         report = _structured_research_report("explicit research")
         published = []
-        final_answer = "Final synthesized answer from explicit research."
+        final_answer = "Final synthesized answer from explicit research. [S1]"
+        report.sources[0].content = final_answer.replace(" [S1]", "")
+        report.evidence = [EvidenceItem("S1", final_answer.replace(" [S1]", ""))]
 
         def mock_stream(*args, **kwargs):
             calls["llm"] += 1
@@ -729,10 +732,11 @@ class TestNormalRoundTrips:
         result = await _collect(brain, "explicitly research this", skip_pre_search=True, session_id="session-explicit")
 
         assert final_answer in result
+        assert "[S1]" in result
         assert calls["research"] == 1
         assert len(published) == 1
         assert published[0][0] is report
-        assert published[0][0].answer == final_answer
+        assert published[0][0].answer == result
         assert published[0][1] == "session-explicit"
         assert published[0][2]
 
@@ -768,6 +772,8 @@ class TestNormalRoundTrips:
     async def test_automatic_pre_search_publishes_one_report_after_final_answer(self, monkeypatch, brain_config):
         brain = Brain(brain_config)
         report = _structured_research_report("fresh web question")
+        report.sources[0].content = "Final answer grounded in fresh evidence."
+        report.evidence = [EvidenceItem("S1", "Final answer grounded in fresh evidence.")]
         research_calls = []
         prompt_payloads = []
         published = []
@@ -778,7 +784,7 @@ class TestNormalRoundTrips:
 
         async def final_completion(payload, generation):
             prompt_payloads.append(payload)
-            return "Final answer grounded in fresh evidence.", []
+            return "Final answer grounded in fresh evidence. [S1]", []
 
         monkeypatch.setattr(brain, "_run_research", run_research)
         monkeypatch.setattr(brain, "_stream_completion", final_completion)
@@ -794,7 +800,40 @@ class TestNormalRoundTrips:
         assert "UNTRUSTED SOURCE CONTENT" in json.dumps(prompt_payloads[0])
         assert len(published) == 1
         assert published[0][0] is report
-        assert report.answer == "Final answer grounded in fresh evidence."
+        assert report.answer == result
+        assert "[S1]" in report.answer
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure", ["http_429", "empty"])
+    async def test_automatic_research_returns_grounded_fallback_when_synthesis_unavailable(
+        self, monkeypatch, brain_config, failure
+    ):
+        brain = Brain(brain_config)
+        report = _structured_research_report("fresh web question")
+        report.sources[0].content = "Grounded explicit evidence."
+        report.evidence = [EvidenceItem("S1", "Grounded explicit evidence.")]
+        published = []
+
+        async def run_research(query, session_id):
+            return report
+
+        async def unavailable_completion(payload, generation):
+            if failure == "http_429":
+                request = httpx.Request("POST", "https://api.kilo.ai/api/gateway/chat/completions")
+                response = httpx.Response(429, request=request)
+                raise httpx.HTTPStatusError("429 Too Many Requests", request=request, response=response)
+            return "", []
+
+        monkeypatch.setattr(brain, "_run_research", run_research)
+        monkeypatch.setattr(brain, "_stream_completion", unavailable_completion)
+        brain.on_research_result = lambda item, *, session_id, task_id=None: published.append(item)
+
+        result = await _collect(brain, "fresh web question")
+
+        assert "Grounded explicit evidence." in result
+        assert "[S1]" in result
+        assert report.answer == result
+        assert published == [report]
 
     @pytest.mark.asyncio
     async def test_insufficient_research_cannot_be_replaced_by_model_prior(self, monkeypatch, brain_config):

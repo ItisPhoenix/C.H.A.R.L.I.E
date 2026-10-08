@@ -148,7 +148,7 @@ def test_single_source_with_forty_evidence_items_is_not_high_confidence():
 
 @pytest.mark.asyncio
 async def test_engine_run_with_one_surviving_source_reports_low_confidence(monkeypatch):
-    results = [SearchResult("Only page", "https://example.com/report")]
+    results = [SearchResult(QUERY, "https://example.com/report", snippet=QUERY)]
     report = await _run(monkeypatch, results, {"example.com": VERBOSE_BODY})
 
     assert report.evidence, "sanity: the page should still produce evidence"
@@ -214,7 +214,7 @@ def test_confidence_increases_monotonically_with_independent_domains():
 @pytest.mark.asyncio
 async def test_engine_run_with_three_domains_beats_one_domain(monkeypatch):
     bodies = {domain: VERBOSE_BODY for domain in ("one.example", "two.example", "three.example")}
-    results = [SearchResult("Page", f"https://{domain}/report") for domain in bodies]
+    results = [SearchResult(QUERY, f"https://{domain}/report", snippet=QUERY) for domain in bodies]
 
     report = await _run(monkeypatch, results, bodies)
 
@@ -257,7 +257,7 @@ def test_report_confidence_defaults_to_none():
 
 @pytest.mark.asyncio
 async def test_engine_run_without_grounded_evidence_leaves_confidence_none(monkeypatch):
-    results = [SearchResult("Junk", "https://junk.example/report")]
+    results = [SearchResult(QUERY, "https://junk.example/report", snippet=QUERY)]
     report = await _run(
         monkeypatch,
         results,
@@ -370,7 +370,7 @@ async def test_engine_run_drops_junk_from_delivered_evidence(monkeypatch):
             "The quantum battery capacity reached 120 Wh per kilogram in the trial.\n"
         )
     }
-    results = [SearchResult("Page", "https://example.com/report")]
+    results = [SearchResult(QUERY, "https://example.com/report", snippet=QUERY)]
 
     report = await _run(monkeypatch, results, bodies)
 

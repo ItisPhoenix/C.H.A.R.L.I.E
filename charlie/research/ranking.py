@@ -22,10 +22,12 @@ _STOPWORDS = {
     "about", "and", "are", "for", "from", "how", "is", "it", "its", "the", "this", "to",
     "use", "used", "what", "when", "where", "which", "with", "briefing", "daily", "intelligence",
     "best", "latest", "stable", "current", "official", "source", "sources", "using", "give", "tell",
-    "version", "versions", "release", "releases", "date", "dates", "two", "three", "sentences",
+    "version", "versions", "release", "releases", "date", "dates", "today", "two", "three", "sentences",
     "under", "below", "within", "less", "than", "india", "inr", "rupees", "price", "prices",
 }
 _IDENTIFIER_RE = re.compile(r"\b[a-z]{2,}-\d+[a-z0-9-]*\b", re.I)
+_LLM_QUERY_RE = re.compile(r"\b(?:llms?|large\s+language\s+models?)\b", re.I)
+_LLM_ABBREVIATIONS = {"llm", "weights", "weight"}
 
 _SOURCE_WEIGHTS = {
     SourceClass.OFFICIAL: 0.35,
@@ -53,10 +55,19 @@ def search_result_matches_query(query: str, result: SearchResult) -> bool:
     release and product searches.
     """
     terms = _tokens(query) - _STOPWORDS
-    content = _tokens(f"{result.title} {result.snippet} {result.domain}")
+    content_text = f"{result.title} {result.snippet} {result.domain}"
+    content = _tokens(content_text)
     if not terms:
         return True
+    # Category words alone let dictionary and language-reference pages into LLM searches.
+    if _LLM_QUERY_RE.search(query) and not (
+        content & _LLM_ABBREVIATIONS
+        or re.search(r"\blarge\s+language\s+models?\b", content_text, re.I)
+    ):
+        return False
     required_overlap = 1 if len(terms) <= 3 else 2
+    if _LLM_QUERY_RE.search(query):
+        required_overlap = 1
     return len(terms & content) >= required_overlap
 
 
@@ -103,8 +114,9 @@ def _score(query: str, result: SearchResult) -> float:
 
 def rank_search_results(results: Iterable[SearchResult], plan: ResearchPlan, limit: int) -> List[SearchResult]:
     best: dict[str, SearchResult] = {}
+    queries = [item.text for item in plan.queries] or [plan.goal]
     for result in results:
-        if not search_result_matches_query(plan.goal, result):
+        if not any(search_result_matches_query(query, result) for query in queries):
             continue
         key = canonicalize_url(result.url)
         if key not in best or _score(plan.goal, result) > _score(plan.goal, best[key]):
@@ -140,19 +152,8 @@ def _document_score(document: SourceDocument) -> float:
 
 
 def _normalise_semantic(scores: dict) -> dict:
-    """Map raw cosine similarities onto [0, 1].
-
-    Embedding backends cluster most related pairs above ~0.5, so a raw cosine
-    of 0.55 is already a good match and must not be discarded as "no overlap".
-    """
-    if not scores:
-        return {}
-    low = min(scores.values())
-    high = max(scores.values())
-    if high - low < 1e-6:
-        return {key: 1.0 for key in scores}
-    span = high - low
-    return {key: (value - low) / span for key, value in scores.items()}
+    """Map cosine similarity itself onto [0, 1], independent of batch peers."""
+    return {key: max(0.0, min(1.0, (value + 1.0) / 2.0)) for key, value in scores.items()}
 
 
 def _token_relevance(query_tokens: set, document: SourceDocument) -> float:
@@ -191,7 +192,11 @@ async def rank_documents(
         # Take whichever signal is more generous. Token overlap cannot detect a
         # shared topic with different vocabulary, and cosine cannot detect an
         # exact rare-token match, so the stronger evidence wins per document.
-        semantic_score = semantic_scores.get(document.source_id)
+        semantic_score = semantic_scores.get(document.document_id)
+        if semantic_score is None:
+            semantic_score = semantic_scores.get(document.source_id)
+        if semantic_score is None:
+            semantic_score = semantic_scores.get(document.canonical_url or document.url)
         document.relevance_score = (
             max(overlap, semantic_score) if semantic_score is not None else overlap
         )

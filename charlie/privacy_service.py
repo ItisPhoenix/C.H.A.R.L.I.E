@@ -416,6 +416,7 @@ class PrivacyService:
             "messages_purged": int(result.get("messages_purged", 0)),
             "sessions_purged": int(result.get("sessions_purged", 0)),
             "tool_events_purged": int(result.get("tool_events_purged", 0)),
+            "dashboard_events_purged": int(result.get("dashboard_events_purged", 0)),
             "older_than_days": older_than_days,
         }
 

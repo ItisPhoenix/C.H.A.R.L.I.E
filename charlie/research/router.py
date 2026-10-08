@@ -43,6 +43,16 @@ _SUSTAINED_RESEARCH_SIGNALS = re.compile(
     r"multi[- ]source|multi[- ]step|look\s+into|analyze\s+current|comparison|compare)\b",
     re.IGNORECASE,
 )
+_LLM_RELEASE_COMPARISON = re.compile(
+    r"\b(?:llms?|large\s+language\s+models?)\b"
+    r"(?s:.{0,160})\b(?:latest|current|release|released|announcement)\b",
+    re.IGNORECASE,
+)
+_BROAD_RESEARCH_SUBJECTS = re.compile(r"\b(?:of|from|across)\s+([^?.;]+)", re.IGNORECASE)
+_BROAD_RESEARCH_DIMENSIONS = re.compile(
+    r"\b(?:architecture|architectures|advantages?|benefits?|limitations?|features?|design|performance)\b",
+    re.IGNORECASE,
+)
 _BACKGROUND_TASK_REQUEST = re.compile(
     r"\b(?:start|create|run|schedule)\s+(?:a\s+)?background\s+(?:task|job)\b",
     re.IGNORECASE,
@@ -143,7 +153,25 @@ def route(query: str, requested: str | ResearchMode | None = None) -> ResearchDe
 
 
 def is_sustained_research_query(query: str, decision: ResearchDecision | None = None) -> bool:
-    """Return whether explicit wording asks for an independent research task."""
+    """Return whether wording or scope requires an independent research task."""
     if decision is not None and not decision.should_research:
         return False
-    return bool(_SUSTAINED_RESEARCH_SIGNALS.search(query.strip()))
+    text = query.strip()
+    if _SUSTAINED_RESEARCH_SIGNALS.search(text):
+        return True
+    if (
+        _LLM_RELEASE_COMPARISON.search(text)
+        and re.search(r"\bopen[- ](?:source|weight)\b", text, re.I)
+        and re.search(r"\b(?:close|closed)[- ]source\b|\bproprietary\b", text, re.I)
+    ):
+        return True
+    subject_list = _BROAD_RESEARCH_SUBJECTS.search(text)
+    if subject_list is None:
+        return False
+    subjects = [
+        part.strip()
+        for part in re.split(r"\s*,\s*|\s+and\s+|\s+or\s+", subject_list.group(1), flags=re.I)
+        if part.strip()
+    ]
+    dimensions = set(match.casefold() for match in _BROAD_RESEARCH_DIMENSIONS.findall(text))
+    return len(subjects) >= 3 and len(dimensions) >= 2

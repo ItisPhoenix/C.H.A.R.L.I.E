@@ -85,6 +85,14 @@ class _MockProvider:
     name = "mock"
 
     async def search(self, query, *, limit, domain_filters=None):
+        if "keyboard" in query.casefold():
+            return [
+                SearchResult(
+                    title="Mechanical keyboard overview",
+                    url="https://store.example.com/story1",
+                    snippet="Mechanical keyboard price and specifications.",
+                )
+            ]
         return [
             SearchResult(
                 title="Global News August 19",
@@ -170,6 +178,6 @@ async def test_optional_product_enrichment_failure_does_not_fail_research_engine
     report = await engine.run("buy mechanical keyboard under $100", "standard")
     # Must still succeed and return report with sources and citations
     assert report.successful
-    assert report.stop_reason == "evidence-sufficient"
+    assert report.stop_reason == "partial-evidence"
     assert len(report.sources) == 1
     assert report.products == []

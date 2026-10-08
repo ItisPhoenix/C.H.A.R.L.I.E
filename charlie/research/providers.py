@@ -107,6 +107,17 @@ def _domain(url: str) -> str:
     return urlparse(url).netloc.lower()
 
 
+def _matches_domain_filters(url: str, domain_filters: Optional[List[str]]) -> bool:
+    if not domain_filters:
+        return True
+    host = (urlparse(url).hostname or "").casefold().rstrip(".")
+    return any(
+        host == domain.casefold().rstrip(".")
+        or host.endswith("." + domain.casefold().rstrip("."))
+        for domain in domain_filters
+    )
+
+
 _QUERY_LEADING_NOISE_RE = re.compile(
     r"^\s*(?:research|search|find|look\s+into|tell\s+me\s+about)\s+",
     re.IGNORECASE,
@@ -650,6 +661,7 @@ async def search_with_fallback(
     *,
     limit: int,
     domain_filters: Optional[List[str]] = None,
+    outcomes: Optional[List[dict[str, object]]] = None,
 ) -> List[SearchResult]:
     """Query every provider concurrently and merge the union of their hits.
 
@@ -661,37 +673,49 @@ async def search_with_fallback(
     if not providers:
         return []
 
-    async def run(provider: SearchProvider) -> Tuple[str, List[SearchResult]]:
+    async def run(provider: SearchProvider) -> Tuple[str, List[SearchResult], Optional[str]]:
         try:
             hits = await provider.search(query, limit=limit, domain_filters=domain_filters)
-        except Exception:
+            hits = [hit for hit in hits if _matches_domain_filters(hit.url, domain_filters)]
+        except Exception as exc:
             logger.warning("Research provider %s failed for %r", provider.name, query, exc_info=True)
-            return provider.name, []
-        return provider.name, hits
+            return provider.name, [], type(exc).__name__
+        return provider.name, hits, None
 
-    outcomes = await asyncio.gather(*(run(p) for p in providers))
+    provider_results = await asyncio.gather(*(run(p) for p in providers))
+
+    if outcomes is not None:
+        for name, hits, error in provider_results:
+            outcomes.append({
+                "provider": name,
+                "status": "failed" if error else ("ok" if hits else "empty"),
+                "result_count": len(hits),
+                "error_class": error,
+            })
 
     merged: List[SearchResult] = []
     seen: set = set()
-    for name, hits in outcomes:
-        if not hits:
-            continue
-        added = 0
-        for hit in hits:
-            key = _dedupe_key(hit)
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            merged.append(hit)
-            added += 1
-        logger.debug(
-            "Research provider %s contributed %d unique result(s) for %r",
-            name,
-            added,
-            query,
-        )
+    contribution_counts = {name: 0 for name, _hits, _error in provider_results}
+    positions = [0] * len(provider_results)
+    while len(merged) < limit:
+        added_any = False
+        for index, (name, hits, _error) in enumerate(provider_results):
+            while positions[index] < len(hits):
+                hit = hits[positions[index]]
+                positions[index] += 1
+                key = _dedupe_key(hit)
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                merged.append(hit)
+                contribution_counts[name] += 1
+                added_any = True
+                break
+            if len(merged) >= limit:
+                break
+        if not added_any:
+            break
 
-    # Preserve provider priority: SearXNG-first ordering wins on rank ties.
-    priority = {p.name: i for i, p in enumerate(providers)}
-    merged.sort(key=lambda r: (priority.get(r.provider, len(priority)),))
+    for name, count in contribution_counts.items():
+        logger.debug("Research provider %s contributed %d unique result(s) for %r", name, count, query)
     return merged[:limit]

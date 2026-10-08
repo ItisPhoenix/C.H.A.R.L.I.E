@@ -51,18 +51,34 @@ class _StubSocket:
             raise socket.gaierror(f"stub has no mapping for {host!r}") from exc
 
 
-class _RedirectingClient:
-    """httpx.AsyncClient stand-in that reports an already-followed redirect."""
+def _fake_curl(monkeypatch, responses, peers=None):
+    requested = []
+    sessions = []
+    peers = peers or {}
 
-    def __init__(self, final_url: str, text: str, status_code: int = 200) -> None:
-        self.final_url = final_url
-        self.text = text
-        self.status_code = status_code
-        self.requested: list[str] = []
+    class FakeSession:
+        def __init__(self, **options):
+            sessions.append(options)
 
-    async def get(self, url, **_kwargs):
-        self.requested.append(url)
-        return SimpleNamespace(status_code=self.status_code, text=self.text, url=self.final_url)
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, **_kwargs):
+            requested.append(url)
+            status, body, headers = responses[url]
+            return SimpleNamespace(
+                status_code=status,
+                text=body,
+                url=url,
+                headers=headers,
+                primary_ip=peers.get(url, "93.184.216.34"),
+            )
+
+    monkeypatch.setattr(fetch_module, "_CurlAsyncSession", FakeSession)
+    return requested, sessions
 
 
 def _stub_dns(monkeypatch, mapping, *, delay_s: float = 0.0) -> _StubSocket:
@@ -142,13 +158,16 @@ def test_fetch_document_refuses_redirect_to_loopback_target(monkeypatch):
             "127.0.0.1": ["127.0.0.1"],
         },
     )
-    client = _RedirectingClient("http://127.0.0.1:8080/admin", _page("Internal admin"))
+    requested, _sessions = _fake_curl(
+        monkeypatch,
+        {"https://public.example.com/start": (302, "", {"location": "http://127.0.0.1:8080/admin"})},
+    )
 
     result = SearchResult(title="Public", url="https://public.example.com/start", provider="search")
-    document = asyncio.run(fetch_document(result, client=client))
+    document = asyncio.run(fetch_document(result))
 
     assert document is None, "redirect to a loopback target produced a source document"
-    assert client.requested == ["https://public.example.com/start"]
+    assert requested == ["https://public.example.com/start"]
 
 
 def test_fetch_document_refuses_redirect_to_private_network_target(monkeypatch):
@@ -156,22 +175,42 @@ def test_fetch_document_refuses_redirect_to_private_network_target(monkeypatch):
         monkeypatch,
         {"public.example.com": ["93.184.216.34"], "internal.example.com": ["10.1.2.3"]},
     )
-    client = _RedirectingClient("http://internal.example.com/secrets", _page("Secrets"))
+    requested, _sessions = _fake_curl(
+        monkeypatch,
+        {"https://public.example.com/start": (302, "", {"location": "http://internal.example.com/secrets"})},
+    )
 
     result = SearchResult(title="Public", url="https://public.example.com/start", provider="search")
-    document = asyncio.run(fetch_document(result, client=client))
+    document = asyncio.run(fetch_document(result))
 
     assert document is None
+    assert requested == ["https://public.example.com/start"]
+
+
+def test_fetch_document_rejects_ipv6_private_targets_before_transport(monkeypatch):
+    requested, sessions = _fake_curl(monkeypatch, {})
+
+    document = asyncio.run(
+        fetch_document(SearchResult("Private IPv6", "http://[fd00::1]/admin"))
+    )
+
+    assert document is None
+    assert requested == []
+    assert sessions == []
 
 
 def test_fetch_document_refuses_redirect_to_non_http_scheme(monkeypatch):
     _stub_dns(monkeypatch, {"public.example.com": ["93.184.216.34"]})
-    client = _RedirectingClient("file:///etc/passwd", _page("Local file"))
+    requested, _sessions = _fake_curl(
+        monkeypatch,
+        {"https://public.example.com/start": (302, "", {"location": "file:///etc/passwd"})},
+    )
 
     result = SearchResult(title="Public", url="https://public.example.com/start", provider="search")
-    document = asyncio.run(fetch_document(result, client=client))
+    document = asyncio.run(fetch_document(result))
 
     assert document is None
+    assert requested == ["https://public.example.com/start"]
 
 
 def test_fetch_document_allows_redirect_that_stays_public(monkeypatch):
@@ -180,38 +219,170 @@ def test_fetch_document_allows_redirect_that_stays_public(monkeypatch):
         monkeypatch,
         {"public.example.com": ["93.184.216.34"], "mirror.example.org": ["93.184.216.35"]},
     )
-    client = _RedirectingClient("https://mirror.example.org/article", _page("Mirrored"))
+    requested, _sessions = _fake_curl(
+        monkeypatch,
+        {
+            "https://public.example.com/start": (302, "", {"location": "https://mirror.example.org/article"}),
+            "https://mirror.example.org/article": (200, _page("Mirrored"), {}),
+        },
+        peers={"https://mirror.example.org/article": "93.184.216.35"},
+    )
 
     result = SearchResult(title="Public", url="https://public.example.com/start", provider="search")
-    document = asyncio.run(fetch_document(result, client=client))
+    document = asyncio.run(fetch_document(result))
 
     assert document is not None
     assert document.url == "https://mirror.example.org/article"
+    assert requested == ["https://public.example.com/start", "https://mirror.example.org/article"]
 
 
-def test_fetch_bounds_redirect_hops_on_the_http_client(monkeypatch):
-    """follow_redirects must be paired with an explicit max_redirects bound."""
+@pytest.mark.asyncio
+async def test_fetch_pins_validated_ip_and_checks_redirect_before_connecting(monkeypatch):
+    from curl_cffi import CurlOpt
+
+    _stub_dns(
+        monkeypatch,
+        {"public.example.com": ["93.184.216.34"], "127.0.0.1": ["127.0.0.1"]},
+    )
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:8888")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8888")
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:8888")
+    sessions = []
+    requested = []
+
+    class FakeSession:
+        def __init__(self, **options):
+            sessions.append(options)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, **_kwargs):
+            requested.append(url)
+            return SimpleNamespace(
+                status_code=302,
+                text=_page("Public source"),
+                url=url,
+                headers={"location": "http://127.0.0.1:8080/admin"},
+                primary_ip="93.184.216.34",
+            )
+
+    monkeypatch.setattr(fetch_module, "_CurlAsyncSession", FakeSession)
+    result = SearchResult(title="Public", url="https://public.example.com/start", provider="search")
+
+    document = await fetch_document(result)
+
+    assert document is None
+    assert requested == ["https://public.example.com/start"]
+    assert sessions[0]["trust_env"] is False
+    assert "proxies" not in sessions[0]
+    assert sessions[0]["allow_redirects"] is False
+    assert sessions[0]["curl_options"][CurlOpt.RESOLVE] == ["public.example.com:443:93.184.216.34"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_dns_rebinding_uses_only_the_validated_public_address(monkeypatch):
+    from curl_cffi import CurlOpt
+
+    resolved = []
+    sessions = []
+
+    class RebindingSocket:
+        SOCK_STREAM = socket.SOCK_STREAM
+        gaierror = socket.gaierror
+
+        def getaddrinfo(self, host, port, type=0):  # noqa: A002 - mirrors socket API
+            resolved.append(host)
+            address = "93.184.216.34" if len(resolved) == 1 else "10.0.0.1"
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port or 0))]
+
+    class FakeSession:
+        def __init__(self, **options):
+            sessions.append(options)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, **_kwargs):
+            return SimpleNamespace(
+                status_code=200,
+                text=_page("Pinned public source"),
+                url=url,
+                headers={},
+                primary_ip="93.184.216.34",
+            )
+
+    monkeypatch.setattr(fetch_module, "socket", RebindingSocket())
+    monkeypatch.setattr(fetch_module, "_CurlAsyncSession", FakeSession)
+    result = SearchResult("Public", "https://rebind.example/article", provider="search")
+
+    document = await fetch_document(result)
+
+    assert document is not None
+    assert resolved == ["rebind.example"]
+    assert sessions[0]["curl_options"][CurlOpt.RESOLVE] == ["rebind.example:443:93.184.216.34"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_redirect_loop_stops_at_the_hop_limit(monkeypatch):
+    _stub_dns(monkeypatch, {"public.example.com": ["93.184.216.34"]})
+    url = "https://public.example.com/loop"
+    requested, sessions = _fake_curl(
+        monkeypatch,
+        {url: (302, "", {"location": url})},
+        peers={url: "93.184.216.34"},
+    )
+
+    document = await fetch_document(SearchResult("Loop", url, provider="search"))
+
+    assert document is None
+    assert len(requested) == fetch_module._MAX_REDIRECTS + 1
+    assert len(sessions) == fetch_module._MAX_REDIRECTS + 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_rejects_unexpected_connected_peer(monkeypatch):
+    _stub_dns(monkeypatch, {"public.example.com": ["93.184.216.34"]})
+
+    class FakeSession:
+        def __init__(self, **_options):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, **_kwargs):
+            return SimpleNamespace(
+                status_code=200, text=_page(), url=url, headers={}, primary_ip="10.0.0.1"
+            )
+
+    monkeypatch.setattr(fetch_module, "_CurlAsyncSession", FakeSession)
+    result = SearchResult(title="Public", url="https://public.example.com/start", provider="search")
+
+    assert await fetch_document(result) is None
+
+
+def test_fetch_fails_closed_when_pinned_transport_is_unavailable(monkeypatch):
+    """Research must not use an ordinary client when the pinned transport is absent."""
     monkeypatch.setattr(fetch_module, "CURL_CFFI_AVAILABLE", False)
-    seen: dict[str, object] = {}
-    real_client = httpx.AsyncClient
+    _stub_dns(monkeypatch, {"public.example.com": ["93.184.216.34"]})
+    monkeypatch.setattr(
+        fetch_module,
+        "_CurlAsyncSession",
+        lambda **_kwargs: pytest.fail("unsafe transport fallback was attempted"),
+    )
+    result = SearchResult(title="Public", url="https://public.example.com/page", provider="search")
 
-    class RecordingClient(real_client):
-        def __init__(self, **kwargs):
-            seen.update(kwargs)
-            super().__init__(**kwargs)
-
-    monkeypatch.setattr(fetch_module.httpx, "AsyncClient", RecordingClient)
-
-    async def _drive():
-        await fetch_module._get_browser_shaped("https://example.invalid/", timeout_s=5.0)
-
-    # .invalid never resolves, so this fails at connect time without network I/O.
-    with pytest.raises(Exception):
-        asyncio.run(_drive())
-
-    assert seen.get("follow_redirects") is True
-    assert seen.get("max_redirects") == fetch_module._MAX_REDIRECTS
-    assert 1 <= fetch_module._MAX_REDIRECTS <= 10
+    assert asyncio.run(fetch_document(result)) is None
 
 
 def test_async_url_validation_does_not_block_the_event_loop(monkeypatch):

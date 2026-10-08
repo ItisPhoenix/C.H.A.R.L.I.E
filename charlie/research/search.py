@@ -16,14 +16,17 @@ from charlie.research.models import (
 )
 from charlie.research.providers import SearchProvider, search_with_fallback
 from charlie.research.shopping import is_shopping_query
-from charlie.research.sources import OFFICIAL_REGISTRY, get_official_domains, resolve_brand
+from charlie.research.sources import get_official_domains, resolve_brand
 
 _INSTRUCTION_RE = re.compile(
     r"\b(?:do\s+a\s+web\s+search|search\s+the\s+web|please|could\s+you|can\s+you|"
     r"tell\s+me|show\s+me|find\s+me|i\s+want\s+to\s+know|right\s+now|currently)\b",
     re.IGNORECASE,
 )
-_FORMAT_RE = re.compile(r"\b(?:be\s+short|under\s+\d+\s+words?|in\s+\d+\s+words?|in\s+\d+\s+sentences?)\b", re.IGNORECASE)
+_FORMAT_RE = re.compile(
+    r"\b(?:be\s+short|under\s+\d+\s+words?|in\s+\d+\s+words?|in\s+\d+\s+sentences?)\b",
+    re.IGNORECASE,
+)
 _QUOTED_RE = re.compile(r'"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’|(?<!\w)\'[^\'\n]*\'')
 _ASSISTANT_PREFIX_RE = re.compile(r"^\s*(?:hey\s+)?charlie(?:\s*[,!:—-]\s*|\s+)", re.IGNORECASE)
 _RESEARCH_PREFIX_RE = re.compile(r"^(?:research|investigate|look\s+into)\s+", re.IGNORECASE)
@@ -86,6 +89,9 @@ def clean_query(query: str) -> str:
     cleaned = re.sub(r"[?!.,;:]+$", "", cleaned).strip()
     cleaned = re.sub(r"[?!.,;:]+$", "", cleaned).strip()
     cleaned = _SPACE_RE.sub(" ", cleaned)
+    if re.search(r"\bllms?\b", cleaned, re.I):
+        cleaned = re.sub(r"\bclose\s+source\b", "closed-source", cleaned, count=1, flags=re.I)
+        cleaned = re.sub(r"\bopen\s+source\b", "open-source", cleaned, count=1, flags=re.I)
     return _restore_quoted_phrases(cleaned or query.strip(), phrases)
 
 
@@ -98,9 +104,14 @@ def parse_brief(query: str) -> ResearchBrief:
     """Parse user query into structured requirements (ResearchBrief)."""
     cleaned = clean_query(query)
     lower = query.lower()
+    specific_release = re.search(
+        r"\b(?:on\s+what\s+date|what\s+date|when)\s+(?:was|did)\s+(.+?)\s+(\d+(?:\.\d+){1,2})\s+released\b",
+        query,
+        re.I,
+    )
 
     # 1. Entity kind
-    if re.search(r"\b(?:releases?|versions?|latest\s+stable)\b", lower):
+    if specific_release or re.search(r"\b(?:releases?|released|versions?|latest\s+stable)\b", lower):
         entity_kind = "release"
     elif is_shopping_query(query) or any(k in lower for k in ["laptop", "phone", "galaxy", "pixel", "macbook"]):
         entity_kind = "product"
@@ -109,7 +120,10 @@ def parse_brief(query: str) -> ResearchBrief:
 
     # 2. Option count
     option_count = None
-    count_m = re.search(r"\b(?:compare\s+)?(\d+|two|three|four|five)\s+(?:options?|products?|models?|alternatives?)\b", lower)
+    count_m = re.search(
+        r"\b(?:compare\s+)?(\d+|two|three|four|five)\s+(?:options?|products?|models?|alternatives?)\b",
+        lower,
+    )
     if count_m:
         val = count_m.group(1)
         word_map = {"two": 2, "three": 3, "four": 4, "five": 5}
@@ -129,10 +143,18 @@ def parse_brief(query: str) -> ResearchBrief:
         currency = "INR"
 
     # 4. Market
-    market = "IN" if ("india" in lower or "₹" in query or "rupee" in lower or "inr" in lower or "lakh" in lower) else None
+    market = (
+        "IN"
+        if ("india" in lower or "₹" in query or "rupee" in lower or "inr" in lower or "lakh" in lower)
+        else None
+    )
 
     # 5. Source policy
-    if "official sources" in lower or "official source" in lower or "official manufacturer" in lower:
+    if (
+        re.search(r"\bofficial\b.{0,40}\b(?:sources?|documentation|docs|manufacturer)\b", lower)
+        or "official sources" in lower
+        or "official source" in lower
+    ):
         source_policy = "official_required"
     elif "official" in lower:
         source_policy = "official_preferred"
@@ -159,6 +181,9 @@ def parse_brief(query: str) -> ResearchBrief:
             aspects = ["price", "specifications"]
             priority = ["price"]
     topic = cleaned
+    requested_version = specific_release.group(2) if specific_release else None
+    if specific_release:
+        topic = f"{specific_release.group(1).strip()} {requested_version}"
     if entity_kind == "release":
         aspects = ["version", "release_date"]
         priority = ["version", "release_date"]
@@ -179,6 +204,7 @@ def parse_brief(query: str) -> ResearchBrief:
         priority=priority,
         stable_only=stable_only,
         explicit_domains=exp_domains,
+        requested_version=requested_version,
     )
 
 
@@ -212,9 +238,18 @@ def discovery_queries(brief: ResearchBrief) -> List[str]:
             queries.append("python.org Python downloads release")
         else:
             queries.append(f"{topic} official release notes")
+            if "llm" in lower and "closed-source" in lower and "open-source" in lower:
+                queries.append("latest closed-source proprietary LLM model release announcement")
+                queries.append("latest open-source LLM open-weight model release announcement")
 
     # Deduplicate while preserving order
     return list(dict.fromkeys(q.strip() for q in queries if q.strip()))
+
+
+def is_llm_release_brief(brief: ResearchBrief) -> bool:
+    return brief.entity_kind == "release" and bool(
+        re.search(r"\b(?:llms?|large\s+language\s+models?)\b", brief.topic, re.I)
+    )
 
 
 def verification_queries(candidate: Candidate, brief: ResearchBrief) -> List[str]:
@@ -222,6 +257,22 @@ def verification_queries(candidate: Candidate, brief: ResearchBrief) -> List[str
     cand_name = candidate.name
     brand = candidate.brand or resolve_brand(cand_name)
     official_domains = get_official_domains(brand) if brand else []
+
+    if is_llm_release_brief(brief):
+        subject = cand_name if brand and cand_name.casefold().startswith(brand.casefold()) else " ".join(
+            part for part in (brand, cand_name) if part
+        )
+        queries = [
+            f"{subject} official model release announcement",
+            f"{subject} official release date",
+        ]
+        if candidate.release_date:
+            queries.append(f"{subject} release {candidate.release_date}")
+        queries.extend(
+            f"{subject} release announcement site:{domain}"
+            for domain in official_domains
+        )
+        return list(dict.fromkeys(q.strip() for q in queries if q.strip()))
 
     queries: List[str] = []
     # A bare exact-name query is the stable bridge to general web indexes.
@@ -294,7 +345,9 @@ def build_plan(
                         f"{cleaned} official specifications"
                         if re.search(r"\bofficial\s+sources?\b", query, re.I)
                         else f"{cleaned} reviews",
-                        "product specifications" if re.search(r"\bofficial\s+sources?\b", query, re.I) else "independent reviews",
+                        "product specifications"
+                        if re.search(r"\bofficial\s+sources?\b", query, re.I)
+                        else "independent reviews",
                     ),
                 ]
             )
@@ -337,6 +390,7 @@ async def search_plan(
     limit: int,
     max_concurrency: int,
     progress: Optional[Callable[[int, int], None]] = None,
+    provider_outcomes: Optional[List[dict[str, object]]] = None,
 ) -> List[SearchResult]:
     semaphore = asyncio.Semaphore(max(1, max_concurrency))
     completed = 0
@@ -345,7 +399,11 @@ async def search_plan(
         nonlocal completed
         async with semaphore:
             result = await search_with_fallback(
-                providers, item.text, limit=limit, domain_filters=item.domain_filters
+                providers,
+                item.text,
+                limit=limit,
+                domain_filters=item.domain_filters,
+                outcomes=provider_outcomes,
             )
         completed += 1
         if progress:
@@ -355,10 +413,15 @@ async def search_plan(
     groups = await asyncio.gather(*(run(item) for item in plan.queries))
     merged: List[SearchResult] = []
     seen = set()
-    for group in groups:
-        for result in group:
+    for offset in range(max((len(group) for group in groups), default=0)):
+        for group in groups:
+            if offset >= len(group):
+                continue
+            result = group[offset]
             key = result.canonical_url.casefold()
             if key and key not in seen:
                 merged.append(result)
                 seen.add(key)
+                if len(merged) >= limit:
+                    return merged
     return merged

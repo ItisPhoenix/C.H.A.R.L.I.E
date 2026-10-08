@@ -39,6 +39,68 @@ class FakeEventBus:
         return self.submitted
 
 
+def test_dashboard_research_history_keeps_both_results_and_bounds_retention():
+    from main import _append_dashboard_research_result
+
+    history = {}
+    first = {"result_id": "result-1", "query": "first task"}
+    second = {"result_id": "result-2", "query": "second task"}
+    _append_dashboard_research_result(history, "session-1", first)
+    _append_dashboard_research_result(history, "session-1", second)
+    _append_dashboard_research_result(history, "session-2", {"result_id": "other", "query": "other session"})
+
+    assert history["session-1"] == [first, second]
+    assert [item["query"] for item in history["session-2"]] == ["other session"]
+
+    _append_dashboard_research_result(history, "session-1", {**first, "answer": "updated"})
+    assert [item["result_id"] for item in history["session-1"]] == ["result-1", "result-2"]
+    assert history["session-1"][0]["answer"] == "updated"
+
+    for index in range(3, 15):
+        _append_dashboard_research_result(
+            history,
+            "session-1",
+            {"result_id": f"result-{index}", "query": f"task {index}"},
+        )
+    assert len(history["session-1"]) == 10
+    assert history["session-1"][0]["result_id"] == "result-5"
+
+
+def test_dashboard_event_projection_keeps_session_results_but_never_replays_foreign_approvals():
+    from main import _dashboard_history_record
+
+    research_event = {
+        "id": "event-r1",
+        "type": "research_result",
+        "timestamp": "2026-10-08T12:00:00Z",
+        "session_id": "session-1",
+        "payload": {"result_id": "r1", "query": "query", "answer": "answer", "channel": "web"},
+    }
+    assert _dashboard_history_record(research_event) == {
+        "session_id": "session-1",
+        "event_id": "event-r1",
+        "event_type": "research_result",
+        "timestamp": "2026-10-08T12:00:00Z",
+        "payload": research_event["payload"],
+    }
+    telegram_approval = {
+        **research_event,
+        "id": "event-a1",
+        "type": "tool_approval_request",
+        "payload": {"channel": "telegram", "request_id": "must-not-replay", "operation_preview": "Approve"},
+    }
+    assert _dashboard_history_record(telegram_approval) is None
+
+    web_approval = {
+        **telegram_approval,
+        "id": "event-a2",
+        "payload": {"channel": "web", "request_id": "must-not-replay", "operation_preview": "Approve"},
+    }
+    projected = _dashboard_history_record(web_approval)
+    assert projected is not None
+    assert projected["payload"] == {"channel": "web", "message": "Approve"}
+
+
 def _store_record(path):
     store = ResultsStore(str(path))
     store.store("task-1", "Background task 'Report' done. Result: Findings", "Findings", 2)

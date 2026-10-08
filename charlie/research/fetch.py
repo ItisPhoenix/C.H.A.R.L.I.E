@@ -5,15 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import html
-import inspect
 import ipaddress
 import logging
 import re
 import socket
+import time
 from typing import Optional
-from urllib.parse import urlparse, urlunparse
-
-import httpx
+from urllib.parse import urljoin, urlparse, urlunparse
 
 from charlie.research.credibility import score_credibility
 from charlie.research.models import SearchResult, SourceDocument
@@ -24,10 +22,12 @@ logger = logging.getLogger("charlie.research.fetch")
 # Anti-bot vendors match Python's signature and refuse before headers are read,
 # so a browser User-Agent on httpx does not help.
 try:
+    from curl_cffi import CurlOpt as _CurlOpt
     from curl_cffi.requests import AsyncSession as _CurlAsyncSession
 
     CURL_CFFI_AVAILABLE = True
 except ImportError:
+    _CurlOpt = None
     _CurlAsyncSession = None
     CURL_CFFI_AVAILABLE = False
 
@@ -57,13 +57,18 @@ _MAX_REDIRECTS = 5
 # bound it externally. Without this a slow or hostile resolver stalls the whole
 # event loop for every concurrent research source.
 _URL_VALIDATION_TIMEOUT_S = 5.0
-_CURL_MAX_REDIRECTS_SUPPORTED: Optional[bool] = None
 
 
 def canonicalize_url(url: str) -> str:
     parsed = urlparse(url.strip())
     scheme = parsed.scheme.lower()
     host = parsed.hostname.lower() if parsed.hostname else ""
+    try:
+        address = ipaddress.ip_address(host)
+        if isinstance(address, ipaddress.IPv6Address):
+            host = f"[{address.compressed}]"
+    except ValueError:
+        pass
     port = parsed.port
     if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
         port = None
@@ -73,31 +78,56 @@ def canonicalize_url(url: str) -> str:
 
 def _is_blocked_ip(address: str) -> bool:
     ip = ipaddress.ip_address(address)
-    return bool(
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_reserved
-        or ip.is_multicast
-        or ip.is_unspecified
-    )
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return not ip.is_global
+
+
+def _resolve_public_url(url: str) -> tuple[str, tuple[str, ...]]:
+    """Validate a public web URL and return every public address to pin."""
+    try:
+        parsed = urlparse(url.strip())
+        scheme = parsed.scheme.lower()
+        host = parsed.hostname.lower() if parsed.hostname else ""
+        port = parsed.port or (443 if scheme == "https" else 80)
+    except ValueError as exc:
+        raise ValueError("Research URL is malformed") from exc
+
+    if scheme not in {"http", "https"} or not host or parsed.username or parsed.password:
+        raise ValueError("Research URL must use public http or https without credentials")
+    if "%" in host or host in {"localhost", "metadata.google.internal", "metadata"} or host.endswith(".local"):
+        raise ValueError("Research URL targets a private or local host")
+    if port not in {80, 443}:
+        raise ValueError("Research URL uses a disallowed port")
+
+    try:
+        addresses = (str(ipaddress.ip_address(host)),)
+    except ValueError:
+        try:
+            records = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except socket.gaierror as exc:
+            raise ValueError("Research URL host could not be resolved") from exc
+        addresses = tuple(dict.fromkeys(str(ipaddress.ip_address(record[4][0])) for record in records))
+
+    if not addresses or any(_is_blocked_ip(address) for address in addresses):
+        raise ValueError("Research URL targets a private or local network")
+    return canonicalize_url(url), addresses
 
 
 def validate_public_url(url: str) -> str:
-    """Allow only public HTTP(S). Redirect targets are re-checked by the caller."""
-    parsed = urlparse(url)
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
-        raise ValueError("Research URL must use public http or https")
-    host = parsed.hostname.lower()
-    if host in {"localhost", "metadata.google.internal", "metadata"} or host.endswith(".local"):
-        raise ValueError("Research URL targets a private or local host")
+    """Allow only public HTTP(S) URLs on ports 80/443."""
+    return _resolve_public_url(url)[0]
+
+
+async def _resolve_public_url_async(
+    url: str,
+    *,
+    timeout_s: float = _URL_VALIDATION_TIMEOUT_S,
+) -> tuple[str, tuple[str, ...]]:
     try:
-        addresses = {item[4][0] for item in socket.getaddrinfo(host, parsed.port, type=socket.SOCK_STREAM)}
-    except socket.gaierror as exc:
-        raise ValueError("Research URL host could not be resolved") from exc
-    if any(_is_blocked_ip(address) for address in addresses):
-        raise ValueError("Research URL targets a private or local network")
-    return canonicalize_url(url)
+        return await asyncio.wait_for(asyncio.to_thread(_resolve_public_url, url), timeout_s)
+    except asyncio.TimeoutError as exc:
+        raise ValueError("Research URL host could not be resolved in time") from exc
 
 
 async def validate_public_url_async(
@@ -112,10 +142,7 @@ async def validate_public_url_async(
     resolver never answers; the abandoned thread cannot cancel itself but it no
     longer holds up every other coroutine.
     """
-    try:
-        return await asyncio.wait_for(asyncio.to_thread(validate_public_url, url), timeout_s)
-    except asyncio.TimeoutError as exc:
-        raise ValueError("Research URL host could not be resolved in time") from exc
+    return (await _resolve_public_url_async(url, timeout_s=timeout_s))[0]
 
 
 def _fallback_text(markup: str) -> str:
@@ -230,60 +257,81 @@ def document_from_content(
     )
 
 
-def _curl_supports_max_redirects() -> bool:
-    """Probe once whether the installed curl_cffi can bound redirect hops."""
-    global _CURL_MAX_REDIRECTS_SUPPORTED
-    if _CURL_MAX_REDIRECTS_SUPPORTED is None:
-        try:
-            parameters = inspect.signature(_CurlAsyncSession.request).parameters
-            _CURL_MAX_REDIRECTS_SUPPORTED = "max_redirects" in parameters
-        except (TypeError, ValueError, AttributeError):
-            _CURL_MAX_REDIRECTS_SUPPORTED = False
-        if not _CURL_MAX_REDIRECTS_SUPPORTED:
-            logger.warning(
-                "curl_cffi cannot bound redirect hops; the post-fetch URL re-check "
-                "is the only remaining redirect defence on this install"
-            )
-    return _CURL_MAX_REDIRECTS_SUPPORTED
-
-
 async def _get_browser_shaped(
     url: str,
     *,
     timeout_s: float,
 ) -> tuple[int, str, str]:
-    """GET with a browser TLS fingerprint. Returns (status, text, final_url).
+    """Fetch with a validated, pinned peer and validate every redirect first."""
+    if not CURL_CFFI_AVAILABLE or _CurlAsyncSession is None or _CurlOpt is None:
+        raise RuntimeError("Safe public-web transport is unavailable")
 
-    Falls back to httpx so the feature degrades rather than disappearing.
-    """
-    if CURL_CFFI_AVAILABLE and _CurlAsyncSession is not None:
-        redirect_kwargs: dict[str, int] = {}
-        if _curl_supports_max_redirects():
-            redirect_kwargs["max_redirects"] = _MAX_REDIRECTS
-        async with _CurlAsyncSession(impersonate="chrome") as session:
-            response = await session.get(
-                url,
-                headers=_BROWSER_HEADERS,
-                timeout=timeout_s,
-                allow_redirects=True,
-                **redirect_kwargs,
+    deadline = time.monotonic() + timeout_s
+    current_url = url
+    for hop in range(_MAX_REDIRECTS + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Research source acquisition budget expired")
+        current_url, addresses = await _resolve_public_url_async(
+            current_url,
+            timeout_s=min(_URL_VALIDATION_TIMEOUT_S, remaining),
+        )
+        parsed = urlparse(current_url)
+        host = parsed.hostname or ""
+        try:
+            ipaddress.ip_address(host)
+            resolve_options = {}
+        except ValueError:
+            host = host.encode("idna").decode("ascii")
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            pinned_addresses = ",".join(
+                f"[{address}]" if ":" in address else address for address in addresses
             )
-            return int(response.status_code), response.text, str(response.url)
+            resolve_options = {
+                _CurlOpt.RESOLVE: [f"{host}:{port}:{pinned_addresses}"]
+            }
 
-    async with httpx.AsyncClient(
-        timeout=timeout_s,
-        follow_redirects=True,
-        max_redirects=_MAX_REDIRECTS,
-    ) as client:
-        response = await client.get(url, headers=_BROWSER_HEADERS)
-        return int(response.status_code), response.text, str(response.url)
+        async with _CurlAsyncSession(
+            impersonate="chrome",
+            trust_env=False,
+            allow_redirects=False,
+            curl_options=resolve_options,
+        ) as session:
+            response = await asyncio.wait_for(
+                session.get(
+                    current_url,
+                    headers=_BROWSER_HEADERS,
+                    timeout=max(0.1, remaining),
+                    allow_redirects=False,
+                ),
+                timeout=remaining,
+            )
+            try:
+                peer = getattr(response, "primary_ip", "")
+                if isinstance(peer, bytes):
+                    peer = peer.decode("ascii", "strict")
+                peer = str(ipaddress.ip_address(str(peer)))
+            except (AttributeError, TypeError, ValueError, OSError) as exc:
+                raise ValueError("Research connection peer could not be verified") from exc
+            if peer not in addresses or _is_blocked_ip(peer):
+                raise ValueError("Research connection did not use a validated public address")
+
+        status = int(response.status_code)
+        location = response.headers.get("location") or response.headers.get("Location")
+        if status in {301, 302, 303, 307, 308} and location:
+            if hop >= _MAX_REDIRECTS:
+                raise ValueError("Research source exceeded the redirect limit")
+            current_url = urljoin(current_url, str(location))
+            continue
+        return status, response.text, current_url
+
+    raise ValueError("Research source exceeded the redirect limit")
 
 
 async def fetch_document(
     result: SearchResult,
     *,
     timeout_s: float = 12.0,
-    client: Optional[httpx.AsyncClient] = None,
     status_out: Optional[list] = None,
     max_chars: int = _MAX_DOCUMENT_CHARS,
 ) -> Optional[SourceDocument]:
@@ -292,38 +340,16 @@ async def fetch_document(
     ``status_out`` receives the HTTP status on an error response, so callers
     can tell a 403 bot-wall from a transport failure.
 
-    Both the requested URL and the post-redirect URL are validated. Redirects
-    are followed by the HTTP client, so checking only the requested URL lets a
-    public URL bounce the fetch into the private network and the extracted
-    private page becomes a citable source.
+    Every request is pinned to a resolved public address and redirects are
+    validated before the next connection is attempted.
     """
     try:
-        current_url = await validate_public_url_async(result.url)
-    except ValueError:
-        logger.info("Refusing research URL before fetch: %s", result.url)
-        return None
-    try:
-        if client is not None:
-            response = await client.get(current_url, headers=_BROWSER_HEADERS)
-            status, body, final_url = int(response.status_code), response.text, str(response.url)
-        else:
-            status, body, final_url = await _get_browser_shaped(
-                current_url, timeout_s=timeout_s
-            )
+        status, body, final_url = await _get_browser_shaped(result.url, timeout_s=timeout_s)
         if status >= 400:
             if status_out is not None:
                 status_out.append(status)
             logger.debug(
                 "Research fetch refused with HTTP %s for %s", status, result.url
-            )
-            return None
-        try:
-            final_url = await validate_public_url_async(final_url)
-        except ValueError:
-            logger.warning(
-                "Refusing research fetch: %s redirected to a non-public target %s",
-                result.url,
-                final_url,
             )
             return None
         page_title = extract_html_title(body)
@@ -344,6 +370,9 @@ async def fetch_document(
             title=page_title or result.title,
             max_chars=max_chars,
         )
+    except ValueError as exc:
+        logger.info("Refusing research URL %s: %s", result.url, exc)
+        return None
     except Exception:
         logger.debug("Research fetch failed for %s", result.url, exc_info=True)
         return None

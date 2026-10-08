@@ -22,7 +22,7 @@ from charlie.research.models import (
     SourceDocument,
 )
 from charlie.research.router import is_briefing_query, is_sustained_research_query, route
-from charlie.research.search import build_plan, clean_query
+from charlie.research.search import build_plan, clean_query, discovery_queries, parse_brief
 
 
 def test_research_router_distinguishes_stable_and_fresh_requests():
@@ -75,6 +75,17 @@ def test_short_explicit_research_request_stays_on_foreground_research_turn():
     decision = route(query)
     assert decision.should_research is True
     assert is_sustained_research_query(query, decision) is False
+
+
+def test_three_subject_multi_dimension_research_is_sustained_without_keyword():
+    query = (
+        "Research the architecture, advantages and limitations of SearXNG, Crawl4AI and Scrapling. "
+        "Use their official project documentation and identify missing evidence."
+    )
+    decision = route(query)
+
+    assert decision.should_research is True
+    assert is_sustained_research_query(query, decision) is True
 
 
 def test_current_lookup_is_not_automatically_backgrounded():
@@ -205,6 +216,19 @@ async def test_document_ranking_prefers_newer_evidence_when_relevance_matches():
 def test_clean_query_removes_instruction_and_format_noise():
     cleaned = clean_query("Do a web search and tell me what's currently trending in AI & tech. Be short under 60 words")
     assert cleaned == "trending in AI & tech"
+
+
+def test_llm_release_query_normalizes_closed_source_typo_and_searches_both_release_types():
+    query = "Research what's the latest close source and open source LLM released."
+    brief = parse_brief(query)
+
+    assert brief.topic == "the latest closed-source and open-source LLM released"
+    queries = discovery_queries(brief)
+    assert any("closed-source" in item.casefold() for item in queries)
+    assert any("open-source" in item.casefold() for item in queries)
+    assert any("proprietary" in item.casefold() for item in queries)
+    assert any("open-weight" in item.casefold() for item in queries)
+    assert is_sustained_research_query(query, route(query))
 
 
 def test_clean_query_removes_assistant_and_citation_instructions_but_preserves_quotes_and_domain():
@@ -618,10 +642,15 @@ async def test_research_stop_reasons_refuse_or_answer(monkeypatch, brain_config)
         report = ResearchReport(
             query=_FRESH_QUERY,
             mode=ResearchMode.STANDARD,
-            sources=[SourceDocument(source_id="S1", url="https://example.com/a", title="A")]
+            sources=[SourceDocument(
+                source_id="S1",
+                url="https://example.com/a",
+                title="A",
+                content=_UNGROUNDED_MODEL_ANSWER,
+            )]
             if stop_reason == "evidence-sufficient"
             else [],
-            evidence=[EvidenceItem(source_id="S1", statement="Fetched statement.")]
+            evidence=[EvidenceItem(source_id="S1", statement=_UNGROUNDED_MODEL_ANSWER)]
             if stop_reason == "evidence-sufficient"
             else [],
             citations=citations,

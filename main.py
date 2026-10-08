@@ -2328,7 +2328,12 @@ async def _deliver_background_result(
         message = message[:4000].rstrip()
 
     delivery = {"telegram": "not_configured", "voice": "not_configured"}
-    if channel == "telegram" and telegram_bot is not None and isinstance(telegram_user_id, int) and telegram_user_id > 0:
+    if (
+        channel == "telegram"
+        and telegram_bot is not None
+        and isinstance(telegram_user_id, int)
+        and telegram_user_id > 0
+    ):
         try:
             await telegram_bot.send_message(telegram_user_id, message)
             delivery["telegram"] = "accepted"
@@ -2345,6 +2350,101 @@ async def _deliver_background_result(
     elif channel == "voice" and voice is not None:
         delivery["voice"] = "not_ready"
     return delivery
+
+
+_DASHBOARD_RESEARCH_HISTORY_LIMIT = 10
+_DASHBOARD_ACTIVITY_HISTORY_LIMIT = 40
+_DASHBOARD_ACTIVITY_EVENT_TYPES = frozenset({
+    "background_task",
+    "task_snapshot",
+    "tool_call",
+    "tool_result",
+    "research_progress",
+    "research_result",
+    "result_stored",
+    "tool_approval_request",
+    "tool_approval_resolved",
+    "browser_task_started",
+    "browser_task_done",
+    "alert",
+})
+
+
+def _append_dashboard_research_result(
+    history_by_session: dict[str, list[dict[str, Any]]],
+    session_id: Optional[str],
+    payload: dict[str, Any],
+) -> None:
+    history = history_by_session.setdefault(session_id or "default", [])
+    result_id = payload.get("result_id")
+    if isinstance(result_id, str) and result_id:
+        for index, existing in enumerate(history):
+            if existing.get("result_id") == result_id:
+                history[index] = payload
+                return
+    history.append(payload)
+    del history[:-_DASHBOARD_RESEARCH_HISTORY_LIMIT]
+
+
+def _dashboard_history_record(event: Any) -> Optional[dict[str, Any]]:
+    """Project only session-owned, user-visible event data into durable history."""
+    if not isinstance(event, dict):
+        return None
+    event_type = event.get("type")
+    event_id = event.get("id")
+    session_id = event.get("session_id")
+    payload = event.get("payload")
+    if (
+        not isinstance(event_type, str)
+        or event_type not in _DASHBOARD_ACTIVITY_EVENT_TYPES
+        or not isinstance(event_id, str)
+        or not event_id
+        or not isinstance(session_id, str)
+        or not session_id
+        or not isinstance(payload, dict)
+    ):
+        return None
+    channel = payload.get("channel")
+    if channel == "telegram":
+        return None
+    if event_type in {"tool_approval_request", "tool_approval_resolved"} and channel != "web":
+        return None
+    if event_type == "research_result":
+        stored_payload = payload
+    else:
+        summary = next(
+            (
+                value.strip()
+                for key in ("title", "current_action", "action", "operation_preview", "message", "name", "text")
+                if isinstance((value := payload.get(key)), str) and value.strip()
+            ),
+            "",
+        )
+        if not summary:
+            return None
+        stored_payload = {"message": summary[:320]}
+        if isinstance(channel, str):
+            stored_payload["channel"] = channel
+    return {
+        "session_id": session_id,
+        "event_id": event_id,
+        "event_type": event_type,
+        "timestamp": event.get("timestamp") if isinstance(event.get("timestamp"), str) else None,
+        "payload": stored_payload,
+    }
+
+
+def _dashboard_activity_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Keep research details in the result view; activity gets a short label."""
+    if event.get("type") != "research_result":
+        return event
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    query = payload.get("query")
+    message = f"Research completed: {query}" if isinstance(query, str) and query else "Research completed"
+    activity_payload = {"message": message}
+    if isinstance(payload.get("channel"), str):
+        activity_payload["channel"] = payload["channel"]
+    return {**event, "payload": activity_payload}
 
 
 async def main() -> int:
@@ -3263,18 +3363,23 @@ async def main() -> int:
                             telegram_background_tasks_by_turn.pop(parent_turn_id, None)
                             telegram_origin_turn_ids.discard(parent_turn_id)
 
-        latest_research_results = {}
+        recent_research_results = {}
 
         def on_research_result(report, *, session_id, task_id=None, turn_id=None, channel=None):
-            nonlocal latest_research_results
             if event_bus is None:
-                return
+                return False
             from charlie.research.search import clean_query
             from charlie.research.citations import referenced_ids
             from charlie.research.sources import SourceClass
             from datetime import datetime, timezone
 
             used_sources = referenced_ids(report.answer) if getattr(report, "answer", "") else set()
+            included_passages = [
+                item
+                for item in getattr(report, "passages", [])
+                if not used_sources or item.source_id in used_sources
+            ]
+            included_passage_ids = {item.passage_id for item in included_passages}
             sources_list = []
             for citation in report.citations:
                 if not used_sources or citation.source_id in used_sources:
@@ -3302,14 +3407,19 @@ async def main() -> int:
                     store.touch_session(session_id)
                 except SessionNotFoundError:
                     logger.warning(
-                        "session_persistence_dropped | phase=sustained_research_answer | session_id=%s | turn_id=%s | reason=session_deleted",
+                        "session_persistence_dropped | phase=sustained_research_answer "
+                        "| session_id=%s | turn_id=%s | reason=session_deleted",
                         session_id,
                         turn_id,
                     )
                 except Exception:
                     logger.warning("sustained_research_answer_archive_failed", exc_info=True)
             legacy_text = f"{answer}\n\nSources:\n{sources_text}" if sources_text else answer
-            topic = report.brief.topic if getattr(report, "brief", None) and report.brief.topic else clean_query(report.query)
+            topic = (
+                report.brief.topic
+                if getattr(report, "brief", None) and report.brief.topic
+                else clean_query(report.query)
+            )
             payload = {
                 "result_id": task_id or turn_id,
                 "channel": channel or turn_channels_by_id.get(turn_id or ""),
@@ -3319,16 +3429,99 @@ async def main() -> int:
                 "text": legacy_text,
                 "answer": answer,
                 "partial": getattr(report, "partial", False),
+                "completeness": getattr(getattr(report, "completeness", None), "value", None),
+                "termination_reason": getattr(getattr(report, "termination_reason", None), "value", None),
+                "stop_reason": getattr(report, "stop_reason", ""),
+                "search_result_count": len(getattr(report, "search_results", [])),
+                "document_count": len(getattr(report, "sources", [])),
+                "evidence_count": len(getattr(report, "evidence", [])),
+                "passage_count": len(getattr(report, "passages", [])),
+                "fact_count": len(getattr(report, "facts", [])),
+                "source_urls": list(dict.fromkeys(
+                    source.url for source in getattr(report, "sources", []) if getattr(source, "url", "")
+                )),
+                "evidence": [
+                    {
+                        "source_id": item.source_id,
+                        "passage_id": item.passage_id,
+                        "statement": item.statement,
+                        "document_hash": item.document_hash,
+                        "start_offset": item.start_offset,
+                        "end_offset": item.end_offset,
+                    }
+                    for item in getattr(report, "evidence", [])
+                    if not used_sources or item.source_id in used_sources
+                ],
+                "verified_facts": [
+                    {
+                        "candidate": fact.candidate,
+                        "aspect": fact.aspect,
+                        "value": fact.value,
+                        "quote": fact.quote,
+                        "source_id": fact.source_id,
+                        "url": fact.url,
+                    }
+                    for fact in getattr(report, "facts", [])
+                    if not used_sources or fact.source_id in used_sources
+                ],
+                "passages": [
+                    {
+                        "id": item.passage_id,
+                        "source_id": item.source_id,
+                        "source_url": item.source_url,
+                        "canonical_url": item.canonical_url,
+                        "document_hash": item.document_hash,
+                        "text": item.text,
+                        "start_offset": item.start_offset,
+                        "end_offset": item.end_offset,
+                        "retrieved_at": item.retrieved_at,
+                        "published_at": item.published_at,
+                        "source_class": item.source_class,
+                    }
+                    for item in included_passages
+                ],
+                "claims": [
+                    {
+                        "id": claim.claim_id,
+                        "text": claim.text,
+                        "subject": claim.subject,
+                        "predicate": claim.predicate,
+                        "value": claim.value,
+                        "units": claim.units,
+                        "time_scope": claim.time_scope,
+                        "evidence_passage_ids": [
+                            passage_id
+                            for passage_id in claim.evidence_passage_ids
+                            if passage_id in included_passage_ids
+                        ],
+                        "relationship": claim.relationship,
+                        "verification_status": claim.verification_status,
+                    }
+                    for claim in getattr(report, "claims", [])
+                    if set(claim.evidence_passage_ids).intersection(included_passage_ids)
+                ],
+                "duration_ms": float(getattr(report, "duration_ms", 0.0) or 0.0),
+                "provider_outcomes": list(getattr(report, "provider_outcomes", [])),
                 "synthesis": getattr(report, "synthesis_kind", "model"),
                 "gaps": getattr(report, "gaps", []),
+                "coverage": [
+                    {
+                        "id": item.id,
+                        "question": item.question,
+                        "required_fields": list(getattr(item, "required_fields", [])),
+                        "supporting_claim_ids": list(getattr(item, "supporting_claim_ids", [])),
+                        "refuting_claim_ids": list(getattr(item, "refuting_claim_ids", [])),
+                        "status": item.status,
+                        "conflict": bool(getattr(item, "conflict", False)),
+                        "missing_evidence": list(item.missing_evidence),
+                    }
+                    for item in getattr(report, "coverage", [])
+                ],
                 "sources": sources_list,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }
-            if session_id:
-                latest_research_results[session_id] = payload
-            else:
-                latest_research_results["default"] = payload
-            _submit_event_threadsafe(
+            _append_dashboard_research_result(recent_research_results, session_id, payload)
+            receipt = _submit_event_threadsafe(
                 event_bus.emit(
                     "research_result",
                     payload,
@@ -3341,6 +3534,7 @@ async def main() -> int:
                 ),
                 loop,
             )
+            return receipt if receipt is not None else False
 
         _set_subsystem_health("llm", HealthStatus.STARTING, "Starting")
         _set_subsystem_health("brain", HealthStatus.STARTING, "Starting")
@@ -3842,13 +4036,59 @@ async def main() -> int:
 
         def _web_snapshot() -> dict[str, Any]:
             from charlie.core import get_active_tool_approval
-            tasks = get_task_journal().snapshot()
-            research_result = latest_research_results.get(current_session_id) or latest_research_results.get("default")
-            if research_result and research_result.get("channel") == "telegram":
-                research_result = None
+            tasks = [
+                task
+                for task in get_task_journal().snapshot()
+                if task.get("session_id") == current_session_id
+            ]
+            try:
+                dashboard_events = store.get_dashboard_events(
+                    current_session_id,
+                    limit=_DASHBOARD_RESEARCH_HISTORY_LIMIT + _DASHBOARD_ACTIVITY_HISTORY_LIMIT,
+                ) if store else []
+                conversation_rows = store.get_session_messages(current_session_id, limit=50) if store else []
+            except Exception:
+                logger.warning("dashboard session history could not be loaded", exc_info=True)
+                dashboard_events = []
+                conversation_rows = []
+            research_history_by_session: dict[str, list[dict[str, Any]]] = {}
+            for event in dashboard_events:
+                payload = event.get("payload")
+                if (
+                    event.get("type") == "research_result"
+                    and isinstance(payload, dict)
+                    and payload.get("channel") != "telegram"
+                ):
+                    _append_dashboard_research_result(research_history_by_session, current_session_id, payload)
+            for item in recent_research_results.get(current_session_id, []):
+                if item.get("channel") != "telegram":
+                    _append_dashboard_research_result(research_history_by_session, current_session_id, item)
+            research_results = research_history_by_session.get(current_session_id, [])
+            research_result = research_results[-1] if research_results else None
+            research_texts = {
+                text
+                for item in research_results
+                for text in (item.get("answer"), item.get("text"))
+                if isinstance(text, str) and text
+            }
+            conversation_history = [
+                {"id": f"{current_session_id}:{index}", "role": "you" if role == "user" else "charlie", "text": content}
+                for index, (role, content) in enumerate(conversation_rows)
+                if role in {"user", "assistant"} and not (role == "assistant" and content in research_texts)
+            ]
+            activity_history = [
+                _dashboard_activity_event(event)
+                for event in dashboard_events
+                if event.get("type") in _DASHBOARD_ACTIVITY_EVENT_TYPES
+                and not (
+                    isinstance(event.get("payload"), dict)
+                    and event["payload"].get("channel") == "telegram"
+                )
+            ]
             return {
                 "version": 1,
                 "revision": int(time.time()),
+                "session_id": current_session_id,
                 "connection": "connected",
                 "title": "Charlie is working" if active_turn_id else "Charlie is ready",
                 "summary": active_operation_name
@@ -3865,6 +4105,8 @@ async def main() -> int:
                     "label": "Working" if active_turn_id else "Ready when you are",
                     "caption": active_operation_name or "",
                 },
+                "conversation_history": conversation_history,
+                "activity": activity_history,
                 "tasks": tasks,
                 "active_turn_id": active_turn_id,
                 "active_task_id": active_task_id,
@@ -3874,11 +4116,27 @@ async def main() -> int:
                     **(voice.get_audio_state() if config.voice_enabled else {"muted": True, "volume": 0.0}),
                 },
                 "research_result": research_result,
+                "research_results": research_results,
                 "settings": settings_service.snapshot(),
                 "approval": dict(web_approval_payload) if get_active_tool_approval() == (
                     web_approval_payload.get("request_id"), "web",
                 ) else None,
             }
+
+        def _persist_dashboard_event(event: dict[str, Any]) -> None:
+            record = _dashboard_history_record(event)
+            if record is None or store is None:
+                return
+            try:
+                store.append_dashboard_event(
+                    record["session_id"],
+                    record["event_id"],
+                    record["event_type"],
+                    record["payload"],
+                    timestamp=record["timestamp"],
+                )
+            except Exception:
+                logger.warning("dashboard session event could not be persisted", exc_info=True)
 
         def on_console_text(text: str):
             request = _allocate_turn_request(text, current_session_id, "console")
@@ -5046,7 +5304,7 @@ async def main() -> int:
             # "gateway unavailable" and keep the assistant running.
             web_gateway = None
             try:
-                token_file = Path("artifacts/web_bootstrap_url.txt")
+                token_file = Path(os.getenv("CHARLIE_WEB_TOKEN_FILE") or "artifacts/web_bootstrap_url.txt")
                 web_gateway = RuntimeWebGateway(
                     loop=loop,
                     command_handler=_web_command,
@@ -5056,19 +5314,17 @@ async def main() -> int:
                     bootstrap_token_file=token_file,
                 )
                 web_gateway.start()
-                if web_gateway.bootstrap_url:
-                    print(
-                        f"\n=======================================================\n"
-                        f"Charlie dashboard URL:\n{web_gateway.bootstrap_url}\n"
-                        f"=======================================================\n",
-                        flush=True,
-                    )
-                    if os.getenv("CHARLIE_AUTO_OPEN_BROWSER", "true").lower() == "true" and os.getenv("CHARLIE_TEST_MODE", "").lower() != "true":
-                        try:
-                            import webbrowser
-                            webbrowser.open(web_gateway.bootstrap_url)
-                        except Exception:
-                            pass
+                if (
+                    web_gateway.bootstrap_url
+                    and os.getenv("CHARLIE_AUTO_OPEN_BROWSER", "true").lower() == "true"
+                    and os.getenv("CHARLIE_TEST_MODE", "").lower() != "true"
+                ):
+                    try:
+                        import webbrowser
+
+                        webbrowser.open(web_gateway.bootstrap_url)
+                    except Exception:
+                        pass
             except OSError as exc:
                 logger.warning(
                     "Charlie web gateway unavailable on port %s (%s); continuing without it. "
@@ -5083,8 +5339,10 @@ async def main() -> int:
                 # started. The gateway is a presentation surface and is not a
                 # registered runtime subsystem, so it reports through the log
                 # rather than the subsystem health registry.
-                bus.subscribe(web_gateway.publish)
                 logger.info("Charlie web gateway listening on http://127.0.0.1:%s", web_gateway.port)
+            bus.subscribe(_persist_dashboard_event)
+            if web_gateway is not None:
+                bus.subscribe(web_gateway.publish)
             await _publish_subsystem_health(bus)
             bus.set_state_listener(_on_event_for_state)
             voice.set_event_bus(bus)

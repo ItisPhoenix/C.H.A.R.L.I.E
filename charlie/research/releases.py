@@ -48,6 +48,20 @@ def is_stable_version(ver_str: str) -> bool:
     return not any(token in pre_tag for token in _PRE_RELEASE_TOKENS)
 
 
+def stable_release_span(
+    document: SourceDocument, version: str, released: str = ""
+) -> Optional[Tuple[int, int]]:
+    """Return the exact source row that ties a stable version to its date."""
+    expected_date = " ".join(released.split()).casefold()
+    for match in _PYTHON_RELEASE_ROW_RE.finditer(document.content):
+        if match.group(1).casefold() != version.casefold():
+            continue
+        if expected_date and " ".join(match.group(2).split()).casefold() != expected_date:
+            continue
+        return match.span()
+    return None
+
+
 def pick_stable(
     facts_or_docs: Iterable[Any],
     brief: Optional[ResearchBrief] = None,
@@ -57,6 +71,7 @@ def pick_stable(
     Excludes alpha, beta, rc, pre, dev releases.
     """
     items = list(facts_or_docs)
+    requested = parse_version_tuple(brief.requested_version) if brief and brief.requested_version else None
     stable_candidates: List[Tuple[Tuple[int, int, int], str, str, str]] = []
 
     # Map dates by: candidate, quote content, and source_id
@@ -74,6 +89,28 @@ def pick_stable(
     for item in items:
         if isinstance(item, SourceDocument):
             prior_count = len(stable_candidates)
+            if requested is not None:
+                from charlie.research.facts import _DATE_RE
+
+                for line in re.split(r"[\r\n]+", item.content):
+                    versions = list(dict.fromkeys(
+                        match.group(0)
+                        for match in _VERSION_PARSE_RE.finditer(line)
+                        if is_stable_version(match.group(0))
+                    ))
+                    matching = [
+                        version
+                        for version in versions
+                        if parse_version_tuple(version)[:3] == requested[:3]
+                    ]
+                    if len(versions) != 1 or len(matching) != 1:
+                        continue
+                    date_matches = list(_DATE_RE.finditer(line))
+                    if len(date_matches) > 1:
+                        continue
+                    date_value = date_matches[0].group(1).strip() if date_matches else ""
+                    stable_candidates.append((requested[:3], matching[0], date_value, item.source_id))
+                continue
             # Scan document content for canonical release rows
             for m in _PYTHON_RELEASE_ROW_RE.finditer(item.content):
                 ver = m.group(1)
@@ -106,6 +143,8 @@ def pick_stable(
                     parsed = parse_version_tuple(ver)
                     if parsed:
                         key = (parsed[0], parsed[1], parsed[2])
+                        if requested is not None and key != requested[:3]:
+                            continue
                         dt_str = ""
                         if item.quote:
                             from charlie.research.facts import _DATE_RE
@@ -130,7 +169,11 @@ def pick_stable(
 
     # Sort by version tuple descending
     stable_candidates.sort(key=lambda x: x[0], reverse=True)
-    best = stable_candidates[0]
+    best_group = [value for value in stable_candidates if value[0] == stable_candidates[0][0]]
+    best_dates = {value[2].casefold() for value in best_group if value[2]}
+    if len(best_dates) > 1:
+        return None
+    best = next((value for value in best_group if value[2]), best_group[0])
     return (best[1], best[2], best[3])
 
 

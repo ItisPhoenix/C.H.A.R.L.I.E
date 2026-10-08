@@ -361,6 +361,21 @@ class SessionStore:
                         created_at TEXT NOT NULL
                     )"""
                 )
+                self.conn.execute(
+                    """CREATE TABLE IF NOT EXISTS dashboard_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT NOT NULL,
+                        event_id TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        UNIQUE(session_id, event_id)
+                    )"""
+                )
+                self.conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_dashboard_events_session "
+                    "ON dashboard_events(session_id, id);"
+                )
                 # Existing databases predate declared foreign keys. These
                 # idempotent triggers enforce the same parent-session invariant
                 # without rebuilding historical tables in place.
@@ -385,6 +400,16 @@ class SessionStore:
                     END;"""
                 )
                 self.conn.execute(
+                    """CREATE TRIGGER IF NOT EXISTS dashboard_events_require_session
+                    BEFORE INSERT ON dashboard_events
+                    WHEN NOT EXISTS (
+                        SELECT 1 FROM sessions WHERE session_id = NEW.session_id
+                    )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'session_not_found');
+                    END;"""
+                )
+                self.conn.execute(
                     """CREATE TRIGGER IF NOT EXISTS sessions_delete_messages
                     AFTER DELETE ON sessions
                     BEGIN
@@ -396,6 +421,13 @@ class SessionStore:
                     AFTER DELETE ON sessions
                     BEGIN
                         DELETE FROM tool_events WHERE session_id = OLD.session_id;
+                    END;"""
+                )
+                self.conn.execute(
+                    """CREATE TRIGGER IF NOT EXISTS sessions_delete_dashboard_events
+                    AFTER DELETE ON sessions
+                    BEGIN
+                        DELETE FROM dashboard_events WHERE session_id = OLD.session_id;
                     END;"""
                 )
         except sqlite3.Error as e:
@@ -739,16 +771,19 @@ class SessionStore:
                 messages_purged = int(tx.execute("SELECT COUNT(*) FROM messages").fetchone()[0])
                 sessions_purged = int(tx.execute("SELECT COUNT(*) FROM sessions").fetchone()[0])
                 tool_events_purged = int(tx.execute("SELECT COUNT(*) FROM tool_events").fetchone()[0])
+                dashboard_events_purged = int(tx.execute("SELECT COUNT(*) FROM dashboard_events").fetchone()[0])
                 tx.execute("DELETE FROM sessions")
                 # Remove legacy orphan rows too; normal rows are already removed
                 # by the canonical session-delete triggers.
                 tx.execute("DELETE FROM messages")
                 tx.execute("DELETE FROM tool_events")
+                tx.execute("DELETE FROM dashboard_events")
                 return {
                     "messages_purged": messages_purged,
                     "sessions_purged": sessions_purged,
                     "tool_events_purged": tool_events_purged,
-                    "items_purged": messages_purged + sessions_purged + tool_events_purged,
+                    "dashboard_events_purged": dashboard_events_purged,
+                    "items_purged": messages_purged + sessions_purged + tool_events_purged + dashboard_events_purged,
                 }
 
             cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).strftime(
@@ -773,6 +808,12 @@ class SessionStore:
                     cutoff_parameters,
                 ).fetchone()[0]
             )
+            dashboard_events_purged = int(
+                tx.execute(
+                    f"SELECT COUNT(*) FROM dashboard_events WHERE created_at < ?{protected_clause}",
+                    cutoff_parameters,
+                ).fetchone()[0]
+            )
             tx.execute(
                 f"DELETE FROM messages WHERE timestamp < ?{protected_clause}",
                 cutoff_parameters,
@@ -781,11 +822,16 @@ class SessionStore:
                 f"DELETE FROM tool_events WHERE created_at < ?{protected_clause}",
                 cutoff_parameters,
             )
+            tx.execute(
+                f"DELETE FROM dashboard_events WHERE created_at < ?{protected_clause}",
+                cutoff_parameters,
+            )
             return {
                 "messages_purged": messages_purged,
                 "sessions_purged": 0,
                 "tool_events_purged": tool_events_purged,
-                "items_purged": messages_purged + tool_events_purged,
+                "dashboard_events_purged": dashboard_events_purged,
+                "items_purged": messages_purged + tool_events_purged + dashboard_events_purged,
             }
 
         return self._mutate(_do, "purge transcripts")
@@ -810,6 +856,69 @@ class SessionStore:
     ) -> List[Tuple[str, str]]:
         """Returns messages for a specific session, oldest first."""
         return self.get_recent(limit=limit, session_id=session_id)
+
+    def append_dashboard_event(
+        self,
+        session_id: str,
+        event_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        *,
+        timestamp: Optional[str] = None,
+    ) -> None:
+        """Persist a bounded Dashboard projection inside its owning session."""
+        if not session_id or not event_id or not event_type or not isinstance(payload, dict):
+            raise ValueError("session, event id, event type, and object payload are required")
+        payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        created_at = timestamp or utc_now_iso()
+        is_research = event_type == "research_result"
+        history_type_clause = "event_type = 'research_result'" if is_research else "event_type != 'research_result'"
+        history_limit = 10 if is_research else 40
+
+        def _do(tx: _WriteContext) -> None:
+            tx.execute(
+                "INSERT INTO dashboard_events (session_id, event_id, event_type, payload_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(session_id, event_id) DO UPDATE SET "
+                "event_type = excluded.event_type, "
+                "payload_json = excluded.payload_json, "
+                "created_at = excluded.created_at",
+                (session_id, event_id, event_type, payload_json, created_at),
+            )
+            tx.execute(
+                f"DELETE FROM dashboard_events WHERE session_id = ? AND {history_type_clause} "
+                "AND id NOT IN (SELECT id FROM dashboard_events WHERE session_id = ? AND "
+                f"{history_type_clause} ORDER BY id DESC LIMIT ?)",
+                (session_id, session_id, history_limit),
+            )
+
+        self._mutate(_do, "persist dashboard event")
+
+    def get_dashboard_events(self, session_id: str, limit: int = 50) -> List[dict[str, Any]]:
+        """Return recent session Dashboard events oldest first for stable replay."""
+        if not session_id:
+            return []
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+            raise ValueError("limit must be a non-negative integer")
+        bounded_limit = min(limit, 50)
+        try:
+            rows = self.conn.execute(
+                "SELECT event_id, event_type, payload_json, created_at FROM dashboard_events "
+                "WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                (session_id, bounded_limit),
+            ).fetchall()
+            events: List[dict[str, Any]] = []
+            for event_id, event_type, payload_json, timestamp in reversed(rows):
+                try:
+                    payload = json.loads(payload_json)
+                except (TypeError, ValueError):
+                    logger.warning("Ignoring malformed persisted dashboard event %s", event_id)
+                    continue
+                if isinstance(payload, dict):
+                    events.append({"id": event_id, "type": event_type, "timestamp": timestamp, "payload": payload})
+            return events
+        except sqlite3.Error as exc:
+            raise SessionStorageError(f"Failed to read dashboard events for '{session_id}'") from exc
 
     def append_tool_event(
         self,
@@ -851,7 +960,16 @@ class SessionStore:
                 "WHERE NOT EXISTS "
                 "(SELECT 1 FROM sessions WHERE sessions.session_id = tool_events.session_id)"
             ).fetchone()[0]
-            return {"messages": int(messages), "tool_events": int(tool_events)}
+            dashboard_events = self.conn.execute(
+                "SELECT COUNT(*) FROM dashboard_events "
+                "WHERE NOT EXISTS "
+                "(SELECT 1 FROM sessions WHERE sessions.session_id = dashboard_events.session_id)"
+            ).fetchone()[0]
+            return {
+                "messages": int(messages),
+                "tool_events": int(tool_events),
+                "dashboard_events": int(dashboard_events),
+            }
         except sqlite3.Error as exc:
             raise SessionStorageError("Failed to count legacy session orphans") from exc
 

@@ -257,7 +257,7 @@ async def test_semantic_relevance_beats_token_overlap_for_off_topic_pages():
     )
     on_topic = _doc(
         "on", "hai.stanford.edu", "https://hai.stanford.edu/a", 0.0, 0.657,
-        _text("ai", "trends", "2026", "index", "report"),
+        _text("ai", "index", "report", "2026"),
     )
 
     token_only = await rank_documents([off_topic, on_topic], _plan(), 5)

@@ -453,13 +453,20 @@ async def test_research_synthesis_uses_fetched_citations_once_without_tools():
         source_id="S1",
         content="Python 3.14.7 is the latest stable release.",
     )
+    evidence_text = source.content
     report = ResearchReport(
         query="latest stable Python release",
         mode=ResearchMode.STANDARD,
         sources=[source],
-        evidence=[EvidenceItem("S1", "Python 3.14.7 is the latest stable release.")],
+        evidence=[
+            EvidenceItem(
+                "S1", evidence_text, passage_id="p1", start_offset=0,
+                end_offset=len(evidence_text), document_hash=source.content_hash,
+            )
+        ],
         stop_reason="evidence-sufficient",
     )
+    report.bind_passages()
     report.citations = assign_citations(report.sources)
 
     answer = await synthesize(SimpleNamespace(brain=FakeBrain()), report)

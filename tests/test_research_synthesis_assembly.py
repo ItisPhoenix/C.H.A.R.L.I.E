@@ -1,7 +1,17 @@
-import pytest
-from charlie.background_task import assemble_answer, _validate_numeric_grounding
-from charlie.research.models import Candidate, Fact, ResearchBrief, ResearchMode, ResearchReport, SourceDocument
-from charlie.research.releases import pick_stable, is_stable_version
+from charlie.background_task import _validate_citation_support, _validate_numeric_grounding, assemble_answer
+from charlie.research.models import (
+    Candidate,
+    Citation,
+    EvidenceItem,
+    EvidencePassage,
+    Fact,
+    ResearchBrief,
+    ResearchMode,
+    ResearchReport,
+    SourceDocument,
+    Subquestion,
+)
+from charlie.research.releases import is_stable_version, pick_stable
 
 
 def test_assemble_answer_formats_priority_cleanly_without_run_on_sentence():
@@ -45,6 +55,22 @@ def test_assemble_answer_formats_priority_cleanly_without_run_on_sentence():
     assert "| HP Victus 15-FA2381TX Gaming | RTX 4050 | 6 GB | — | — | ₹78,584 | [S1] |" in result
 
 
+def test_general_research_fallback_uses_cited_evidence_without_product_table():
+    report = ResearchReport(
+        query="How does Alpha handle retries?",
+        mode=ResearchMode.DEEP,
+        brief=ResearchBrief(topic="Alpha retries", entity_kind="general"),
+        evidence=[EvidenceItem("S1", "Alpha retries transient failures with exponential backoff.")],
+        citations=[Citation("S1", "https://alpha.example/docs", "Retry guide", "alpha.example")],
+    )
+
+    answer = assemble_answer(report)
+
+    assert "Alpha retries transient failures with exponential backoff. [S1]" in answer
+    assert "Recommendation" not in answer
+    assert "| Option |" not in answer
+
+
 def test_assemble_answer_does_not_borrow_family_or_unassigned_source_facts():
     brief = ResearchBrief(
         topic="gaming laptops",
@@ -84,13 +110,297 @@ def test_validate_numeric_grounding_allows_budget_and_query_numbers():
         brief=brief,
         facts=facts,
     )
-    # Text mentions user budget 100,000 and price 78,584 and year 2025
-    good_text = "Under your ₹100,000 budget, the best option for 2025 is HP Victus at ₹78,584 [S1]."
+    # User budget and verified price are allowed; an unsupported date is not.
+    good_text = "Under your ₹100,000 budget, HP Victus costs ₹78,584 [S1]."
     assert _validate_numeric_grounding(good_text, report) is True
+    assert _validate_numeric_grounding("HP Victus is best in 2025 [S1].", report) is False
 
     # Text contains hallucinated price 45,000 not in facts, query, or budget
     bad_text = "You can also buy it for ₹45,000 at a discount [S1]."
     assert _validate_numeric_grounding(bad_text, report) is False
+
+
+def test_validate_numeric_grounding_binds_numbers_to_cited_source():
+    report = ResearchReport(
+        query="Compare Alpha and Beta retry behavior",
+        mode=ResearchMode.DEEP,
+        sources=[
+            SourceDocument(source_id="S1", url="https://alpha.example", content="Alpha retries 5 times."),
+            SourceDocument(source_id="S2", url="https://beta.example", content="Beta retries 7 times."),
+        ],
+        evidence=[
+            EvidenceItem("S1", "Alpha retries 5 times."),
+            EvidenceItem("S2", "Beta retries 7 times."),
+        ],
+    )
+
+    assert _validate_numeric_grounding("Alpha retries 5 times [S1].", report) is True
+    assert _validate_numeric_grounding("Alpha retries 7 times [S1].", report) is False
+
+
+def test_citation_must_support_the_attached_claim():
+    report = ResearchReport(
+        query="What does Alpha document about licensing?",
+        mode=ResearchMode.STANDARD,
+        sources=[SourceDocument(source_id="S1", url="https://alpha.example/docs", content="Alpha's license is MIT.")],
+        evidence=[EvidenceItem("S1", "Alpha's license is MIT.")],
+        citations=[Citation("S1", "https://alpha.example/docs", "Alpha docs", "alpha.example")],
+    )
+
+    assert _validate_citation_support("Alpha's license is MIT [S1].", report) is True
+    assert _validate_citation_support("Alpha retries use exponential backoff [S1].", report) is False
+    assert _validate_citation_support("Alpha's license is MIT.", report) is False
+
+
+def test_contradicted_proposition_is_rendered_and_must_not_be_reversed():
+    from charlie.research.citations import validate_claim_support
+    from charlie.research.engine import _research_brief, _update_report_coverage
+
+    query = "Is Alpha licensed under GPL-3.0?"
+    brief = _research_brief(query, ResearchMode.DEEP)
+    content = "Alpha is licensed under the MIT License."
+    source = SourceDocument(
+        source_id="S1", url="https://alpha.example/license", title="Alpha license",
+        domain="alpha.example", content=content, source_class="official", quality_score=0.9,
+    )
+    report = ResearchReport(
+        query=query,
+        mode=ResearchMode.DEEP,
+        brief=brief,
+        sources=[source],
+        citations=[Citation("S1", source.url, source.title, source.domain)],
+        evidence=[EvidenceItem("S1", content, passage_id="p1")],
+        passages=[EvidencePassage(
+            "p1", "S1", source.url, source.canonical_url, source.content_hash,
+            content, 0, len(content), "now", None, "official",
+        )],
+        coverage=brief.required_subquestions,
+        stop_reason="evidence-sufficient",
+    )
+    assert _update_report_coverage(report) is True
+
+    answer = report.deterministic_answer()
+
+    assert "contradicts" in answer
+    assert "MIT" in answer and "GPL-3.0" in answer
+    assert validate_claim_support(answer, report) is True
+    assert _validate_numeric_grounding(answer, report) is True
+    assert validate_claim_support("Yes, Alpha is licensed under GPL-3.0 [S1].", report) is False
+    bound_claim = next(claim for claim in report.claims if claim.claim_id.startswith("answer-"))
+    assert bound_claim.relationship == "refutes"
+    assert bound_claim.evidence_passage_ids == ["p1"]
+
+
+def test_conflict_answer_must_retain_both_sources_and_refuse_to_choose():
+    from charlie.research.citations import validate_claim_support
+
+    source_a = SourceDocument(
+        source_id="S1",
+        url="https://alpha.example/release",
+        content="Alpha 2.0 was released on January 1, 2024.",
+    )
+    source_b = SourceDocument(
+        source_id="S2",
+        url="https://beta.example/alpha",
+        content="Alpha 2.0 was released on January 2, 2024.",
+    )
+    report = ResearchReport(
+        query="On what date was Alpha 2.0 released?",
+        mode=ResearchMode.DEEP,
+        sources=[source_a, source_b],
+        citations=[
+            Citation("S1", "https://alpha.example/release", "Alpha release", "alpha.example"),
+            Citation("S2", "https://beta.example/alpha", "Alpha history", "beta.example"),
+        ],
+        evidence=[
+            EvidenceItem("S1", "Alpha 2.0 was released on January 1, 2024.", passage_id="p1"),
+            EvidenceItem("S2", "Alpha 2.0 was released on January 2, 2024.", passage_id="p2"),
+        ],
+        passages=[
+            EvidencePassage(
+                "p1", "S1", "https://alpha.example/release", "https://alpha.example/release",
+                source_a.content_hash, source_a.content, 0, len(source_a.content), "now", None, "official",
+            ),
+            EvidencePassage(
+                "p2", "S2", "https://beta.example/alpha", "https://beta.example/alpha",
+                source_b.content_hash, source_b.content, 0, len(source_b.content), "now", None, "official",
+            ),
+        ],
+        coverage=[Subquestion(
+            id="q1", question="Alpha 2.0 release date", required_fields=["release_date:2.0"],
+            status="unresolved", supporting_claim_ids=["p1", "p2"], conflict=True,
+            missing_evidence=["Credible sources report different dates for this exact version"],
+        )],
+        gaps=["Unresolved: Alpha 2.0 release date (conflicting evidence)"],
+    )
+
+    answer = report.deterministic_answer()
+
+    assert "January 1, 2024. [S1]" in answer
+    assert "January 2, 2024. [S2]" in answer
+    assert validate_claim_support(answer, report) is True
+    assert validate_claim_support("Alpha 2.0 was released on January 1, 2024 [S1].", report) is False
+    bound_claims = [claim for claim in report.claims if claim.claim_id.startswith("answer-")]
+    assert {claim.evidence_passage_ids[0] for claim in bound_claims} == {"p1", "p2"}
+
+
+def test_citation_binding_keeps_dotted_month_release_dates_in_one_sentence():
+    from charlie.research.citations import validate_claim_support
+    from charlie.research.engine import _research_brief, _update_report_coverage
+    from charlie.research.models import EvidencePassage, Fact
+    from charlie.research.releases import stable_release_span
+
+    content = "Python 3.14.6 June 10, 2026.\nPython 3.14.8 Sept. 30, 2026."
+    source = SourceDocument(
+        source_id="S1", url="https://www.python.org/downloads/", title="Python releases",
+        domain="python.org", content=content, source_class="official",
+    )
+    query = "What is the latest stable Python release and its release date? Verify using python.org."
+    brief = _research_brief(query, ResearchMode.DEEP)
+    p2_start, p2_end = stable_release_span(source, "3.14.8", "Sept. 30, 2026")
+    p1_end = content.index("\n")
+    report = ResearchReport(
+        query=query,
+        mode=ResearchMode.DEEP,
+        brief=brief,
+        coverage=brief.required_subquestions,
+        sources=[source],
+        citations=[Citation("S1", source.url, source.title, source.domain)],
+        evidence=[
+            EvidenceItem(
+                "S1", content[:p1_end], passage_id="p1", start_offset=0, end_offset=p1_end,
+                document_hash=source.content_hash,
+            ),
+            EvidenceItem(
+                "S1", content[p2_start:p2_end], passage_id="p2", start_offset=p2_start,
+                end_offset=p2_end, document_hash=source.content_hash,
+            ),
+        ],
+        passages=[
+            EvidencePassage(
+                "p1", "S1", source.url, source.canonical_url, source.content_hash,
+                content[:p1_end], 0, p1_end, "now", None, "official",
+            ),
+            EvidencePassage(
+                "p2", "S1", source.url, source.canonical_url, source.content_hash,
+                content[p2_start:p2_end], p2_start, p2_end, "now", None, "official",
+            ),
+        ],
+        facts=[
+            Fact(
+                "Python 3.14.8", "version", "3.14.8", "3.14.8", "S1", "official",
+                "releases:pick_stable", source.url,
+            ),
+            Fact(
+                "Python 3.14.8", "release_date", "Sept. 30, 2026", "Sept. 30, 2026",
+                "S1", "official", "releases:pick_stable", source.url,
+            ),
+        ],
+    )
+    assert _update_report_coverage(report) is True
+
+    answer = (
+        "The latest stable release of Python is 3.14.8 [S1]. "
+        "It was released on Sept. 30, 2026 [S1]."
+    )
+
+    assert validate_claim_support(answer, report) is True
+    claims = {claim.predicate: claim for claim in report.claims if claim.claim_id.startswith("answer-")}
+    assert set(claims) == {"version", "release_date"}
+    assert claims["version"].evidence_passage_ids == ["p2"]
+    assert claims["release_date"].evidence_passage_ids == ["p2"]
+
+    missing_fact_passage = ResearchReport(
+        query=query,
+        mode=ResearchMode.DEEP,
+        brief=brief,
+        sources=[source],
+        citations=report.citations,
+        evidence=[report.evidence[0]],
+        passages=[report.passages[0]],
+        facts=report.facts,
+    )
+    assert validate_claim_support(answer, missing_fact_passage) is False
+
+
+def test_numeric_grounding_keeps_citation_after_sentence_final_period():
+    from charlie.research.citations import validate_numeric_grounding
+
+    content = "HTTPX supports HTTP/1.1 and HTTP/2."
+    source = SourceDocument(
+        source_id="S1", url="https://www.python-httpx.org/", content=content,
+    )
+    report = ResearchReport(
+        query="How does HTTPX handle HTTP versions?",
+        mode=ResearchMode.DEEP,
+        sources=[source],
+        citations=[Citation("S1", source.url, "HTTPX", "www.python-httpx.org")],
+    )
+
+    assert validate_numeric_grounding("HTTPX supports HTTP/1.1 and HTTP/2. [S1]", report) is True
+
+
+def test_general_deterministic_answer_covers_supported_comparison_fields():
+    from charlie.research.citations import validate_claim_support
+    from charlie.research.models import ResearchBrief, Subquestion
+
+    contents = {
+        "S1": "HTTPX supports asynchronous requests through a context-managed AsyncClient.",
+        "S2": "aiohttp supports asynchronous requests through ClientSession.",
+    }
+    sources = [
+        SourceDocument(
+            source_id=source_id,
+            url=url,
+            title=f"{name} documentation",
+            domain=domain,
+            content=content,
+            source_class="official",
+        )
+        for (source_id, content), name, url, domain in zip(
+            contents.items(),
+            ("HTTPX", "aiohttp"),
+            ("https://www.python-httpx.org/", "https://docs.aiohttp.org/"),
+            ("www.python-httpx.org", "docs.aiohttp.org"),
+        )
+    ]
+    brief = ResearchBrief(topic="HTTPX and aiohttp", entity_kind="general")
+    passages = [
+        EvidencePassage(
+            f"p{index}", source.source_id, source.url, source.canonical_url,
+            source.content_hash, source.content, 0, len(source.content), "now", None, "official",
+        )
+        for index, source in enumerate(sources, start=1)
+    ]
+    report = ResearchReport(
+        query="Compare HTTPX and aiohttp asynchronous requests.",
+        mode=ResearchMode.DEEP,
+        brief=brief,
+        sources=sources,
+        citations=[Citation(source.source_id, source.url, source.title, source.domain) for source in sources],
+        evidence=[
+            EvidenceItem(source.source_id, source.content, passage_id=f"p{index}")
+            for index, source in enumerate(sources, start=1)
+        ],
+        passages=passages,
+        coverage=[
+            Subquestion("q1", "HTTPX: asynchronous requests", ["HTTPX", "asynchronous requests"],
+                status="supported", supporting_claim_ids=["p1"]),
+            Subquestion("q2", "aiohttp: asynchronous requests", ["aiohttp", "asynchronous requests"],
+                status="supported", supporting_claim_ids=["p2"]),
+            Subquestion("q3", "HTTPX: client lifecycle", ["HTTPX", "client lifecycle"],
+                status="supported", supporting_claim_ids=["p1"]),
+        ],
+    )
+
+    answer = report.deterministic_answer()
+
+    assert "HTTPX — asynchronous requests" in answer
+    assert "aiohttp — asynchronous requests" in answer
+    assert "HTTPX — client lifecycle" in answer
+    assert answer.count("HTTPX supports asynchronous requests through a context-managed AsyncClient. [S1]") == 2
+    assert "Recommendation" not in answer and "| Option |" not in answer
+    assert validate_claim_support(answer, report) is True
 
 
 def test_pick_stable_python_with_dotted_month():
@@ -266,6 +576,102 @@ def test_assemble_answer_release_topic_cleaning_variants():
     res_no_id = assemble_answer(report_no_id)
     assert "The latest stable release of Python is **3.13.2**." in res_no_id
     assert " **3.13.2** ." not in res_no_id
+
+
+def test_assemble_answer_uses_verified_llm_release_facts_not_unrelated_semver():
+    brief = ResearchBrief(
+        topic="the latest closed-source and open-source LLM released",
+        entity_kind="release",
+        source_policy="official_preferred",
+    )
+    report = ResearchReport(
+        query=brief.topic,
+        mode=ResearchMode.DEEP,
+        brief=brief,
+        candidates=[
+            Candidate(
+                "Beam", "Reflection AI", "Reflection AI debuted Beam", "D1",
+                access="open", release_date="2026-10-05",
+            ),
+            Candidate(
+                "GPT-6 Sol", "OpenAI", "OpenAI released GPT-6 Sol", "D2",
+                access="closed", release_date="2026-09-29",
+            ),
+        ],
+        facts=[
+            Fact(
+                "Beam", "release_date", "Oct 5, 2026",
+                "Reflection AI debuted Beam on Oct 5, 2026", "S1",
+                "official_unverified", "regex:release_date",
+            ),
+            Fact(
+                "GPT-6 Sol", "release_date", "Sept 29, 2026",
+                "OpenAI released GPT-6 Sol on Sept 29, 2026", "S2",
+                "official_unverified", "regex:release_date",
+            ),
+            Fact(
+                None, "version", "1.0.6", "unrelated package version 1.0.6",
+                "S3", "unknown", "regex:version",
+            ),
+        ],
+    )
+
+    answer = assemble_answer(report)
+
+    assert "Closed-source: **OpenAI GPT-6 Sol**" in answer
+    assert "Open-weight: **Reflection AI Beam**" in answer
+    assert "Sept 29, 2026" in answer and "[S2]" in answer
+    assert "Oct 5, 2026" in answer and "[S1]" in answer
+    assert "1.0.6" not in answer
+
+
+def test_assemble_answer_reports_supported_model_mentions_when_latest_date_is_unresolved():
+    from charlie.research.citations import validate_claim_support
+
+    brief = ResearchBrief(
+        topic="the latest closed-source and open-source LLM released",
+        entity_kind="release",
+        source_policy="official_preferred",
+    )
+    document = SourceDocument(
+        source_id="S1",
+        url="https://reflection.ai/news/beam",
+        title="Beam release",
+        domain="reflection.ai",
+        content="Reflection describes Beam as its first open-weight model.",
+        source_class="official_unverified",
+    )
+    report = ResearchReport(
+        query=brief.topic,
+        mode=ResearchMode.DEEP,
+        brief=brief,
+        sources=[document],
+        candidates=[Candidate("Beam", "Reflection AI", document.content, "S1", access="open")],
+        evidence=[
+            EvidenceItem(
+                "S1",
+                document.content,
+                passage_id="beam-open-weight",
+                start_offset=0,
+                end_offset=len(document.content),
+                document_hash=document.content_hash,
+            )
+        ],
+        citations=[Citation("S1", document.url, document.title, document.domain)],
+        coverage=[
+            Subquestion("closed", "Latest closed-source release", ["llm_release:closed"], status="unresolved"),
+            Subquestion("open", "Latest open-weight release", ["llm_release:open"], status="unresolved"),
+        ],
+    )
+    report.bind_passages()
+
+    answer = assemble_answer(report)
+
+    assert "Beam** is described as open-weight [S1]" in answer
+    assert "Unresolved: latest open-weight model and release date." in answer
+    assert "Unresolved: latest closed-source model and release date." in answer
+    assert "released on" not in answer
+    assert validate_claim_support(answer, report)
 
 
 def test_assemble_answer_candidate_scoring_edge_cases():

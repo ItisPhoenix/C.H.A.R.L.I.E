@@ -319,19 +319,27 @@ class Config:
         metadata=_meta("RESEARCH_MAX_CONCURRENCY", "Research Advanced"),
     )
     research_max_search_queries: int = field(
-        default=int(os.getenv("RESEARCH_MAX_SEARCH_QUERIES", "6")),
+        default=int(os.getenv("RESEARCH_MAX_SEARCH_QUERIES", "24")),
         metadata=_meta("RESEARCH_MAX_SEARCH_QUERIES", "Research Advanced"),
     )
     research_max_sources: int = field(
-        default=int(os.getenv("RESEARCH_MAX_SOURCES", "12")),
+        default=int(os.getenv("RESEARCH_MAX_SOURCES", "40")),
         metadata=_meta("RESEARCH_MAX_SOURCES", "Research Advanced"),
+    )
+    research_max_iterations: int = field(
+        default=int(os.getenv("RESEARCH_MAX_ITERATIONS", "6")),
+        metadata=_meta("RESEARCH_MAX_ITERATIONS", "Research Advanced"),
+    )
+    research_max_llm_calls: int = field(
+        default=int(os.getenv("RESEARCH_MAX_LLM_CALLS", "10")),
+        metadata=_meta("RESEARCH_MAX_LLM_CALLS", "Research Advanced"),
     )
     research_max_pages_per_domain: int = field(
         default=int(os.getenv("RESEARCH_MAX_PAGES_PER_DOMAIN", "4")),
         metadata=_meta("RESEARCH_MAX_PAGES_PER_DOMAIN", "Research Advanced"),
     )
     research_crawl_enabled: bool = field(
-        default=os.getenv("RESEARCH_CRAWL_ENABLED", "true").lower() == "true",
+        default=os.getenv("RESEARCH_CRAWL_ENABLED", "false").lower() == "true",
         metadata=_meta("RESEARCH_CRAWL_ENABLED", "Web Research"),
     )
     research_ddg_enabled: bool = field(
@@ -347,19 +355,19 @@ class Config:
         metadata=_meta("RESEARCH_CRAWL_MAX_PAGES", "Research Advanced"),
     )
     research_fetch_timeout_s: float = field(
-        default=float(os.getenv("RESEARCH_FETCH_TIMEOUT_S", "12")),
+        default=float(os.getenv("RESEARCH_FETCH_TIMEOUT_S", "20")),
         metadata=_meta("RESEARCH_FETCH_TIMEOUT_S", "Research Advanced"),
     )
     research_total_timeout_quick_s: float = field(
-        default=float(os.getenv("RESEARCH_TOTAL_TIMEOUT_QUICK_S", "15")),
+        default=float(os.getenv("RESEARCH_TOTAL_TIMEOUT_QUICK_S", "20")),
         metadata=_meta("RESEARCH_TOTAL_TIMEOUT_QUICK_S", "Research Advanced"),
     )
     research_total_timeout_standard_s: float = field(
-        default=float(os.getenv("RESEARCH_TOTAL_TIMEOUT_STANDARD_S", "45")),
+        default=float(os.getenv("RESEARCH_TOTAL_TIMEOUT_STANDARD_S", "75")),
         metadata=_meta("RESEARCH_TOTAL_TIMEOUT_STANDARD_S", "Research Advanced"),
     )
     research_total_timeout_deep_s: float = field(
-        default=float(os.getenv("RESEARCH_TOTAL_TIMEOUT_DEEP_S", "120")),
+        default=float(os.getenv("RESEARCH_TOTAL_TIMEOUT_DEEP_S", "150")),
         metadata=_meta("RESEARCH_TOTAL_TIMEOUT_DEEP_S", "Research Advanced"),
     )
     research_jina_enabled: bool = field(
@@ -367,8 +375,24 @@ class Config:
         metadata=_meta("RESEARCH_JINA_ENABLED", "Research Advanced"),
     )
     research_total_timeout_sustained_s: float = field(
-        default=float(os.getenv("RESEARCH_TOTAL_TIMEOUT_SUSTAINED_S", "180")),
+        default=float(os.getenv("RESEARCH_TOTAL_TIMEOUT_SUSTAINED_S", "300")),
         metadata=_meta("RESEARCH_TOTAL_TIMEOUT_SUSTAINED_S", "Research Advanced"),
+    )
+    research_synthesis_reserve_quick_s: float = field(
+        default=float(os.getenv("RESEARCH_SYNTHESIS_RESERVE_QUICK_S", "4")),
+        metadata=_meta("RESEARCH_SYNTHESIS_RESERVE_QUICK_S", "Research Advanced"),
+    )
+    research_synthesis_reserve_standard_s: float = field(
+        default=float(os.getenv("RESEARCH_SYNTHESIS_RESERVE_STANDARD_S", "12")),
+        metadata=_meta("RESEARCH_SYNTHESIS_RESERVE_STANDARD_S", "Research Advanced"),
+    )
+    research_synthesis_reserve_deep_s: float = field(
+        default=float(os.getenv("RESEARCH_SYNTHESIS_RESERVE_DEEP_S", "20")),
+        metadata=_meta("RESEARCH_SYNTHESIS_RESERVE_DEEP_S", "Research Advanced"),
+    )
+    research_synthesis_reserve_sustained_s: float = field(
+        default=float(os.getenv("RESEARCH_SYNTHESIS_RESERVE_SUSTAINED_S", "30")),
+        metadata=_meta("RESEARCH_SYNTHESIS_RESERVE_SUSTAINED_S", "Research Advanced"),
     )
     research_max_verify_rounds: int = field(
         default=int(os.getenv("RESEARCH_MAX_VERIFY_ROUNDS", "2")),

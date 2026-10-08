@@ -98,6 +98,51 @@ def test_session_metadata_ops(tmp_path):
                 except OSError:
                     pass
 
+
+def test_dashboard_history_is_session_scoped_bounded_and_survives_reopen(tmp_path):
+    db_path = str(tmp_path / "dashboard_history.db")
+    store = SessionStore(db_path)
+    store.create_session("session-a", title="Dashboard", source="web")
+    store.create_session("session-b", title="Other", source="web")
+    try:
+        store.append_dashboard_event(
+            "session-a", "research-1", "research_result", {"result_id": "research-1", "text": "first"}
+        )
+        store.append_dashboard_event(
+            "session-a", "research-1", "research_result", {"result_id": "research-1", "text": "updated"}
+        )
+        store.append_dashboard_event(
+            "session-b", "research-2", "research_result", {"result_id": "research-2", "text": "other session"}
+        )
+        for index in range(45):
+            store.append_dashboard_event(
+                "session-a", f"activity-{index}", "tool_result", {"message": str(index)}
+            )
+
+        events = store.get_dashboard_events("session-a", limit=60)
+        research = [event for event in events if event["type"] == "research_result"]
+        activity = [event for event in events if event["type"] == "tool_result"]
+        assert len(research) == 1
+        assert research[0]["id"] == "research-1"
+        assert research[0]["payload"] == {"result_id": "research-1", "text": "updated"}
+        assert len(activity) == 40
+        assert activity[0]["payload"]["message"] == "5"
+        assert activity[-1]["payload"]["message"] == "44"
+        other_session = store.get_dashboard_events("session-b")
+        assert len(other_session) == 1
+        assert other_session[0]["payload"]["result_id"] == "research-2"
+        store.delete_session("session-b")
+        assert store.get_dashboard_events("session-b") == []
+    finally:
+        store.close()
+
+    reopened = SessionStore(db_path)
+    try:
+        assert reopened.get_dashboard_events("session-a", limit=60) == events
+        assert reopened.get_session_messages("session-a") == []
+    finally:
+        reopened.close()
+
 def test_append_tool_and_reload(tmp_path):
     """Tool results persisted via append_tool must survive round-trip through get_session_messages."""
     db_path = str(tmp_path / "test_sessions_tool.db")

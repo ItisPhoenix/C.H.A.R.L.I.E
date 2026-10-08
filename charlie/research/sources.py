@@ -98,6 +98,66 @@ OFFICIAL_REGISTRY: Dict[str, Dict[str, any]] = {
         "canonical_paths": [],
         "aliases": [],
     },
+    "httpx": {
+        "domains": {"python-httpx.org"},
+        "canonical_paths": [],
+        "documentation_urls": [
+            "https://www.python-httpx.org/async/",
+            "https://www.python-httpx.org/quickstart/",
+            "https://www.python-httpx.org/compatibility/",
+            "https://www.python-httpx.org/advanced/clients/",
+        ],
+        "aliases": [],
+    },
+    "aiohttp": {
+        "domains": {"aiohttp.org"},
+        "canonical_paths": [],
+        "documentation_urls": [
+            "https://docs.aiohttp.org/en/stable/client_quickstart.html",
+            "https://docs.aiohttp.org/en/stable/client_advanced.html",
+            "https://docs.aiohttp.org/en/stable/client_reference.html",
+        ],
+        "aliases": [],
+    },
+    "owasp": {
+        "domains": {"owasp.org"},
+        "canonical_paths": [],
+        "documentation_urls": [
+            "https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html",
+        ],
+        "aliases": [],
+    },
+    "portswigger": {
+        "domains": {"portswigger.net"},
+        "canonical_paths": [],
+        "documentation_urls": ["https://portswigger.net/web-security/ssrf"],
+        "aliases": [],
+    },
+    "searxng": {
+        "domains": {"searxng.org"},
+        "canonical_paths": [],
+        "documentation_urls": [
+            "https://docs.searxng.org/",
+            "https://docs.searxng.org/admin/settings/settings_search.html",
+            "https://docs.searxng.org/admin/settings/settings_engines.html",
+        ],
+        "aliases": [],
+    },
+    "crawl4ai": {
+        "domains": {"crawl4ai.com"},
+        "canonical_paths": [],
+        "documentation_urls": [
+            "https://docs.crawl4ai.com/",
+            "https://docs.crawl4ai.com/core/installation/",
+        ],
+        "aliases": [],
+    },
+    "scrapling": {
+        "domains": {"scrapling.readthedocs.io"},
+        "canonical_paths": [],
+        "documentation_urls": ["https://scrapling.readthedocs.io/en/latest/"],
+        "aliases": [],
+    },
 }
 
 # Major Indian retailers
@@ -165,6 +225,11 @@ def get_official_domains(brand: str) -> List[str]:
     return []
 
 
+def get_official_document_urls(brand: str) -> List[str]:
+    info = OFFICIAL_REGISTRY.get(brand.lower())
+    return list(info.get("documentation_urls", [])) if info else []
+
+
 def classify(
     url: str,
     brief: Optional[ResearchBrief] = None,
@@ -224,9 +289,19 @@ def classify(
     if org_domain in REVIEW_SITES or host in REVIEW_SITES:
         return SourceClass.REVIEW
 
-    # Unverified official heuristic: brand name appears as exact label in domain
-    if target_brand and target_brand in org_domain.split("."):
-        return SourceClass.OFFICIAL_UNVERIFIED
+    # Mark a publisher unverified-official when its registrable host matches the discovered developer name.
+    if target_brand:
+        generic_brand_terms = {"ai", "lab", "labs", "research", "the", "inc", "llc", "ltd", "company"}
+        brand_terms = set(re.findall(r"[a-z0-9]+", target_brand.casefold())) - generic_brand_terms
+        domain_terms = set(re.findall(r"[a-z0-9]+", org_domain.casefold())) - {
+            "com", "org", "net", "co", "io", "ai", "dev", "app", "tech"
+        }
+        if brand_terms and brand_terms.issubset(domain_terms):
+            return SourceClass.OFFICIAL_UNVERIFIED
+        compact_brand = "".join(sorted(brand_terms))
+        compact_domain = "".join(sorted(domain_terms))
+        if compact_brand and compact_brand == compact_domain:
+            return SourceClass.OFFICIAL_UNVERIFIED
 
     return SourceClass.UNKNOWN
 
@@ -256,6 +331,12 @@ def citable_for(aspect: str, source_class: SourceClass | str, policy: str = "off
     if policy == "official_required":
         return s_class in (SourceClass.OFFICIAL, SourceClass.OFFICIAL_STORE)
     elif policy == "official_preferred":
-        return s_class in (SourceClass.OFFICIAL, SourceClass.OFFICIAL_STORE, SourceClass.OFFICIAL_UNVERIFIED, SourceClass.REVIEW, SourceClass.REFERENCE)
+        return s_class in (
+            SourceClass.OFFICIAL,
+            SourceClass.OFFICIAL_STORE,
+            SourceClass.OFFICIAL_UNVERIFIED,
+            SourceClass.REVIEW,
+            SourceClass.REFERENCE,
+        )
 
     return True
