@@ -13,6 +13,24 @@ from charlie.core import (
     pending_tool_approvals,
     resolve_tool_approval,
 )
+from main import _parse_owner_text_approval
+
+
+@pytest.mark.parametrize(
+    ("platform", "approval_channel", "text", "expected"),
+    [
+        ("voice", "voice", "Yes", True),
+        ("console", "console", "Yes", True),
+        ("console", "console", "No", False),
+        ("telegram", "telegram", "Yes", None),
+    ],
+)
+def test_owner_text_approval_uses_channel_parser(platform, approval_channel, text, expected):
+    assert _parse_owner_text_approval(
+        text,
+        platform=platform,
+        approval_channel=approval_channel,
+    ) is expected
 
 
 @pytest.fixture

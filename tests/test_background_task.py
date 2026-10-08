@@ -11,6 +11,18 @@ from charlie.results import ResultsStore
 from charlie.session_store import SessionStore
 from charlie.task_journal import TaskJournal, TaskOrigin, TaskStatus, TaskTransitionError
 from charlie.tasks import TaskManager
+
+
+def _research_report_fixture(query, mode):
+    from charlie.research.models import Citation, EvidenceItem, ResearchReport, SourceDocument
+    return ResearchReport(
+        query=query, mode=mode, stop_reason="evidence-sufficient",
+        sources=[SourceDocument(
+            url="https://example.invalid/fixture", source_id="S1", content="TEST/MOCK lifecycle evidence.",
+        )],
+        citations=[Citation("S1", "https://example.invalid/fixture", "TEST/MOCK source", "example.invalid")],
+        evidence=[EvidenceItem("S1", "TEST/MOCK lifecycle evidence.")],
+    )
 from charlie.turn_contracts import ResultEnvelope
 
 
@@ -341,7 +353,7 @@ async def test_planner_failure_marks_task_failed_without_executing_steps(monkeyp
 
 @pytest.mark.asyncio
 async def test_sustained_research_uses_task_lane_and_preserves_request_identity(monkeypatch, bg_config):
-    from charlie.research.models import ResearchMode, ResearchProgress, ResearchReport
+    from charlie.research.models import ResearchMode, ResearchProgress
 
     class FakeBrain:
         def __init__(self, config, **kwargs):
@@ -361,14 +373,14 @@ async def test_sustained_research_uses_task_lane_and_preserves_request_identity(
     progress = []
 
     class FakeEngine:
-        def __init__(self, config, *, progress=None, browser_fetch=None):
+        def __init__(self, config, *, progress=None, browser_fetch=None, **kwargs):
             self.progress_callback = progress
 
-        async def run(self, query, mode, *, cancel_event=None):
+        async def run(self, query, mode, *, cancel_event=None, sustained=False):
             await self.progress_callback(ResearchProgress("searching", "Searching", mode=ResearchMode.DEEP))
             progress.append(query)
             await self.progress_callback(ResearchProgress("done", "Done", mode=ResearchMode.DEEP))
-            return ResearchReport(query=query, mode=ResearchMode.DEEP, stop_reason="evidence-sufficient")
+            return _research_report_fixture(query, ResearchMode.DEEP)
 
     monkeypatch.setattr(background_task, "Brain", FakeBrain)
     monkeypatch.setattr("charlie.research.engine.ResearchEngine", FakeEngine)
@@ -404,6 +416,7 @@ async def test_sustained_research_uses_task_lane_and_preserves_request_identity(
         "session_id": "session-research",
         "task_id": task.id,
         "turn_id": "turn-research",
+        "channel": "voice",
     }
     assert any(event_type == "research_progress" for event_type, _payload in bus.events)
 
@@ -491,7 +504,7 @@ async def test_research_without_fetched_sources_does_not_synthesize_or_cite_sear
 
 @pytest.mark.asyncio
 async def test_two_safe_research_tasks_overlap_within_configured_bound(monkeypatch, bg_config):
-    from charlie.research.models import ResearchMode, ResearchReport
+    from charlie.research.models import ResearchMode
 
     started = []
     release = asyncio.Event()
@@ -515,10 +528,10 @@ async def test_two_safe_research_tasks_overlap_within_configured_bound(monkeypat
         def __init__(self, config, **kwargs):
             pass
 
-        async def run(self, query, mode, *, cancel_event=None):
+        async def run(self, query, mode, *, cancel_event=None, sustained=False):
             started.append(query)
             await release.wait()
-            return ResearchReport(query=query, mode=ResearchMode.STANDARD, stop_reason="evidence-sufficient")
+            return _research_report_fixture(query, ResearchMode.STANDARD)
 
     monkeypatch.setattr(background_task, "Brain", FakeBrain)
     monkeypatch.setattr("charlie.research.engine.ResearchEngine", FakeEngine)
@@ -560,7 +573,7 @@ async def test_cancelling_sustained_research_reaches_canonical_cancelled(monkeyp
         def __init__(self, config, **kwargs):
             pass
 
-        async def run(self, query, mode, *, cancel_event=None):
+        async def run(self, query, mode, *, cancel_event=None, sustained=False):
             while cancel_event is None or not cancel_event.is_set():
                 await asyncio.sleep(0.005)
             return ResearchReport(query=query, mode=ResearchMode.DEEP, stop_reason="cancelled")

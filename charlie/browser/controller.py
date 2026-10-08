@@ -1,8 +1,7 @@
-"""Playwright lifecycle: lazy launch, warm/idle-shutdown, and the one dedicated browser thread.
+"""Playwright lifecycle for private headless and visible user-browser profiles.
 
-All state below is only ever touched from BROWSER_EXECUTOR's single worker thread -- launch,
-navigation and shutdown all run as submitted callables, so there is no cross-thread access to
-the thread-affine Playwright objects and no lock is needed around them.
+All state below is only ever touched from BROWSER_EXECUTOR's single worker thread. Both profiles
+share one thread-affine Playwright runtime but have separate persistent contexts.
 """
 
 import logging
@@ -31,6 +30,9 @@ _playwright = None
 _context = None
 _page = None
 _headless_mode: Optional[bool] = None
+_user_context = None
+_user_page = None
+_user_profile_path: Optional[str] = None
 _last_used_at = 0.0
 _resources_blocked = True
 _idle_timer: Optional[threading.Timer] = None
@@ -55,19 +57,34 @@ def _page_is_alive() -> bool:
         return False
 
 
+def _user_page_is_alive() -> bool:
+    if _user_page is None or _user_context is None:
+        return False
+    try:
+        if _user_page.is_closed():
+            return False
+        browser = getattr(_user_context, "browser", None)
+        if browser is not None and hasattr(browser, "is_connected") and not browser.is_connected():
+            return False
+        return bool(_user_context.pages)
+    except Exception:
+        return False
+
+
 def _dispose_stale() -> None:
     """Best-effort disposal for dead Playwright objects, always on browser thread."""
     global _playwright, _context, _page, _headless_mode
     from charlie.browser.session import reset_session
     reset_session()
-    for resource in (_context, _playwright):
+    for resource in (_context, _playwright if _user_context is None else None):
         if resource is None:
             continue
         try:
             resource.close() if resource is _context else resource.stop()
         except Exception:
             logger.debug("Ignoring stale browser cleanup failure", exc_info=True)
-    _playwright = None
+    if _user_context is None:
+        _playwright = None
     _context = None
     _page = None
     _headless_mode = None
@@ -80,9 +97,10 @@ def _block_heavy_resources(route: Any) -> None:
         route.continue_()
 
 
-def _launch(*, headless: Optional[bool] = None) -> None:
-    """Start Playwright and open the one persistent page. Must run on the browser thread."""
-    global _playwright, _context, _page, _headless_mode
+def _ensure_playwright() -> None:
+    global _playwright
+    if _playwright is not None:
+        return
     if not BROWSER_EXECUTOR:
         raise BrowserUnavailable("playwright is not installed")
     import asyncio
@@ -98,6 +116,12 @@ def _launch(*, headless: Optional[bool] = None) -> None:
                 asyncio.set_event_loop_policy(prior_policy)
     else:
         _playwright = sync_playwright().start()
+
+
+def _launch(*, headless: Optional[bool] = None) -> None:
+    """Open the private persistent page on the shared browser worker."""
+    global _context, _page, _headless_mode
+    _ensure_playwright()
     headless_mode = config.browser_headless if headless is None else headless
     launch_kwargs = dict(
         user_data_dir=config.browser_profile_path,
@@ -130,6 +154,33 @@ def _launch(*, headless: Optional[bool] = None) -> None:
         playwright_version,
         browser_version,
     )
+
+
+def _launch_user() -> None:
+    """Launch Charlie's visible, persistent browser profile on the browser thread."""
+    global _playwright, _user_context, _user_page, _user_profile_path
+    if not BROWSER_EXECUTOR:
+        raise BrowserUnavailable("playwright is not installed")
+    from charlie.computer.manifest import resolve_browser_executable
+    from charlie.privacy_service import validate_browser_profile_path
+
+    _ensure_playwright()
+    executable = resolve_browser_executable("brave") or resolve_browser_executable("chrome")
+    if not executable:
+        raise BrowserUnavailable("No installed visible browser executable was found")
+    profile = str(validate_browser_profile_path(config.browser_user_profile_path))
+    if profile.casefold() == os.path.abspath(str(config.browser_profile_path)).casefold():
+        raise BrowserUnavailable("Visible and private browser profiles must be different")
+    os.makedirs(profile, exist_ok=True)
+    _user_profile_path = profile
+    _user_context = _playwright.chromium.launch_persistent_context(
+        user_data_dir=profile,
+        executable_path=executable,
+        headless=False,
+        viewport={"width": 1280, "height": 900},
+    )
+    _user_page = _user_context.pages[0] if _user_context.pages else _user_context.new_page()
+    logger.info("Visible browser controller launched: profile=%s executable=%s", profile, executable)
 
 
 def _ensure_launched() -> Any:
@@ -178,6 +229,15 @@ def prepare_user_visible(timeout: float = 10.0) -> Dict[str, Any]:
     if not BROWSER_EXECUTOR:
         raise BrowserUnavailable("playwright is not installed")
     return BROWSER_EXECUTOR.submit(_prepare_user_visible_on_thread).result(timeout=timeout)
+
+
+def prepare_user_browser(timeout: float = 10.0) -> Dict[str, Any]:
+    """Launch Charlie's visible persistent browser profile and return its identity."""
+    if not BROWSER_EXECUTOR:
+        raise BrowserUnavailable("playwright is not installed")
+    return BROWSER_EXECUTOR.submit(_run_user_on_thread, runtime_user_identity).result(
+        timeout=timeout
+    )
 
 
 def _windows_session_id(pid: Optional[int]) -> Optional[int]:
@@ -295,6 +355,29 @@ def runtime_identity(page: Any) -> Dict[str, Any]:
     }
 
 
+def runtime_user_identity(page: Any) -> Dict[str, Any]:
+    """Expose identities for the visible persistent browser lane."""
+    browser = getattr(_user_context, "browser", None) if _user_context is not None else None
+
+    def guid(value: Any) -> Optional[str]:
+        return getattr(getattr(value, "_impl_obj", None), "_guid", None)
+
+    try:
+        browser_version = browser.version if browser is not None else None
+    except Exception:
+        browser_version = None
+    return {
+        "browser_pid": None,
+        "windows_session_id": None,
+        "browser_id": guid(browser),
+        "browser_context_id": guid(_user_context),
+        "target_id": guid(page),
+        "browser_version": browser_version,
+        "profile_path": _user_profile_path,
+        "headless": False,
+    }
+
+
 def set_resource_blocking(enabled: bool) -> None:
     """Toggle image/font/media blocking; the vision fallback disables it for a real screenshot."""
     global _resources_blocked
@@ -349,6 +432,36 @@ def run(fn: Callable[[Any], T], timeout: Optional[float] = None, retry_on_stale:
     return future.result(timeout=timeout)
 
 
+def _run_user_on_thread(fn: Callable[[Any], T]) -> T:
+    global _user_page
+    if _user_page is None or not _user_page_is_alive():
+        _launch_user()
+    return fn(_user_page)
+
+
+def run_user(fn: Callable[[Any], T], timeout: Optional[float] = None) -> T:
+    """Run one operation against Charlie's visible persistent browser profile."""
+    if not BROWSER_EXECUTOR:
+        raise BrowserUnavailable("playwright is not installed")
+    future = BROWSER_EXECUTOR.submit(_run_user_on_thread, fn)
+    return future.result(timeout=timeout)
+
+
+def _run_user_context_on_thread(fn: Callable[[Any], T]) -> T:
+    global _user_page
+    if _user_page is None or not _user_page_is_alive():
+        _launch_user()
+    return fn(_user_context)
+
+
+def run_user_context(fn: Callable[[Any], T], timeout: Optional[float] = None) -> T:
+    """Run one operation against Charlie's visible browser context."""
+    if not BROWSER_EXECUTOR:
+        raise BrowserUnavailable("playwright is not installed")
+    future = BROWSER_EXECUTOR.submit(_run_user_context_on_thread, fn)
+    return future.result(timeout=timeout)
+
+
 def warm() -> None:
     """Fire-and-forget launch, called on wake-word so the browser is ready before a command lands."""
     if not BROWSER_EXECUTOR or _page is not None:
@@ -357,9 +470,14 @@ def warm() -> None:
 
 
 def _shutdown_on_thread() -> None:
-    global _playwright, _context, _page, _headless_mode
+    global _playwright, _context, _page, _headless_mode, _user_context, _user_page, _user_profile_path
     from charlie.browser.session import reset_session
     reset_session()
+    if _user_context is not None:
+        try:
+            _user_context.close()
+        except Exception:
+            logger.warning("Error closing visible browser context", exc_info=True)
     if _context is not None:
         try:
             _context.close()
@@ -374,6 +492,9 @@ def _shutdown_on_thread() -> None:
     _context = None
     _page = None
     _headless_mode = None
+    _user_context = None
+    _user_page = None
+    _user_profile_path = None
     logger.info("Browser controller shut down (idle)")
 
 
@@ -395,7 +516,7 @@ def _idle_check() -> None:
             and time.monotonic() - _last_used_at >= config.browser_idle_timeout_s
         )
     if idle and BROWSER_EXECUTOR:
-        BROWSER_EXECUTOR.submit(_shutdown_on_thread)
+        BROWSER_EXECUTOR.submit(_dispose_stale)
 
 
 def acquire_task_lease() -> None:
@@ -419,5 +540,5 @@ def release_task_lease() -> None:
 
 def shutdown() -> None:
     """Explicit shutdown, e.g. on process exit."""
-    if BROWSER_EXECUTOR and _page is not None:
+    if BROWSER_EXECUTOR and (_page is not None or _user_page is not None):
         BROWSER_EXECUTOR.submit(_shutdown_on_thread).result(timeout=10)

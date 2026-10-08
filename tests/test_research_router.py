@@ -231,7 +231,7 @@ def test_clean_query_removes_insufficient_evidence_reply_instruction():
 
 def test_standard_plan_does_not_split_on_conjunctions():
     plan = build_plan("best IEMs under ₹2000 for gaming and music", ResearchMode.STANDARD)
-    assert plan.queries[0].text == "best IEMs under ₹2000 for gaming and music"
+    assert plan.queries[0].text == "IEMs under 2000 rupees for gaming and music"
     assert any("price" in item for item in plan.constraints)
 
 
@@ -387,7 +387,7 @@ async def test_standard_research_reports_insufficient_evidence_without_extracted
     engine = ResearchEngine(config)
     monkeypatch.setattr(engine, "_providers", lambda: [Provider()])
     report = await engine.run("research current WebAssembly capabilities", "standard")
-    assert report.stop_reason == "insufficient-evidence"
+    assert report.stop_reason == "no-results"
     assert report.citations == []
     assert report.prompt_context() == ""
 

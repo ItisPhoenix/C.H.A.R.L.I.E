@@ -299,6 +299,25 @@ def _should_queue_active_turn(turn_active: bool, approval_pending: bool, channel
     return turn_active and (not approval_pending or channel == "telegram")
 
 
+def _preempt_foreground_for_speech(brain: Any, task: Any) -> bool:
+    """An approval answer must not cancel the action waiting for that answer."""
+    from charlie.core import get_active_tool_approval
+    if get_active_tool_approval() is not None:
+        return False
+    brain.cancel_chat()
+    task.cancel()
+    return True
+
+
+def _parse_owner_text_approval(text: str, *, platform: str, approval_channel: str) -> Optional[bool]:
+    """Parse typed approval only on the owner channel that issued the prompt."""
+    if platform == approval_channel and platform in {"voice", "console"}:
+        return parse_yes_no(text)
+    from charlie.telegram_bot import parse_text_approval_response
+
+    return parse_text_approval_response(text)
+
+
 def _telegram_approval_reason(tool_name: str, risk_class: Any, reason: str = "") -> str:
     risk = str(getattr(risk_class, "value", risk_class)).casefold()
     if tool_name == "shell_execute":
@@ -598,6 +617,7 @@ async def _start_sustained_research_task(
             on_operation_result=on_operation_result,
             on_thinking_update=on_thinking_update,
             announce=False,
+            approval_platform=request.channel,
         )
     except Exception:
         logger.error("sustained_research_start_failed | turn_id=%s", request.turn_id, exc_info=True)
@@ -610,7 +630,7 @@ async def _start_sustained_research_task(
             )
             await event_bus.emit(
                 "token",
-                {"text": message, "session_id": request.session_id},
+                {"text": message, "session_id": request.session_id, "channel": request.channel},
                 meta=EventMeta(source=EventSource.TASK, session_id=request.session_id, turn_id=request.turn_id),
             )
             await event_bus.emit(
@@ -625,7 +645,13 @@ async def _start_sustained_research_task(
             )
         return None
 
-    message = "Started. I'll keep working on that research and let you know when it is ready."
+    message = "Research started."
+    if store is not None:
+        try:
+            store.append("assistant", message, session_id=request.session_id, turn_id=request.turn_id)
+            store.touch_session(request.session_id)
+        except Exception:
+            logger.warning("sustained_research_ack_archive_failed", exc_info=True)
     logger.info(
         "sustained_research_started | task_id=%s | turn_id=%s | session_id=%s | status=%s",
         task.id,
@@ -636,7 +662,7 @@ async def _start_sustained_research_task(
     if event_bus is not None:
         await event_bus.emit(
             "token",
-            {"text": message, "session_id": request.session_id},
+            {"text": message, "session_id": request.session_id, "channel": request.channel},
             meta=EventMeta(
                 source=EventSource.TASK,
                 task_id=task.id,
@@ -656,7 +682,7 @@ async def _start_sustained_research_task(
                 rationale="sustained research task runs independently",
             ),
         )
-    if voice is not None:
+    if voice is not None and request.channel == "voice":
         voice.speak(message, "neutral")
     return task
 
@@ -2103,7 +2129,7 @@ def _safe_speak(
     A mid-stream TTS error must never abort the answer generation loop --
     the UI token stream and message persistence downstream must still run.
     """
-    if channel == "console":
+    if channel is not None and channel != "voice":
         return
     text = re.sub(r"\[S\d+\]", "", text or "").replace("  ", " ").strip()
     if not text:
@@ -2273,7 +2299,24 @@ def _clean_background_result(full_result: str, fallback_summary: str = "") -> st
     return "\n".join(deduped) or text
 
 
-async def _deliver_background_result(task_id, summary, *, db_path, telegram_bot, telegram_user_id, voice):
+def _compact_catchup_speech(catchup_message: str) -> str:
+    """Keep idle-return voice updates short; the dashboard retains full details."""
+    text = " ".join((catchup_message or "").split())
+    if re.search(r"(?i)research", text) and re.search(
+        r"(?i)(?:failed|couldn['’]t verify|insufficient|without enough)", text
+    ):
+        return "Research finished without enough verified evidence. Check the dashboard."
+    count = re.search(r"(?i)\b(\d+)\s+things finished\b", text)
+    if count:
+        return f"{count.group(1)} background tasks finished. Check the dashboard."
+    if re.search(r"(?i)\bfailed\b", text):
+        return "A background task failed. Check the dashboard."
+    return "A background task finished. Check the dashboard."
+
+
+async def _deliver_background_result(
+    task_id, summary, *, db_path, telegram_bot, telegram_user_id, voice, channel=None, spoken_summary=None,
+):
     store = ResultsStore(db_path=db_path)
     try:
         record = store.get(task_id)
@@ -2285,20 +2328,21 @@ async def _deliver_background_result(task_id, summary, *, db_path, telegram_bot,
         message = message[:4000].rstrip()
 
     delivery = {"telegram": "not_configured", "voice": "not_configured"}
-    if telegram_bot is not None and isinstance(telegram_user_id, int) and telegram_user_id > 0:
+    if channel == "telegram" and telegram_bot is not None and isinstance(telegram_user_id, int) and telegram_user_id > 0:
         try:
             await telegram_bot.send_message(telegram_user_id, message)
             delivery["telegram"] = "accepted"
         except Exception:
             delivery["telegram"] = "failed"
             logger.warning("Telegram background-result delivery failed for %s", task_id, exc_info=True)
-    if bool(getattr(voice, "is_ready", False)):
+    if channel == "voice" and bool(getattr(voice, "is_ready", False)):
         try:
-            delivery["voice"] = "queued" if voice.speak(message, "neutral") is None else "not_queued"
+            spoken = spoken_summary or message
+            delivery["voice"] = "queued" if voice.speak(spoken, "neutral") is None else "not_queued"
         except Exception:
             delivery["voice"] = "failed"
             logger.warning("Voice background-result delivery failed for %s", task_id, exc_info=True)
-    elif voice is not None:
+    elif channel == "voice" and voice is not None:
         delivery["voice"] = "not_ready"
     return delivery
 
@@ -2515,7 +2559,10 @@ async def main() -> int:
         audit_store = AuditStore(config.session_db_path)
         memory_graph, memory_store, memory_service = _compose_memory_dependencies(config)
         def speaking_callback(text):
-            if voice:
+            channel = turn_channels_by_id.get(active_turn_id or "")
+            if channel != "voice" or voice is None:
+                _print_console_reply(text)
+            elif voice:
                 voice.speak(text, last_emotion)
 
         loop = asyncio.get_running_loop()
@@ -3071,6 +3118,8 @@ async def main() -> int:
             if handled:
                 speech_echo_cooldown = time.time() + 1.5
 
+        web_approval_payload: dict[str, Any] = {}
+
         async def on_tool_approval_request(
             request_id,
             tool_name,
@@ -3083,6 +3132,10 @@ async def main() -> int:
             task_id=None,
             session_id=None,
         ):
+            if tool_name == "desktop_close_app":
+                reason = "Closing an app may lose unsaved changes."
+            elif reason.startswith("operation '") and reason.endswith("requires approval"):
+                reason = "Charlie needs your approval before continuing with this action."
             if platform == "telegram":
                 if not telegram_bot:
                     return False
@@ -3160,9 +3213,30 @@ async def main() -> int:
                                 exc_info=True,
                             )
                 return sent
-            return None
+            if platform == "web":
+                if event_bus is None:
+                    return False
+                web_approval_payload.clear()
+                web_approval_payload.update({
+                    "request_id": request_id, "message": reason, "channel": platform,
+                    "operation_preview": operation_preview or "",
+                })
+                await event_bus.emit(
+                    "tool_approval_request", dict(web_approval_payload),
+                    meta=EventMeta(source=EventSource.BRAIN, turn_id=turn_id, task_id=task_id, session_id=session_id),
+                )
+                return True
+            if platform == "voice":
+                if voice is None or not voice.is_ready:
+                    return False
+                _safe_speak(voice, f"Need your OK: {reason}. Yes or no?", last_emotion, channel="voice")
+                return True
+            if platform == "console":
+                _print_console_reply(f"Need your OK: {reason}. Yes or no?")
+                return True
+            return False
 
-        async def on_result_stored(task_id, summary, attention_level):
+        async def on_result_stored(task_id, summary, attention_level, *, channel=None, spoken_summary=None):
             try:
                 return await _deliver_background_result(
                     task_id,
@@ -3171,6 +3245,8 @@ async def main() -> int:
                     telegram_bot=telegram_bot,
                     telegram_user_id=config.telegram_user_id,
                     voice=voice,
+                    channel=channel,
+                    spoken_summary=spoken_summary,
                 )
             finally:
                 # Result persistence can race the journal terminal callback;
@@ -3187,10 +3263,71 @@ async def main() -> int:
                             telegram_background_tasks_by_turn.pop(parent_turn_id, None)
                             telegram_origin_turn_ids.discard(parent_turn_id)
 
-        def on_research_result(report, *, session_id, task_id=None, turn_id=None):
+        latest_research_results = {}
+
+        def on_research_result(report, *, session_id, task_id=None, turn_id=None, channel=None):
+            nonlocal latest_research_results
             if event_bus is None:
                 return
-            payload = {"query": report.query, "text": report.legacy_text()}
+            from charlie.research.search import clean_query
+            from charlie.research.citations import referenced_ids
+            from charlie.research.sources import SourceClass
+            from datetime import datetime, timezone
+
+            used_sources = referenced_ids(report.answer) if getattr(report, "answer", "") else set()
+            sources_list = []
+            for citation in report.citations:
+                if not used_sources or citation.source_id in used_sources:
+                    s_class = SourceClass.UNKNOWN.value
+                    if hasattr(report, "sources"):
+                        for s in report.sources:
+                            if s.source_id == citation.source_id:
+                                s_class = getattr(s, "source_class", SourceClass.UNKNOWN.value)
+                                break
+                    sources_list.append({
+                        "id": citation.source_id,
+                        "title": citation.title,
+                        "url": citation.url,
+                        "class": s_class,
+                    })
+
+            sources_text = "\n".join(
+                f"[{item['id']}] {item['title']}: {item['url']}"
+                for item in sources_list
+            )
+            answer = report.answer or "Research finished without a verified answer."
+            if store is not None and session_id:
+                try:
+                    store.append("assistant", answer, session_id=session_id, turn_id=turn_id)
+                    store.touch_session(session_id)
+                except SessionNotFoundError:
+                    logger.warning(
+                        "session_persistence_dropped | phase=sustained_research_answer | session_id=%s | turn_id=%s | reason=session_deleted",
+                        session_id,
+                        turn_id,
+                    )
+                except Exception:
+                    logger.warning("sustained_research_answer_archive_failed", exc_info=True)
+            legacy_text = f"{answer}\n\nSources:\n{sources_text}" if sources_text else answer
+            topic = report.brief.topic if getattr(report, "brief", None) and report.brief.topic else clean_query(report.query)
+            payload = {
+                "result_id": task_id or turn_id,
+                "channel": channel or turn_channels_by_id.get(turn_id or ""),
+                "turn_id": turn_id,
+                "session_id": session_id,
+                "query": topic,
+                "text": legacy_text,
+                "answer": answer,
+                "partial": getattr(report, "partial", False),
+                "synthesis": getattr(report, "synthesis_kind", "model"),
+                "gaps": getattr(report, "gaps", []),
+                "sources": sources_list,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if session_id:
+                latest_research_results[session_id] = payload
+            else:
+                latest_research_results["default"] = payload
             _submit_event_threadsafe(
                 event_bus.emit(
                     "research_result",
@@ -3418,7 +3555,11 @@ async def main() -> int:
             for stale in [k for k, t in recent_turn_texts.items() if now - t >= _DEDUPE_WINDOW_SEC]:
                 del recent_turn_texts[stale]
             last_dispatch = recent_turn_texts.get(normalized)
-            if last_dispatch is not None and now - last_dispatch < _DEDUPE_WINDOW_SEC:
+            from charlie.core import get_active_tool_approval
+            pending_approval = get_active_tool_approval()
+            approval_answer = bool(pending_approval and pending_approval[1] == "voice"
+                and _parse_owner_text_approval(text, platform="voice", approval_channel="voice") is not None)
+            if not approval_answer and last_dispatch is not None and now - last_dispatch < _DEDUPE_WINDOW_SEC:
                 logger.info(f"Duplicate utterance suppressed ({now - last_dispatch:.1f}s ago): {text}")
                 return
             recent_turn_texts[normalized] = now
@@ -3466,7 +3607,7 @@ async def main() -> int:
             if (
                 callable(sustained_checker)
                 and runtime_config is not None
-                and request.channel in {"voice", "telegram"}
+                and request.channel in {"voice", "telegram", "web"}
                 and get_active_tool_approval() is None
                 and sustained_checker(request.input, runtime_config)
             ):
@@ -3637,12 +3778,41 @@ async def main() -> int:
         async def _web_command(command: dict[str, Any]) -> dict[str, Any]:
             """Route browser commands through canonical runtime owners."""
             command_type = str(command.get("type", ""))
+            if command_type == "update_settings":
+                updates = command.get("updates")
+                if not isinstance(updates, dict) or not updates:
+                    return {"accepted": False, "error": "Choose at least one setting to save."}
+                allowed_keys = {field["key"] for field in settings_service.get_field_specs()}
+                if any(key not in allowed_keys for key in updates):
+                    return {"accepted": False, "error": "The request contains an unknown setting."}
+                from charlie.settings_service import SettingValidationError
+
+                try:
+                    result = await asyncio.to_thread(settings_service.apply_updates, updates)
+                except SettingValidationError as exc:
+                    return {"accepted": False, "error": str(exc)}
+                await _publish_settings_snapshot(event_bus, settings_service, rationale="dashboard settings saved")
+                return {"accepted": True, "saved": result["saved"]}
+            if command_type in {"set_mic_state", "set_audio_state"}:
+                if not config.voice_enabled:
+                    raise ValueError("native voice is unavailable")
+                field = "mic_muted" if command_type == "set_mic_state" else "muted"
+                value = command.get(field)
+                if not isinstance(value, bool):
+                    raise ValueError(f"{field} must be a boolean")
+                state = voice.set_mic_state(value) if field == "mic_muted" else voice.set_audio_state(muted=value)
+                await event_bus.emit(
+                    "mic_state" if field == "mic_muted" else "audio_state",
+                    state,
+                    meta=EventMeta(source=EventSource.VOICE),
+                )
+                return {"accepted": True, **state}
             if command_type == "submit_text":
                 text = command.get("text")
                 if not isinstance(text, str) or not text.strip():
                     raise ValueError("text must be a non-empty string")
                 request = _allocate_turn_request(text.strip(), current_session_id, "web")
-                await _dispatch_or_queue(request)
+                _schedule_process(_dispatch_or_queue(request), loop)
                 return {"accepted": True, "turn_id": request.turn_id, "session_id": request.session_id}
             if command_type == "cancel_task":
                 task_id = command.get("task_id")
@@ -3671,7 +3841,11 @@ async def main() -> int:
             raise ValueError(f"unsupported web command: {command_type}")
 
         def _web_snapshot() -> dict[str, Any]:
+            from charlie.core import get_active_tool_approval
             tasks = get_task_journal().snapshot()
+            research_result = latest_research_results.get(current_session_id) or latest_research_results.get("default")
+            if research_result and research_result.get("channel") == "telegram":
+                research_result = None
             return {
                 "version": 1,
                 "revision": int(time.time()),
@@ -3694,6 +3868,16 @@ async def main() -> int:
                 "tasks": tasks,
                 "active_turn_id": active_turn_id,
                 "active_task_id": active_task_id,
+                "voice": {
+                    "enabled": bool(config.voice_enabled),
+                    **(voice.get_mic_state() if config.voice_enabled else {"mic_muted": True}),
+                    **(voice.get_audio_state() if config.voice_enabled else {"muted": True, "volume": 0.0}),
+                },
+                "research_result": research_result,
+                "settings": settings_service.snapshot(),
+                "approval": dict(web_approval_payload) if get_active_tool_approval() == (
+                    web_approval_payload.get("request_id"), "web",
+                ) else None,
             }
 
         def on_console_text(text: str):
@@ -3773,6 +3957,11 @@ async def main() -> int:
                         logger.warning("Failed to send Telegram reply", exc_info=True)
                 elif platform == "console":
                     _print_console_reply(message)
+                elif platform == "web" and event_bus is not None:
+                    await event_bus.emit(
+                        "token", {"text": message, "session_id": session_id, "channel": "web"},
+                        meta=EventMeta(source=EventSource.BRAIN, session_id=session_id, turn_id=request.turn_id),
+                    )
                 else:
                     _safe_speak(voice, message, last_emotion, "fast-reply", channel=platform)
 
@@ -3805,16 +3994,6 @@ async def main() -> int:
                         },
                     )
 
-            if time.time() < speech_echo_cooldown:
-                record_primary_decision(
-                    intent="control",
-                    routing_source="control",
-                    rationale="speech echo cooldown suppressed the incoming utterance",
-                )
-                logger.info(f"Echo suppressed: {text}")
-                mark_response_complete("suppressed_echo")
-                return
-
             # Route an approval response to its waiting request instead of
             # starting an unrelated chat turn.
             from charlie.core import get_active_tool_approval
@@ -3830,23 +4009,20 @@ async def main() -> int:
                     routing_source="control",
                     rationale="pending tool approval response handled by the control path",
                 )
-                if platform == "voice" and approval_channel == "voice":
-                    answer = parse_yes_no(text)
-                else:
-                    from charlie.telegram_bot import parse_text_approval_response
-
-                    answer = parse_text_approval_response(text)
+                answer = _parse_owner_text_approval(
+                    text,
+                    platform=platform,
+                    approval_channel=approval_channel,
+                )
                 if answer is None:
-                    guidance = "Use the matching Approve or Decline button in Telegram. Typed yes does not approve."
-                    if platform == "voice":
-                        voice.speak(guidance, last_emotion)
-                    elif platform == "console":
-                        await _deliver_immediate_reply(guidance)
-                    elif telegram_bot:
-                        try:
-                            await telegram_bot.send_message(config.telegram_user_id, guidance)
-                        except Exception:
-                            logger.warning("Failed to send Telegram approval guidance", exc_info=True)
+                    if approval_channel == "voice":
+                        guidance = "Please say yes or no."
+                    elif approval_channel == "console":
+                        guidance = "Please type yes or no."
+                    else:
+                        destination = "Charlie" if approval_channel == "web" else "Telegram"
+                        guidance = f"Use the matching Approve or Decline buttons in {destination}."
+                    await _deliver_immediate_reply(guidance)
                     mark_response_complete()
                     return
                 resolved = _resolve_tool_approval_and_notify(
@@ -3871,6 +4047,16 @@ async def main() -> int:
                     except Exception:
                         logger.warning("Failed to send expired-approval notice", exc_info=True)
                 mark_response_complete()
+                return
+
+            if time.time() < speech_echo_cooldown:
+                record_primary_decision(
+                    intent="control",
+                    routing_source="control",
+                    rationale="speech echo cooldown suppressed the incoming utterance",
+                )
+                logger.info(f"Echo suppressed: {text}")
+                mark_response_complete("suppressed_echo")
                 return
 
             print(f"\rHeard: {text}", flush=True)
@@ -4072,7 +4258,7 @@ async def main() -> int:
                         _submit_event_task(
                             event_bus.emit(
                                 "token",
-                                {"text": chunk, "session_id": session_id},
+                                {"text": chunk, "session_id": session_id, "channel": platform},
                                 meta=EventMeta(
                                     source=EventSource.BRAIN,
                                     task_id=task_id,
@@ -4620,7 +4806,7 @@ async def main() -> int:
                 _submit_event_threadsafe(
                     event_bus.emit(
                         "speaking_start",
-                        {"session_id": current_session_id},
+                        {"session_id": current_session_id, "text": getattr(voice, "current_speech_text", "")},
                         meta=EventMeta(source=EventSource.VOICE),
                     ),
                     loop,
@@ -4645,6 +4831,11 @@ async def main() -> int:
 
             def _handle_onset() -> None:
                 _cancel_housekeeping()
+                from charlie.core import get_active_tool_approval
+                pending_approval = get_active_tool_approval()
+                if pending_approval is not None and pending_approval[1] == "voice":
+                    logger.info("speech_onset | foreground=awaiting_voice_approval | cancellation=deferred")
+                    return
                 if active_turn_id is None:
                     logger.info("speech_onset | foreground=idle | sustained_tasks=untouched")
                     return
@@ -4661,12 +4852,13 @@ async def main() -> int:
                         active_operation_name,
                     )
                     return
-                brain.cancel_chat()
+                if not _preempt_foreground_for_speech(brain, task):
+                    logger.info("speech_onset | foreground=awaiting_approval | cancellation=deferred")
+                    return
                 logger.info(
                     "speech_onset_supersession_requested | old_turn_id=%s | sustained_tasks=untouched",
                     active_turn_id,
                 )
-                task.cancel()
 
             try:
                 loop.call_soon_threadsafe(_handle_onset)
@@ -4828,7 +5020,7 @@ async def main() -> int:
                                     {"severity": "info", "message": catchup_msg},
                                     meta=EventMeta(source=EventSource.TASK, rationale="idle-return catch-up"),
                                 )
-                                voice.speak(catchup_msg, "neutral")
+                                voice.speak(_compact_catchup_speech(catchup_msg), "neutral")
                         was_idle = is_idle
                     await asyncio.sleep(1.0)
             except asyncio.CancelledError:
@@ -4849,19 +5041,34 @@ async def main() -> int:
             # The web gateway is a presentation surface, not a runtime
             # dependency. An optional HTTP listener must never be able to end
             # the voice/Telegram runtime: Docker Desktop reserves port ranges
-            # and commonly holds 8001, and an unhandled bind error here used to
+            # and commonly holds the configured web port, and an unhandled bind error here used to
             # propagate out of main() and kill the whole process. Degrade to
             # "gateway unavailable" and keep the assistant running.
             web_gateway = None
             try:
+                token_file = Path("artifacts/web_bootstrap_url.txt")
                 web_gateway = RuntimeWebGateway(
                     loop=loop,
                     command_handler=_web_command,
                     snapshot_getter=_web_snapshot,
                     static_dir=Path(__file__).resolve().parent / "frontend" / "dist",
-                    port=int(os.getenv("CHARLIE_WEB_PORT", "8000")),
+                    port=config.web_port,
+                    bootstrap_token_file=token_file,
                 )
                 web_gateway.start()
+                if web_gateway.bootstrap_url:
+                    print(
+                        f"\n=======================================================\n"
+                        f"Charlie dashboard URL:\n{web_gateway.bootstrap_url}\n"
+                        f"=======================================================\n",
+                        flush=True,
+                    )
+                    if os.getenv("CHARLIE_AUTO_OPEN_BROWSER", "true").lower() == "true" and os.getenv("CHARLIE_TEST_MODE", "").lower() != "true":
+                        try:
+                            import webbrowser
+                            webbrowser.open(web_gateway.bootstrap_url)
+                        except Exception:
+                            pass
             except OSError as exc:
                 logger.warning(
                     "Charlie web gateway unavailable on port %s (%s); continuing without it. "
@@ -5314,6 +5521,11 @@ async def main() -> int:
             logger.warning("Media executor shutdown error: %s", e)
 
         _stop_voice(final=True)
+        try:
+            from charlie.browser import controller as browser_controller
+            browser_controller.shutdown()
+        except Exception as e:
+            logger.debug("Browser controller shutdown error: %s", e)
 
         get_task_journal().set_on_change(None)
         if telegram_bot is not None:

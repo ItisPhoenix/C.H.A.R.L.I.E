@@ -397,14 +397,13 @@ def _build_transcribe_kwargs(
         )
     else:
         _ac = dict(asr_config or {})
-        capture_fields = flags.get("capture")
-        if isinstance(capture_fields, dict) and capture_fields.get("vad_threshold") is not None:
-            _ac["vad_threshold"] = capture_fields["vad_threshold"]
+        capture_fields = flags.get("capture") or {}
         kwargs.update(
             condition_on_previous_text=True,
             beam_size=_ac.get("beam_size", 6),
             best_of=_ac.get("best_of", 6),
-            vad_filter=True,
+            # Capture RMS is an amplitude, Silero expects a probability.
+            vad_filter=capture_fields.get("capture_mode") != "ptt",
             vad_parameters=dict(
                 threshold=_ac.get("vad_threshold", 0.45),
                 min_speech_duration_ms=_ac.get("min_speech_duration_ms", 120),
@@ -416,7 +415,7 @@ def _build_transcribe_kwargs(
             no_repeat_ngram_size=3,
             hotwords=(
                 "Charlie open close start stop search weather time date "
-                "notepad chrome calculator python code youtube"
+                "notepad chrome calculator Python PyTorch CUDA NVIDIA nvidia-smi VRAM SearXNG code youtube"
             ),
         )
     return kwargs
@@ -610,6 +609,7 @@ def asr_worker_process(
                 is_warmup, flags, default_language, asr_config
             )
             worker_fields = {
+                "is_partial": bool(flags.get("is_partial")),
                 "audio_sample_count": int(audio_data.size),
                 "audio_duration_ms": audio_data.size / sample_rate * 1000 if sample_rate else None,
                 "queue_age_ms": (
@@ -728,6 +728,7 @@ def asr_worker_process(
             )
             output_flags = {
                 "is_warmup": is_warmup,
+                "is_partial": bool(flags.get("is_partial")),
                 "utterance_id": utterance_id,
                 "language_probability": quality["language_probability"],
                 "confidence": legacy_confidence,
@@ -808,7 +809,8 @@ def asr_worker_process(
                     include_resource=True,
                 )
             logger.error(f"ASR Worker: Error during transcription: {e}")
-            error_flags = {"is_warmup": False, "utterance_id": locals().get("utterance_id")}
+            error_flags = {"is_warmup": False, "utterance_id": locals().get("utterance_id"),
+                           "is_partial": bool(flags.get("is_partial"))}
             error_flags["asr_worker_last_stage"] = last_worker_stage
             if locals().get("diagnostics_enabled"):
                 error_timestamp = time.monotonic()

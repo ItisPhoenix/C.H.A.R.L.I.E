@@ -20,6 +20,63 @@ class ResearchMode(StrEnum):
     DEEP = "deep"
 
 
+class SourceClass(StrEnum):
+    """What kind of publisher a source is, relative to the research brief."""
+
+    OFFICIAL = "official"
+    OFFICIAL_UNVERIFIED = "official_unverified"
+    OFFICIAL_STORE = "official_store"
+    RETAILER = "retailer"
+    NEWS = "news"
+    REVIEW = "review"
+    REFERENCE = "reference"
+    FORUM_SOCIAL = "forum_social"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class ResearchBrief:
+    """The user's actual requirements, kept separate from search strings."""
+
+    topic: str
+    entity_kind: str = "general"  # "product" | "release" | "general"
+    option_count: Optional[int] = None
+    budget: Optional[float] = None
+    currency: Optional[str] = None
+    market: Optional[str] = None
+    source_policy: str = "any_reputable"  # official_required | official_preferred | any_reputable
+    aspects: List[str] = field(default_factory=list)
+    priority: List[str] = field(default_factory=list)
+    stable_only: bool = False
+    explicit_domains: List[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """A named option discovered in fetched text, never from model memory."""
+
+    name: str
+    brand: Optional[str]
+    quote: str
+    source_id: str
+    mentions: int = 1
+
+
+@dataclass(frozen=True)
+class Fact:
+    """One verified value with the verbatim span that supports it."""
+
+    candidate: Optional[str]
+    aspect: str
+    value: str
+    quote: str
+    source_id: str
+    source_class: str
+    extractor: str
+    url: str = ""
+    fetched_at: str = ""
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -58,6 +115,7 @@ class SourceDocument:
     quality_score: float = 0.0
     published_at: Optional[str] = None
     error: Optional[str] = None
+    source_class: str = SourceClass.UNKNOWN.value
 
 
 @dataclass(frozen=True)
@@ -146,6 +204,14 @@ class ResearchReport:
     stop_reason: str = ""
     errors: List[str] = field(default_factory=list)
     duration_ms: float = 0.0
+    # Discover→verify outputs. Empty for the inline single-pass path.
+    brief: Optional[ResearchBrief] = None
+    candidates: List[Candidate] = field(default_factory=list)
+    facts: List[Fact] = field(default_factory=list)
+    gaps: List[str] = field(default_factory=list)
+    partial: bool = False
+    phase_ms: dict = field(default_factory=dict)
+    synthesis_kind: Optional[str] = None  # "model" | "auto_assembled"
 
     @property
     def successful(self) -> bool:
@@ -154,6 +220,9 @@ class ResearchReport:
     def prompt_context(self, max_chars: int = 12000) -> str:
         """Build bounded, clearly untrusted evidence for the synthesis model."""
         blocks: List[str] = []
+        if self.facts:
+            from charlie.research.facts import fact_table
+            blocks.append("VERIFIED FACTS (keep each value bound to its candidate and cited source):\n" + fact_table(self))
         sources_by_id = {source.source_id: source for source in self.sources}
         evidence_by_source = {}
         for item in self.evidence:
@@ -188,5 +257,8 @@ class ResearchReport:
         """Compatibility text form for existing string-based tool calls."""
         context = self.prompt_context(max_chars=max_chars)
         if not context:
-            return "No useful research results found."
+            return (
+                "Error: No useful research evidence was retrieved. "
+                "Do not claim that the requested facts were verified."
+            )
         return f"Research mode: {self.mode.value}\n{context}"

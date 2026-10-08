@@ -44,7 +44,10 @@ _MIN_CONTENT_CHARS = 160
 _MAX_DOCUMENT_CHARS = 14000
 _TAG_RE = re.compile(r"<[^>]+>")
 _TITLE_RE = re.compile(r"<title\b[^>]*>(.*?)</title\s*>", re.IGNORECASE | re.DOTALL)
-_SPACE_RE = re.compile(r"\s+")
+_SPACE_RE = re.compile(r"[ \t\r\f\v]+")
+_BLOCK_TAG_RE = re.compile(r"</?(?:p|div|section|article|header|footer|tr|li|h[1-6]|table|ul|ol|dl|dt|dd|br)\b[^>]*>", re.IGNORECASE)
+_TABLE_ROW_RE = re.compile(r"<tr\b[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
+_CELL_RE = re.compile(r"<t[hd]\b[^>]*>(.*?)</t[hd]>", re.IGNORECASE | re.DOTALL)
 
 # ``follow_redirects=True`` without a hop bound lets a public URL bounce a
 # worker through an unbounded chain before any content is seen. Five hops covers
@@ -116,8 +119,30 @@ async def validate_public_url_async(
 
 
 def _fallback_text(markup: str) -> str:
-    text = html.unescape(_TAG_RE.sub(" ", markup))
-    return _SPACE_RE.sub(" ", text).strip()
+    """Extract text preserving spec rows, table cells, and paragraph linebreaks."""
+    # First convert table rows into key: value lines if possible
+    def replace_tr(match: re.Match[str]) -> str:
+        row_content = match.group(1)
+        cells = [_TAG_RE.sub("", c).strip() for c in _CELL_RE.findall(row_content)]
+        non_empty = [c for c in cells if c]
+        if len(non_empty) == 2:
+            return f"\n{non_empty[0]}: {non_empty[1]}\n"
+        elif non_empty:
+            return f"\n{' | '.join(non_empty)}\n"
+        return "\n"
+
+    transformed = _TABLE_ROW_RE.sub(replace_tr, markup)
+    # Replace block boundaries with newlines
+    transformed = _BLOCK_TAG_RE.sub("\n", transformed)
+    # Strip remaining tags
+    cleaned = _TAG_RE.sub(" ", transformed)
+    unescaped = html.unescape(cleaned)
+    lines = [
+        _SPACE_RE.sub(" ", line).strip()
+        for line in unescaped.splitlines()
+        if line.strip()
+    ]
+    return "\n".join(lines)
 
 
 def extract_html_title(markup: str) -> Optional[str]:
@@ -134,7 +159,13 @@ def extract_text(markup: str) -> tuple[str, str]:
 
         extracted = trafilatura.extract(markup, include_comments=False, include_tables=True) or ""
         if extracted.strip():
-            return _SPACE_RE.sub(" ", extracted).strip(), "trafilatura"
+            # Retain line breaks so table rows, lists, and specifications survive extraction
+            lines = [
+                _SPACE_RE.sub(" ", line).strip()
+                for line in extracted.splitlines()
+                if line.strip()
+            ]
+            return "\n".join(lines), "trafilatura"
     except ImportError:
         logger.debug("Trafilatura unavailable; using conservative HTML text fallback")
     except Exception:
@@ -174,8 +205,9 @@ def document_from_content(
     *,
     extraction_method: str,
     title: Optional[str] = None,
+    max_chars: int = _MAX_DOCUMENT_CHARS,
 ) -> Optional[SourceDocument]:
-    text = content.strip()[:_MAX_DOCUMENT_CHARS]
+    text = content.strip()[:max_chars]
     minimum = 1 if result.provider == "browser_read" else _MIN_CONTENT_CHARS
     if len(text) < minimum:
         return None
@@ -253,6 +285,7 @@ async def fetch_document(
     timeout_s: float = 12.0,
     client: Optional[httpx.AsyncClient] = None,
     status_out: Optional[list] = None,
+    max_chars: int = _MAX_DOCUMENT_CHARS,
 ) -> Optional[SourceDocument]:
     """Fetch and extract one source.
 
@@ -309,6 +342,7 @@ async def fetch_document(
             text,
             extraction_method=method,
             title=page_title or result.title,
+            max_chars=max_chars,
         )
     except Exception:
         logger.debug("Research fetch failed for %s", result.url, exc_info=True)

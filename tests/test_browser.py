@@ -1674,6 +1674,7 @@ def test_launch_skips_windows_policy_swap_off_windows(monkeypatch):
     from charlie.browser import controller
 
     monkeypatch.setattr(controller.sys, "platform", "linux")
+    monkeypatch.setattr(controller, "_playwright", None)
     monkeypatch.setattr(controller, "_context", None)
     monkeypatch.setattr(controller, "_page", None)
 
@@ -1707,3 +1708,20 @@ def test_launch_skips_windows_policy_swap_off_windows(monkeypatch):
 
     monkeypatch.setattr(asyncio, "set_event_loop_policy", fail_if_called)
     controller._launch()
+
+
+def test_private_disposal_preserves_visible_context_and_shared_runtime(monkeypatch):
+    from charlie.browser import controller
+
+    closed = []
+    private = type("Context", (), {"close": lambda self: closed.append("private")})()
+    runtime = type("Runtime", (), {"stop": lambda self: closed.append("runtime")})()
+    visible = object()
+    monkeypatch.setattr(controller, "_context", private)
+    monkeypatch.setattr(controller, "_playwright", runtime)
+    monkeypatch.setattr(controller, "_user_context", visible)
+    monkeypatch.setattr(controller, "_page", object())
+    controller._dispose_stale()
+    assert closed == ["private"]
+    assert controller._user_context is visible
+    assert controller._playwright is runtime

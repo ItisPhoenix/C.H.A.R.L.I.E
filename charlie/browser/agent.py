@@ -33,7 +33,7 @@ _PROGRESS_SPEECH_MARGIN_S = 4.0
 _STEP_CALL_TIMEOUT_S = 15.0
 _PURCHASE_KEYWORDS = (
     "buy now", "place order", "checkout", "confirm payment", "pay now",
-    "complete purchase", "subscribe",
+    "complete purchase", "subscribe", "submit", "send", "publish", "delete",
 )
 
 _ACTION_GRAMMAR = (
@@ -168,14 +168,15 @@ def _is_site_continuation(task: str) -> bool:
     )
 
 
-def _controller_run(fn, *, timeout: float, retry_on_stale: bool = True):
+def _controller_run(fn, *, timeout: float, retry_on_stale: bool = True, runner=None):
     """Call controller with compatibility for focused tests' simple monkeypatches."""
+    runner = runner or controller.run
     try:
-        return controller.run(fn, timeout=timeout, retry_on_stale=retry_on_stale)
+        return runner(fn, timeout=timeout, retry_on_stale=retry_on_stale)
     except TypeError as exc:
         if "retry_on_stale" not in str(exc):
             raise
-        return controller.run(fn, timeout=timeout)
+        return runner(fn, timeout=timeout)
 
 
 def _grab_annotated_screenshot(page, marks: list) -> bytes:
@@ -226,6 +227,7 @@ async def run_task(
     max_steps: int = 3,
     deadline_s: float = 25.0,
     on_progress: Optional[Callable[[], None]] = None,
+    run_browser=None,
 ) -> BrowserResult:
     """Bounded observe/act loop. Never raises -- returns a best-effort BrowserResult at the deadline."""
     loop = asyncio.get_running_loop()
@@ -243,7 +245,7 @@ async def run_task(
 
         try:
             observation, marks, blocked = await loop.run_in_executor(
-                None, lambda: _controller_run(_observe_page, timeout=_STEP_CALL_TIMEOUT_S)
+                None, lambda: _controller_run(_observe_page, timeout=_STEP_CALL_TIMEOUT_S, runner=run_browser)
             )
         except Exception:
             logger.warning("Tier 3 observation failed on step %d", step, exc_info=True)
@@ -271,7 +273,7 @@ async def run_task(
             try:
                 observed, _observed_marks, observed_blocked = await loop.run_in_executor(
                     None,
-                    lambda: _controller_run(_observe_page, timeout=_STEP_CALL_TIMEOUT_S),
+                    lambda: _controller_run(_observe_page, timeout=_STEP_CALL_TIMEOUT_S, runner=run_browser),
                 )
             except Exception:
                 observed = ""
@@ -311,12 +313,14 @@ async def run_task(
                     answer="I couldn't complete that without leaving the current site.",
                     verification="site-containment",
                 )
-        if action.kind == "click" and approve_click is not None:
+        if action.kind in {"click", "type"}:
             mark = session.get_session().marks.get(action.mark_id)
-            if mark and any(k in mark.name.lower() for k in _PURCHASE_KEYWORDS):
+            consequential = action.submit or bool(mark and any(k in mark.name.lower() for k in _PURCHASE_KEYWORDS))
+            if consequential:
                 page_url = session.get_session().last_url or ""
-                if not await approve_click(mark.name, page_url):
-                    return BrowserResult(answer=f'Stopped before clicking "{mark.name}" -- needs your approval.')
+                label = mark.name if mark else "form submission"
+                if approve_click is None or not await approve_click(label, page_url):
+                    return BrowserResult(answer=f'Stopped before "{label}" -- needs your approval.')
         try:
             await loop.run_in_executor(
                 None,
@@ -324,6 +328,7 @@ async def run_task(
                     lambda page, a=action: _apply_action(page, a),
                     timeout=_STEP_CALL_TIMEOUT_S,
                     retry_on_stale=action.kind != "click",
+                    runner=run_browser,
                 ),
             )
             fail_count = 0

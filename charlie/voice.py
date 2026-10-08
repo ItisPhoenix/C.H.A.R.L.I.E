@@ -1,4 +1,4 @@
-﻿"""Charlie voice engine -- VAD, ASR, TTS (Kokoro), audio I/O.
+"""Charlie voice engine -- VAD, ASR, TTS (Kokoro), audio I/O.
 
 All text arriving at speak() passes through _humanize_text() before
 phonemization. This is the single control point for prosody and pacing.
@@ -215,8 +215,8 @@ _RE_TRAILING_PUNCT_NO_SPACE = re.compile(r"([.!?])([A-Z])")
 # Wrapper quotes from LLM output: "Hello world" -> Hello world
 _RE_WRAPPER_QUOTES = re.compile(r'^\s*["\u201c\u201d]\s*(.+?)\s*["\u201c\u201d]\s*$')
 
-# Parenthetical: strip short ones entirely, keep content for long ones
-_RE_PAREN_SHORT = re.compile(r"\([^)]{1,40}\)")  # short aside -> remove
+# Preserve spoken facts inside asides, including GPU/RAM specifications.
+_RE_PAREN_SHORT = re.compile(r"\(([^)]{1,40})\)")
 _RE_PAREN_LONG = re.compile(r"\(([^)]{41,})\)")  # long aside -> keep content
 
 # Contraction fixes for TTS naturalness
@@ -300,6 +300,7 @@ class VoiceEngine:
         self._processing_frame_buffer = np.empty(0, dtype=np.float32)
         self._last_speech_time = 0.0
         self._last_speech_text = ""
+        self.current_speech_text = ""
         self._last_speech_end = 0.0
         # Union of words spoken across every speak() chunk of the current
         # reply, not just the most recent chunk -- a long reply spans many
@@ -337,6 +338,9 @@ class VoiceEngine:
         self.asr_input_queue: mp.Queue = mp.Queue(maxsize=8)
         self.asr_output_queue: mp.Queue = mp.Queue(maxsize=8)
         self.asr_process = None
+        self._partial_pending = False
+        self._partial_utterance_id: Optional[str] = None
+        self._partial_last_submit = 0.0
         self._asr_readiness_lock = threading.Lock()
         self._asr_readiness_status = "starting"
         self._asr_readiness_error: Optional[str] = None
@@ -502,6 +506,37 @@ class VoiceEngine:
     def _emit_vad_start(self) -> None:
         """Publish speech-onset for runtime observers."""
         self._schedule_event_emit("vad_start", {})
+
+    @staticmethod
+    def _speech_continues(rms: float, threshold: float, noise_floor: Optional[float]) -> bool:
+        """Use hysteresis after onset so quiet syllables do not end a phrase."""
+        return rms > max(threshold * 0.5, (noise_floor or 0.0) * 3.0)
+
+    def _submit_partial_asr(self, audio: "np.ndarray", sample_rate: int, utterance_id: str) -> bool:
+        # ponytail: whole-phrase previews reuse the worker; streaming ASR if long turns need lower latency.
+        now = time.monotonic()
+        if (not self.asr_ready or self._partial_pending or now - self._partial_last_submit < 1.0
+                or len(audio) < sample_rate or self._queue_depth(self.asr_input_queue)):
+            return False
+        self._partial_pending = True
+        self._partial_last_submit = now
+        try:
+            self.asr_input_queue.put_nowait((
+                np.asarray(audio, dtype=np.float32).tobytes(), sample_rate,
+                {"is_partial": True, "utterance_id": utterance_id, "capture": {"capture_mode": "ptt"}},
+            ))
+        except queue.Full:
+            self._partial_pending = False
+            return False
+        return True
+
+    def _handle_partial_asr(self, result: tuple) -> None:
+        self._partial_pending = False
+        text, _, flags = result
+        if text.strip() and flags.get("utterance_id") == self._partial_utterance_id:
+            self._schedule_event_emit("transcript", {
+                "text": text.strip(), "partial": True, "utterance_id": flags["utterance_id"],
+            })
 
     @staticmethod
     def _rms(samples: "np.ndarray") -> float:
@@ -912,6 +947,16 @@ class VoiceEngine:
         if not text:
             return ""
 
+        text = re.sub(r"```[\s\S]*?```", " The code is available on screen. ", text)
+        text = re.sub(r"\[([^\]]+)\]\(https?://[^)]+\)", r"\1", text)
+        text = re.sub(r"\[\s*S\d+(?:\s*[,;]\s*S?\d+)*\s*\]", "", text, flags=re.I)
+        text = re.sub(r"(?m)^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$", "", text)
+        text = re.sub(r"https?://\S+", "", text)
+        text = re.sub(r"(?<!\w)[#$%^&*_=+<>\\|~`]{2,}(?!\w)", " ", text)
+        text = re.sub(r"\bC#(?=\W|$)", "C sharp", text)
+        text = re.sub(r"₹\s*(\d+(?:,\d+)*)", lambda match: match.group(1).replace(",", "") + " rupees", text)
+        text = re.sub(r"[#^|~`]", " ", text)
+
         # 1. Ellipsis handling: "..." -> ".", "wait..." -> "wait."
         text = _RE_ELLIPSIS.sub(".", text)
         text = _RE_DOTS.sub(".", text)
@@ -935,6 +980,9 @@ class VoiceEngine:
         # Paired emphasis (_italic_ / *bold*) is handled by _RE_BOLD_ITALIC above.
         # Lone underscores (snake_case, IDs, handles) are intentionally preserved.
         text = text.replace("**", "").replace("*", "")
+        text = re.sub(r"(?<=\w)_(?=\w)", " ", text)
+        # Paragraphs and list items need audible boundaries after markup is removed.
+        text = re.sub(r"([^.!?\n])\s*\n+\s*", r"\1. ", text)
 
         # 5. Wrapper quotes: "Hello world" -> Hello world
         m = _RE_WRAPPER_QUOTES.match(text)
@@ -942,7 +990,9 @@ class VoiceEngine:
             text = m.group(1)
 
         # 6. Parenthetical aside handling
-        text = _RE_PAREN_SHORT.sub("", text)  # remove short asides entirely
+        text = re.sub(r"\((?:sources?|citations?|see|ref|https?):?[^)]*\)", "", text, flags=re.I)
+        text = re.sub(r"\([S\d]+(?:,\s*[S\d]+)*\)", "", text)
+        text = _RE_PAREN_SHORT.sub(r", \1, ", text)
         text = _RE_PAREN_LONG.sub(r"\1", text)  # keep content of long asides
 
         # 7. Expand contractions for natural speech
@@ -985,7 +1035,11 @@ class VoiceEngine:
         # 9. Fix missing space after sentence-ending punctuation
         text = _RE_TRAILING_PUNCT_NO_SPACE.sub(r"\1 \2", text)
 
-        # 10. Collapse multiple spaces/newlines
+        # 10. Clean up comma before sentence end or double commas
+        text = re.sub(r",\s*([.!?])", r"\1", text)
+        text = re.sub(r",\s*,+", ", ", text)
+
+        # 11. Collapse multiple spaces/newlines
         text = re.sub(r"\s+", " ", text).strip()
 
         return text
@@ -1206,7 +1260,7 @@ class VoiceEngine:
             async for samples, sr in self._synth_stream(text, speed):
                 if self.stop_tts_event.is_set():
                     break
-                item = (samples, sr, [], trace) if trace is not None else (samples, sr, [])
+                item = (samples, sr, [], trace, text)
                 self.playback_queue.put(item)
             synthesis_completed = not self.stop_tts_event.is_set()
             if synthesis_completed:
@@ -1274,6 +1328,7 @@ class VoiceEngine:
                     continue
 
                 trace = item[3] if isinstance(item, tuple) and len(item) >= 4 else None
+                speech_text = item[4] if isinstance(item, tuple) and len(item) >= 5 else ""
                 samples, sample_rate, mouth_values = item[:3]
 
                 # Chime: gain already applied by caller, skip TTS state.
@@ -1293,6 +1348,7 @@ class VoiceEngine:
 
                 # First chunk of a new TTS run
                 if not tts_started_fired:
+                    self.current_speech_text = speech_text
                     tts_started_fired = True
                     active_trace = trace
                     self.is_speaking.set()
@@ -1781,6 +1837,8 @@ class VoiceEngine:
         except (TypeError, ValueError):
             worker_timestamp = receive_timestamp
         fields = status.get("fields") if isinstance(status.get("fields"), dict) else {}
+        if fields.get("is_partial"):
+            return
         worker_pid = status.get("worker_pid") or fields.get("worker_pid")
 
         with self._asr_worker_state_lock:
@@ -2101,7 +2159,7 @@ class VoiceEngine:
             "beam_size": self.config.asr_beam_size,
             "best_of": self.config.asr_best_of,
             "repetition_penalty": self.config.asr_repetition_penalty,
-            "vad_threshold": self.config.vad_threshold,
+            "vad_threshold": getattr(self.config, "asr_vad_threshold", 0.45),
             "min_speech_duration_ms": self.config.vad_min_speech_duration_ms,
             "max_speech_duration_s": self.config.vad_max_speech_duration_s,
             "min_silence_duration_ms": self.config.vad_min_silence_duration_ms,
@@ -2179,6 +2237,12 @@ class VoiceEngine:
                 ptt_trace = self._ptt_trace
                 if ptt_active:
                     self._ptt_chunks.append(data.copy())
+                    if ptt_trace is not None:
+                        self._partial_utterance_id = ptt_trace.utterance_id
+                        if not self._partial_pending and time.monotonic() - self._partial_last_submit >= 1.0:
+                            self._submit_partial_asr(
+                                np.concatenate(self._ptt_chunks), samplerate, ptt_trace.utterance_id,
+                            )
                 ptt_audio = np.concatenate(self._ptt_chunks) if ptt_stop and self._ptt_chunks else None
                 if ptt_stop:
                     self._ptt_chunks.clear()
@@ -2189,6 +2253,8 @@ class VoiceEngine:
                 is_speech = False
                 speech_buffer = []
                 _consecutive_loud_frames = 0
+                if ptt_stop:
+                    self._partial_utterance_id = None
                 if ptt_audio is not None and len(ptt_audio) >= block_size:
                     if ptt_trace is None:
                         ptt_trace = self.voice_diagnostics.new_trace()
@@ -2331,6 +2397,7 @@ class VoiceEngine:
                     last_speech_monotonic = speech_start_monotonic
                     speech_onset_rms = rms
                     speech_trace = self.voice_diagnostics.new_trace()
+                    self._partial_utterance_id = speech_trace.utterance_id
                     logger.info(
                         f"vad_speech_onset | rms={rms:.4f} threshold={_vad_threshold}"
                     )
@@ -2366,7 +2433,7 @@ class VoiceEngine:
             speech_buffer.append(data.copy())
             now = time.time()
 
-            if rms > _vad_threshold:
+            if self._speech_continues(rms, _vad_threshold, _vad_noise_floor_rms):
                 last_speech_time = now
                 last_speech_monotonic = time.monotonic()
 
@@ -2382,6 +2449,7 @@ class VoiceEngine:
             )
 
             if should_end:
+                self._partial_utterance_id = None
                 is_speech = False
                 audio = np.concatenate(speech_buffer)
                 speech_buffer = []
@@ -2435,6 +2503,9 @@ class VoiceEngine:
                 speech_start_monotonic = None
                 last_speech_monotonic = None
                 speech_pre_roll_samples = 0
+            elif (speech_trace is not None and not self._partial_pending
+                  and time.monotonic() - self._partial_last_submit >= 1.0):
+                self._submit_partial_asr(np.concatenate(speech_buffer), samplerate, speech_trace.utterance_id)
 
     def _asr_poller_loop(self):
         """Poll ASR results and forward to on_speech callback."""
@@ -2467,6 +2538,9 @@ class VoiceEngine:
                 flags = result[2] if isinstance(result, tuple) and len(result) >= 3 else {}
                 if not isinstance(flags, dict):
                     flags = {}
+                if flags.get("is_partial"):
+                    self._handle_partial_asr(result)
+                    continue
                 self._record_asr_worker_output(result, receive_timestamp)
                 if flags.get("is_warmup"):
                     continue

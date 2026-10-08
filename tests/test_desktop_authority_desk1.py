@@ -166,7 +166,11 @@ async def test_canonical_success_and_deterministic_caller_emit_one_lifecycle_eve
     events = []
     monkeypatch.setattr("charlie.tools._desktop_ready", lambda: True)
     if tool_name == "desktop_open_app":
-        monkeypatch.setattr(desktop_apps, "launch_apps", lambda *_args: "I've opened Notepad for you.")
+        class VerifiedCuaBackend:
+            def open_app(self, apps, commands=None):
+                return "Opened the app and confirmed its exact window through bounded Cua."
+
+        monkeypatch.setattr("charlie.computer.backend.get_backend", lambda: VerifiedCuaBackend())
     else:
         monkeypatch.setattr(desktop_apps, "close_apps", lambda *_args: "Notepad has been closed for you.")
 
@@ -181,7 +185,7 @@ async def test_canonical_success_and_deterministic_caller_emit_one_lifecycle_eve
         await brain.close()
 
     expected_chunks = (
-        ["I've opened Notepad for you."]
+        ["Notepad is open."]
         if tool_name == "desktop_open_app"
         else ["Notepad has been closed for you."]
     )

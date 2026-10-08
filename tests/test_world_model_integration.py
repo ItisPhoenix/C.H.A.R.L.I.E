@@ -66,6 +66,14 @@ def _mock_verified_app_launch(monkeypatch):
     monkeypatch.setattr(desktop_apps, "is_process_running", lambda _name: False)
     monkeypatch.setattr(desktop_apps, "resolve_local_app", resolve)
     monkeypatch.setattr(desktop_apps.os, "startfile", startfile, raising=False)
+
+    class VerifiedCuaBackend:
+        def open_app(self, apps, commands=None):
+            names = [apps] if isinstance(apps, str) else list(apps)
+            start_calls.extend(str(name) for name in names)
+            return "Opened the app and confirmed its exact window through bounded Cua."
+
+    monkeypatch.setattr("charlie.computer.backend.get_backend", lambda: VerifiedCuaBackend())
     return start_calls
 
 

@@ -336,12 +336,9 @@ def test_llm_trust_env_resolves_true_only_on_explicit_opt_in():
     assert _resolved_trust_env_in_subprocess({"LLM_TRUST_ENV": "false"}) is False
 
 
-def test_repository_env_opted_in_and_is_therefore_a_live_risk():
-    """Guards the finding: the shipped .env turns the unsafe state on."""
-    assert _resolved_trust_env_in_subprocess({"CHARLIE_TEST_MODE": None}) is True, (
-        "the repository .env sets LLM_TRUST_ENV=true, so the key-bearing client "
-        "honours HTTPS_PROXY / SSL_CERT_FILE / REQUESTS_CA_BUNDLE at runtime"
-    )
+def test_repository_env_keeps_the_key_bearing_client_trust_isolated():
+    """The local repository configuration must keep the safe default enabled."""
+    assert _resolved_trust_env_in_subprocess({"CHARLIE_TEST_MODE": None}) is False
 
 
 def test_llm_trust_env_true_is_reported_not_silent(caplog):

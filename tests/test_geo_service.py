@@ -1,6 +1,9 @@
 """Unit and Integration Tests for Charlie Geospatial and Spatial Intelligence Engine."""
 
 
+import json
+import struct
+
 import pytest
 
 from charlie.geo import geo_service
@@ -152,9 +155,40 @@ async def test_cyber_provider_honest_unconfigured_status():
     assert len(res.features) == 0
 
 
-def test_pmtiles_v3_header_inspection_and_security():
-    """Verify PMTiles archive header follows exact v3 spec (7-byte magic + ver 3 + 127 bytes)."""
-    pm_manager = PMTilesManager()
+def test_pmtiles_v3_header_inspection_and_security(tmp_path):
+    """Use a test-only archive to check parsing; it is never runtime or acceptance data."""
+    metadata = json.dumps({"vector_layers": [{"id": "places"}]}).encode()
+    header = struct.pack(
+        "<7sB11Q4B2B4iBii",
+        b"PMTiles",
+        3,
+        127,
+        1,
+        128,
+        len(metadata),
+        0,
+        0,
+        128 + len(metadata),
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        14,
+        0,
+        0,
+        0,
+        0,
+        10,
+        0,
+        0,
+    )
+    (tmp_path / "regression_fixture.pmtiles").write_bytes(header + b"\x00" + metadata)
+    pm_manager = PMTilesManager(str(tmp_path))
     archives = pm_manager.list_archives()
     assert len(archives) > 0
     sample = archives[0]

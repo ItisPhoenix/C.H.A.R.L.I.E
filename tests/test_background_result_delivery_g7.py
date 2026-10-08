@@ -54,32 +54,31 @@ async def test_main_result_callback_reports_full_result_and_queues_ready_voice(t
     telegram, voice = FakeTelegram(), FakeVoice(ready=True)
     delivery = await _deliver_background_result(
         "task-1", "Background task 'Report' done. Result: Findings",
-        db_path=str(db_path), telegram_bot=telegram, telegram_user_id=42, voice=voice,
+        db_path=str(db_path), telegram_bot=telegram, telegram_user_id=42, voice=voice, channel="voice",
     )
 
-    assert delivery == {"telegram": "accepted", "voice": "queued"}
-    assert telegram.messages[0][0] == 42
-    assert "Findings" in telegram.messages[0][1]
+    assert delivery == {"telegram": "not_configured", "voice": "queued"}
+    assert telegram.messages == []
     assert voice.spoken == ["Findings"]
 
 
 @pytest.mark.asyncio
-async def test_telegram_failure_does_not_suppress_local_event_voice_or_result(tmp_path):
+async def test_telegram_failure_does_not_reroute_to_voice_or_suppress_result(tmp_path):
     from main import _deliver_background_result
 
     db_path = tmp_path / "results.sqlite3"
     telegram, voice, bus = FakeTelegram(fail=True), FakeVoice(ready=True), FakeEventBus()
 
-    async def callback(task_id, summary, _attention_level):
+    async def callback(task_id, summary, _attention_level, *, channel):
         return await _deliver_background_result(
             task_id, summary, db_path=str(db_path), telegram_bot=telegram,
-            telegram_user_id=42, voice=voice,
+            telegram_user_id=42, voice=voice, channel=channel,
         )
 
     task = BackgroundTask(
         id="task-1", text="Report", status="done",
         brain=SimpleNamespace(config=SimpleNamespace(session_db_path=str(db_path)), on_result_stored=callback),
-        session_id="session-1",
+        session_id="session-1", approval_platform="telegram",
     )
     await _store_result(task, bus, "Findings")
 
@@ -89,10 +88,10 @@ async def test_telegram_failure_does_not_suppress_local_event_voice_or_result(tm
     event = [payload for kind, payload in bus.events if kind == "result_stored"]
     assert result is not None and result.full_result == "Findings"
     assert result.telegram_status == "failed"
-    assert result.voice_status == "queued"
+    assert result.voice_status == "not_configured"
     assert result.local_event_status == "submitted"
-    assert event[0]["delivery"] == {"telegram": "failed", "voice": "queued"}
-    assert voice.spoken
+    assert event[0]["delivery"] == {"telegram": "failed", "voice": "not_configured"}
+    assert voice.spoken == []
 
 
 @pytest.mark.asyncio
@@ -102,16 +101,16 @@ async def test_event_failure_keeps_accepted_telegram_state_and_result(tmp_path):
     db_path = tmp_path / "results.sqlite3"
     telegram, voice, bus = FakeTelegram(), FakeVoice(ready=False), FakeEventBus(submitted=False)
 
-    async def callback(task_id, summary, _attention_level):
+    async def callback(task_id, summary, _attention_level, *, channel):
         return await _deliver_background_result(
             task_id, summary, db_path=str(db_path), telegram_bot=telegram,
-            telegram_user_id=42, voice=voice,
+            telegram_user_id=42, voice=voice, channel=channel,
         )
 
     task = BackgroundTask(
         id="task-1", text="Report", status="done",
         brain=SimpleNamespace(config=SimpleNamespace(session_db_path=str(db_path)), on_result_stored=callback),
-        session_id="session-1",
+        session_id="session-1", approval_platform="telegram",
     )
     await _store_result(task, bus, "Findings")
 
@@ -120,7 +119,7 @@ async def test_event_failure_keeps_accepted_telegram_state_and_result(tmp_path):
     stored.close()
     assert result is not None and result.full_result == "Findings"
     assert result.telegram_status == "accepted"
-    assert result.voice_status == "not_ready"
+    assert result.voice_status == "not_configured"
     assert result.local_event_status == "failed"
     assert len(telegram.messages) == 1
     assert voice.spoken == []
@@ -148,7 +147,7 @@ async def test_suppressed_voice_speech_is_recorded_as_not_queued(tmp_path):
     voice = FakeVoice(ready=True, result="")
     delivery = await _deliver_background_result(
         "task-1", "summary", db_path=str(db_path), telegram_bot=None,
-        telegram_user_id=0, voice=voice,
+        telegram_user_id=0, voice=voice, channel="voice",
     )
     assert delivery == {"telegram": "not_configured", "voice": "not_queued"}
     assert voice.spoken == ["Findings"]

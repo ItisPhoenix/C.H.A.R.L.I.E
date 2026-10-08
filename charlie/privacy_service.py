@@ -59,9 +59,9 @@ def validate_browser_profile_path(
         raise UnsafePrivacyPathError("Filesystem root is not a valid browser profile target")
     if _path_contains(resolved, home):
         raise UnsafePrivacyPathError("User home or an ancestor of user home is not a valid browser profile target")
-    if _path_contains(resolved, project):
+    if _path_contains(project, resolved):
         raise UnsafePrivacyPathError(
-            "Project root or an ancestor of project root is not a valid browser profile target"
+            "Project root or a path inside it is not a valid browser profile target"
         )
     if len(resolved.relative_to(anchor).parts) <= 1:
         raise UnsafePrivacyPathError("Broad filesystem ancestor is not a valid browser profile target")

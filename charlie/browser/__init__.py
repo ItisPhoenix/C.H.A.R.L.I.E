@@ -1,4 +1,4 @@
-"""Headless browser control (Playwright + Chrome) -- optional.
+"""Playwright browser control with private and visible persistent profiles -- optional.
 
 Guarded so importing this package never raises when Playwright isn't
 installed; callers must check BROWSER_AVAILABLE before using

@@ -13,6 +13,11 @@ from charlie.session_store import SessionStore
 from charlie.streaming import FollowupStreamState
 
 
+@pytest.fixture(autouse=True)
+def isolate_native_app_window_lookup(monkeypatch):
+    monkeypatch.setattr("charlie.desktop.windows.find_window", lambda _title: None)
+
+
 def _detect_close_app(query: str) -> Optional[str]:
     """Test helper: compose router's match/execute split back into the old single-call shape."""
     matched = router.match_close_app(query)
@@ -50,6 +55,14 @@ def _mock_verified_app_launch(monkeypatch, *, fail_apps=(), running_processes=()
     monkeypatch.setattr(desktop_apps, "is_process_running", lambda name: name.casefold() in running)
     monkeypatch.setattr(desktop_apps, "resolve_local_app", resolve)
     monkeypatch.setattr(desktop_apps.os, "startfile", startfile, raising=False)
+
+    class VerifiedCuaBackend:
+        def open_app(self, apps, commands=None):
+            names = [apps] if isinstance(apps, str) else list(apps)
+            start_calls.extend(str(name) for name in names)
+            return "Opened the app and confirmed its exact window through bounded Cua."
+
+    monkeypatch.setattr("charlie.computer.backend.get_backend", lambda: VerifiedCuaBackend())
     return start_calls
 
 
@@ -410,6 +423,7 @@ def test_calculator_close_tries_modern_candidate_after_legacy_candidate_is_absen
     monkeypatch.setattr(desktop_apps.subprocess, "run", mock_run)
     monkeypatch.setattr("sys.platform", "win32")
     monkeypatch.setattr(desktop_apps, "is_process_running", lambda _: False)
+    monkeypatch.setattr("charlie.desktop.windows.find_window", lambda _title: None)
 
     result = desktop_apps.close_apps(["calculator"], ["calc.exe"])
 
@@ -429,6 +443,7 @@ def test_calculator_close_reports_not_running_when_all_candidates_are_absent(mon
 
     monkeypatch.setattr(desktop_apps.subprocess, "run", mock_run)
     monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr("charlie.desktop.windows.find_window", lambda _title: None)
 
     result = desktop_apps.close_apps(["calculator"], ["calc.exe"])
 
@@ -448,6 +463,7 @@ def test_calculator_close_reports_failure_when_candidate_termination_fails(monke
         lambda *args, **kwargs: type("Result", (), {"returncode": 1, "stdout": "", "stderr": "Access denied"})(),
     )
     monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr("charlie.desktop.windows.find_window", lambda _title: None)
 
     result = desktop_apps.close_apps(["calculator"], ["calc.exe"])
 
@@ -463,6 +479,7 @@ def test_close_app_verifies_successful_taskkill_postcondition(monkeypatch):
         lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
     )
     monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr("charlie.desktop.windows.find_window", lambda _title: None)
     monkeypatch.setattr(desktop_apps, "is_process_running", lambda _: True)
 
     result = desktop_apps.close_apps(["calculator"], ["calc.exe"])
@@ -480,6 +497,7 @@ def test_close_app_waits_for_async_taskkill_exit(monkeypatch):
         lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
     )
     monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr("charlie.desktop.windows.find_window", lambda _title: None)
     monkeypatch.setattr(desktop_apps, "is_process_running", lambda _: next(running))
     monkeypatch.setattr(desktop_apps.time, "sleep", lambda _: None)
 
@@ -1039,7 +1057,7 @@ async def test_chat_stream_fast_path_close_open(monkeypatch, brain_config):
     results = []
     async for chunk in brain.chat_stream("open calculator"):
         results.append(chunk)
-    assert results == ["I've opened Calculator for you."]
+    assert results == ["Calculator is open."]
     assert not called_stream
     assert start_calls == ["calculator"]
 
@@ -1104,7 +1122,7 @@ async def test_chat_stream_compound_open_app_continues_with_llm(monkeypatch, bra
         results.append(chunk)
 
     joined = "".join(results)
-    assert "Notepad" in joined  # fast-path confirmation streamed first
+    assert "Notepad is open." in joined  # verified app outcome streamed first
     assert start_calls == ["notepad"]
     assert "Sure, writing that now." in joined  # then the LLM continuation
 

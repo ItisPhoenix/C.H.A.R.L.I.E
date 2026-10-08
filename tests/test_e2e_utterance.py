@@ -13,12 +13,18 @@ from unittest.mock import Mock
 
 import pytest
 
+
 from charlie.config import Config
 from charlie.core import Brain
 from charlie.desktop import apps as desktop_apps
 from charlie.research.citations import assign_citations
 from charlie.research.models import EvidenceItem, ResearchMode, ResearchReport, SearchResult, SourceDocument
 from charlie.voice_diagnostics import VoiceDiagnostics
+
+
+@pytest.fixture(autouse=True)
+def isolate_native_app_window_lookup(monkeypatch):
+    monkeypatch.setattr("charlie.desktop.windows.find_window", lambda _title: None)
 
 
 @pytest.fixture
@@ -96,6 +102,14 @@ def _mock_verified_app_launch(monkeypatch):
     monkeypatch.setattr(desktop_apps, "is_process_running", lambda _name: False)
     monkeypatch.setattr(desktop_apps, "resolve_local_app", resolve)
     monkeypatch.setattr(desktop_apps.os, "startfile", startfile, raising=False)
+
+    class VerifiedCuaBackend:
+        def open_app(self, apps, commands=None):
+            names = [apps] if isinstance(apps, str) else list(apps)
+            start_calls.extend(str(name) for name in names)
+            return "Opened the app and confirmed its exact window through bounded Cua."
+
+    monkeypatch.setattr("charlie.computer.backend.get_backend", lambda: VerifiedCuaBackend())
     return start_calls
 
 
@@ -330,7 +344,7 @@ class TestFastPathsBypassLlm:
 
         monkeypatch.setattr(brain.client, "stream", fail_if_called)
         result = await _collect(brain, "open notepad")
-        assert "opened" in result.lower()
+        assert "is open" in result.lower()
         assert start_calls == ["notepad"]
 
     @pytest.mark.asyncio
@@ -959,5 +973,5 @@ class TestRouterClassifierFallback:
 
         monkeypatch.setattr("charlie.core.httpx.AsyncClient", lambda *a, **kw: _FakeClassifierClient())
         result = await _collect(brain, "fire up spotify")
-        assert "opened" in result.lower()
+        assert "is open" in result.lower()
         assert start_calls == ["spotify"]

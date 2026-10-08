@@ -561,9 +561,8 @@ def _run_research_report(name: str, arguments: Dict[str, Any]):
     engine = ResearchEngine(config)
     mode = str(arguments.get("mode", "auto"))
     if name == "web_search":
-        # Keep quick lookup latency, but do not let explicit research requests
-        # satisfy a fetched-source requirement with snippets alone.
-        decision = engine.decide(query, "quick")
+        # Fresh claims need fetched sources, including model-generated lookups.
+        decision = engine.decide(query, "auto")
         mode = decision.mode.value if decision.should_research and decision.mode else "quick"
     domain = str(arguments.get("domain", ""))
     domain_filters = list(dict.fromkeys(part.strip() for part in domain.split(",") if part.strip()))
@@ -2328,11 +2327,24 @@ def desktop_open_app(apps: list[str] | str, commands: list[str] | str | None = N
         return ToolExecutionResult(
             _DESKTOP_DISABLED_MSG, {"ok": False, "failure_kind": "unavailable"}, "desktop_app_open"
         )
-    from charlie.desktop.apps import launch_apps
+    from charlie.computer.backend import get_backend
 
-    result = launch_apps(app_list, command_list)
-    ok = "could not open" not in result.lower()
-    return ToolExecutionResult(result, {"ok": ok, "verified": ok, "apps": app_list}, "desktop_app_open")
+    result = get_backend().open_app(app_list, command_list)
+    verified = result.startswith("Opened the app and confirmed its exact window through bounded Cua.")
+    from charlie.text_utils import format_app_list
+
+    reply = f"{format_app_list(app_list)} {'is' if len(app_list) == 1 else 'are'} open." if verified else result
+    return ToolExecutionResult(
+        reply,
+        {
+            "ok": verified,
+            "verified": verified,
+            "failure_kind": None if verified else "cua_window_unverified",
+            "apps": app_list,
+            "verification_detail": result,
+        },
+        "desktop_app_open",
+    )
 
 
 @registry.register_tool(
@@ -2428,13 +2440,11 @@ def desktop_open_url(url: str) -> ToolExecutionResult:
     schema={"type": "object", "properties": {}, "required": []},
 )
 def desktop_observe() -> str:
-    if not _desktop_ready():
-        return _DESKTOP_DISABLED_MSG
-    from charlie.desktop.uia import serialize_marks, snapshot_tree
-    elements = _grounding_marks(_ocr_fallback_marks(snapshot_tree()))
-    if not elements:
-        return "No UI elements found in the foreground window."
-    return serialize_marks(elements)
+        if not _desktop_ready():
+            return _DESKTOP_DISABLED_MSG
+        from charlie.computer.backend import get_backend
+
+        return get_backend().observe()
 
 
 @registry.register_tool(
@@ -2449,20 +2459,9 @@ def desktop_observe() -> str:
 def desktop_read_screen() -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
-    if not config.desktop_ocr_enabled:
-        return "OCR is disabled (set DESKTOP_OCR_ENABLED=true and install pytesseract/mss/Pillow)."
-    from charlie.desktop import ocr as desktop_ocr
-    if not desktop_ocr.OCR_AVAILABLE:
-        return "OCR dependencies not installed (pytesseract/mss/Pillow)."
-    from charlie.desktop.uia import merge_ocr_elements, serialize_marks
-    try:
-        elements = merge_ocr_elements([], desktop_ocr.ocr_marks(desktop_ocr.capture()))
-    except Exception:
-        logger.warning("desktop_read_screen OCR pass failed", exc_info=True)
-        return "Error: OCR pass failed."
-    if not elements:
-        return "No readable text found on screen."
-    return serialize_marks(elements)
+    from charlie.computer.backend import get_backend
+
+    return get_backend().observe()
 
 
 @registry.register_tool(
@@ -2480,8 +2479,9 @@ def desktop_read_screen() -> str:
 def desktop_click(mark_id: int) -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
-    from charlie.desktop.actions import click_mark
-    return click_mark(mark_id)
+    from charlie.computer.backend import get_backend
+
+    return get_backend().click_mark(mark_id)
 
 
 @registry.register_tool(
@@ -2500,8 +2500,9 @@ def desktop_click(mark_id: int) -> str:
 def desktop_type(mark_id: int, text: str) -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
-    from charlie.desktop.actions import type_text
-    return type_text(mark_id, text)
+    from charlie.computer.backend import get_backend
+
+    return get_backend().type_text(mark_id, text)
 
 
 @registry.register_tool(
@@ -2519,8 +2520,9 @@ def desktop_type(mark_id: int, text: str) -> str:
 def desktop_invoke(mark_id: int) -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
-    from charlie.desktop.actions import invoke_mark
-    return invoke_mark(mark_id)
+    from charlie.computer.backend import get_backend
+
+    return get_backend().click_mark(mark_id)
 
 
 @registry.register_tool(
@@ -2538,8 +2540,9 @@ def desktop_invoke(mark_id: int) -> str:
 def desktop_key(keys: str) -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
-    from charlie.desktop.actions import key_press
-    return key_press(keys)
+    from charlie.computer.backend import get_backend
+
+    return get_backend().key_press(keys)
 
 
 @registry.register_tool(
@@ -2569,8 +2572,9 @@ def desktop_key(keys: str) -> str:
 def desktop_click_at(x: int, y: int, button: str = "left", double: bool = False) -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
-    from charlie.desktop.actions import click_at
-    return click_at(x, y, button=button, double=double)
+    from charlie.computer.backend import get_backend
+
+    return get_backend().click_at(x, y, button=button, double=double)
 
 
 @registry.register_tool(
@@ -2593,8 +2597,9 @@ def desktop_click_at(x: int, y: int, button: str = "left", double: bool = False)
 def desktop_move(x: int, y: int) -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
-    from charlie.desktop.actions import move_to
-    return move_to(x, y)
+    from charlie.computer.backend import get_backend
+
+    return get_backend().move_cursor(x, y)
 
 
 @registry.register_tool(
@@ -2621,8 +2626,9 @@ def desktop_move(x: int, y: int) -> str:
 def desktop_drag(x1: int, y1: int, x2: int, y2: int) -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
-    from charlie.desktop.actions import drag
-    return drag(x1, y1, x2, y2)
+    from charlie.computer.backend import get_backend
+
+    return get_backend().drag(x1, y1, x2, y2)
 
 
 @registry.register_tool(
@@ -2644,8 +2650,9 @@ def desktop_drag(x1: int, y1: int, x2: int, y2: int) -> str:
 def desktop_scroll(notches: int) -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
-    from charlie.desktop.actions import scroll
-    return scroll(notches)
+    from charlie.computer.backend import get_backend
+
+    return get_backend().scroll(notches)
 
 
 @registry.register_tool(
@@ -2661,21 +2668,11 @@ def desktop_scroll(notches: int) -> str:
 def desktop_screenshot() -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
-    from charlie.desktop.uia import serialize_marks, snapshot_tree
-    elements = _grounding_marks(_ocr_fallback_marks(snapshot_tree()))
-    text_result = serialize_marks(elements) if elements else "No UI elements found in the foreground window."
-    if not config.vision_enabled:
-        return text_result
-    from charlie.desktop import ocr as desktop_ocr
-    from charlie.desktop import vision as desktop_vision
-    if not desktop_ocr.OCR_AVAILABLE or not desktop_vision.VISION_AVAILABLE:
-        return text_result
-    try:
-        png = desktop_ocr.capture()
-        annotated = desktop_vision.annotate_som(png, elements)
-        set_pending_vision_image(desktop_vision.to_data_url(annotated))
-    except Exception:
-        logger.warning("desktop_screenshot vision annotation failed", exc_info=True)
+    from charlie.computer.backend import get_backend
+
+    text_result, image = get_backend().capture_window()
+    if config.vision_enabled and image:
+        set_pending_vision_image(image)
     return text_result
 
 
@@ -2715,8 +2712,11 @@ def desktop_windows() -> str:
 def desktop_focus(window: str) -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
-    from charlie.desktop.windows import focus_window
-    return focus_window(window)
+    from charlie.computer.backend import get_backend
+    from charlie.desktop.windows import find_window_identity
+
+    target = find_window_identity(window)
+    return get_backend().bind_window_target(target) if target else "Refused: no exact live window matches that title."
 
 
 @registry.register_tool(
@@ -2735,8 +2735,9 @@ def desktop_focus(window: str) -> str:
 def desktop_window(window: str, action: str) -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
-    from charlie.desktop.windows import manage_window
-    return manage_window(window, action)
+    from charlie.computer.backend import get_backend
+
+    return get_backend().manage_window(window, action)
 
 
 @registry.register_tool(
@@ -2758,8 +2759,9 @@ def desktop_window(window: str, action: str) -> str:
 def desktop_move_window(window: str, x: int, y: int, width: int, height: int) -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
-    from charlie.desktop.windows import move_resize_window
-    return move_resize_window(window, x, y, width, height)
+    from charlie.computer.backend import get_backend
+
+    return get_backend().move_window(window, x, y, width, height)
 
 
 @registry.register_tool(

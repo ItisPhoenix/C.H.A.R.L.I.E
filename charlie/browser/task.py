@@ -150,6 +150,7 @@ async def resolve(
     owner_id: Optional[str] = None,
     user_supplied_url: bool = False,
     user_visible: bool = False,
+    run_browser=None,
 ) -> BrowserResult:
     start_time = time.perf_counter()
     outcome = "success"
@@ -165,6 +166,7 @@ async def resolve(
             owner_id,
             user_supplied_url,
             user_visible,
+            run_browser,
         )
     except Exception as e:
         outcome = f"error: {type(e).__name__}"
@@ -185,6 +187,7 @@ async def _resolve_inner(
     owner_id: Optional[str] = None,
     user_supplied_url: bool = False,
     user_visible: bool = False,
+    run_browser=None,
 ) -> BrowserResult:
     """Run the tier cascade for `task`, falling through tier by tier, and cache the result."""
     freshness_sensitive = intent.is_freshness_sensitive(task)
@@ -209,15 +212,84 @@ async def _resolve_inner(
         # deadline_s is a total budget -- subtract lock-wait time already spent, or a slow lock can double it.
         remaining_deadline_s = max(0.0, deadline_s - (time.monotonic() - wait_start))
         loop = asyncio.get_running_loop()
-        if user_visible:
+        if user_visible and run_browser is not None:
             try:
-                visible_identity = await loop.run_in_executor(None, controller.prepare_user_visible)
+                visible_identity = await loop.run_in_executor(None, controller.prepare_user_browser)
             except BrowserUnavailable as exc:
                 return BrowserResult(
                     answer=str(exc),
                     verification="interactive-browser-unavailable",
                     evidence={"requested_visible": True, "browser_surface": "not_exposed"},
                 )
+            explicit_url = extract_explicit_http_url(task)
+            if (
+                explicit_url
+                and re.search(r"\b(?:new\s+tab|open|navigate|go\s+to)\b", task, re.IGNORECASE)
+                and not re.search(r"\b(?:fill|type|click|submit|send|pay|purchase|download)\b", task, re.I)
+            ):
+                try:
+                    def _open_read_close(context):
+                        page = context.new_page()
+                        page.goto(explicit_url, wait_until="domcontentloaded", timeout=10000)
+                        observed_url = page.url
+                        title = page.title()
+                        if re.search(r"\bclose\b", task, re.IGNORECASE):
+                            page.close()
+                        return observed_url, title
+
+                    observed_url, title = await loop.run_in_executor(
+                        None,
+                        lambda: controller.run_user_context(_open_read_close, timeout=15.0),
+                    )
+                    if observed_url.rstrip("/") != explicit_url.rstrip("/"):
+                        return BrowserResult(
+                            url=observed_url,
+                            answer="I couldn't verify the requested visible-browser destination.",
+                            verification="visible-url-unverified",
+                        )
+                    return BrowserResult(
+                        url=observed_url,
+                        answer=f"Opened {title or observed_url} in Charlie's visible browser.",
+                        success=True,
+                        verification="visible-url-and-title",
+                        evidence={
+                            **visible_identity,
+                            "title": title,
+                            "browser_surface": "charlie_visible_profile",
+                        },
+                    )
+                except Exception:
+                    logger.warning("Visible browser open/read fast path failed", exc_info=True)
+                    return BrowserResult(
+                        answer=(
+                            "The browser action may have started, but its result could not be "
+                            "verified. It was not retried."
+                        ),
+                        verification="visible-action-uncertain",
+                    )
+            result = await agent.run_task(
+                task,
+                complete,
+                describe_image=None,
+                approve_click=approve_click,
+                max_steps=max_steps,
+                deadline_s=remaining_deadline_s,
+                on_progress=on_progress,
+                run_browser=controller.run_user,
+            )
+            if result is not None:
+                result.evidence = {
+                    **(result.evidence or {}),
+                    **visible_identity,
+                    "browser_surface": "charlie_visible_profile",
+                }
+            return result
+        if user_visible:
+            try:
+                visible_identity = await loop.run_in_executor(None, controller.prepare_user_visible)
+            except BrowserUnavailable as exc:
+                return BrowserResult(answer=str(exc), verification="interactive-browser-unavailable",
+                                     evidence={"requested_visible": True, "browser_surface": "not_exposed"})
         result: Optional[BrowserResult] = None
         current_url = session.get_session().last_url or ""
         if result is None and current_url:

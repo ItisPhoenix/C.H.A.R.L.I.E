@@ -128,6 +128,10 @@ def match_close_app(
     q = query.lower().strip()
     q_clean = re.sub(r"^(?:hey\s+charlie,?|ok\s+charlie,?|charlie,?)?\s*", "", q).strip()
 
+    # ASR sometimes adds a past-tense suffix to an addressed imperative.
+    if re.match(r"^(?:(?:hey|ok)\s+)?charlie\b", q) and q_clean.startswith("closed "):
+        q_clean = "close " + q_clean[len("closed "):]
+
     verbs = ("close", "kill", "stop", "exit", "quit")
     verb_matched = None
     for verb in verbs:

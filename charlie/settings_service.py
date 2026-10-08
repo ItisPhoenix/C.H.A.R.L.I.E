@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import tempfile
 import threading
@@ -120,9 +121,14 @@ class SettingsService:
                 if f is None:
                     continue
                 try:
+                    strings = raw_value if isinstance(raw_value, list) else [raw_value]
+                    if any(isinstance(value, str) and any(char in value for char in "\r\n\0") for value in strings):
+                        raise ValueError("setting values must be a single line")
                     validated[env_key] = _coerce_setting(raw_value, f.type)
+                    if env_key == "CHARLIE_WEB_PORT" and not 1 <= validated[env_key] <= 65535:
+                        raise ValueError("port must be between 1 and 65535")
                 except (ValueError, TypeError) as exc:
-                    raise SettingValidationError(f"Invalid value for setting '{env_key}': {raw_value}") from exc
+                    raise SettingValidationError(f"Invalid value for setting '{env_key}'.") from exc
             return validated
 
     def apply_updates(self, updates: Dict[str, Any]) -> Dict[str, Any]:
@@ -385,7 +391,10 @@ def _coerce_setting(raw_value: Any, ftype: Any) -> Any:
     if ftype is float:
         if isinstance(raw_value, bool):
             raise ValueError("float value required")
-        return float(raw_value)
+        value = float(raw_value)
+        if not math.isfinite(value):
+            raise ValueError("finite number required")
+        return value
     if ftype == List[str]:
         if isinstance(raw_value, list):
             return [str(value).strip() for value in raw_value if str(value).strip()]

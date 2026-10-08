@@ -61,6 +61,82 @@ def find_window(title_substr: str) -> Optional[Dict]:
     return None
 
 
+def find_window_identity(title_substr: str) -> Optional[Dict]:
+    """Return one visible window with its native handle and owning PID."""
+    window = find_window(title_substr)
+    if window is None:
+        return None
+    return window_identity(window["hwnd"], window["title"])
+
+
+def window_identity(hwnd: int, title: str = "") -> Optional[Dict]:
+    """Resolve one observed HWND to its current owner and process identity."""
+    if _user32 is None or not _user32.IsWindow(hwnd):
+        return None
+    pid = ctypes.wintypes.DWORD()
+    _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    try:
+        process = psutil.Process(pid.value)
+        return {
+            "hwnd": int(hwnd),
+            "window_id": int(hwnd),
+            "title": title,
+            "pid": int(pid.value),
+            "process_name": process.name(),
+            "executable": process.exe(),
+            "create_time": process.create_time(),
+        }
+    except (psutil.Error, OSError):
+        return None
+
+
+def top_window_identity() -> Optional[Dict]:
+    """Return the topmost visible titled window with a live owning process."""
+    for hwnd, title, visible in _enum_raw():
+        if visible and title:
+            identity = window_identity(hwnd, title)
+            if identity is not None:
+                return identity
+    return None
+
+
+def window_target_is_current(target: Dict) -> bool:
+    """Reject stale/reused HWNDs and PIDs before they reach Cua input."""
+    identity = window_identity(
+        int(target.get("window_id") or target.get("hwnd") or 0),
+        str(target.get("title") or ""),
+    )
+    return bool(
+        identity
+        and identity["pid"] == int(target.get("pid") or 0)
+        and abs(identity["create_time"] - float(target.get("create_time") or 0)) < 0.01
+    )
+
+
+def window_rect(hwnd: int) -> Optional[Dict[str, int]]:
+    if _user32 is None or not _user32.IsWindow(hwnd):
+        return None
+    rect = ctypes.wintypes.RECT()
+    if not _user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return None
+    return {
+        "x": int(rect.left),
+        "y": int(rect.top),
+        "width": int(rect.right - rect.left),
+        "height": int(rect.bottom - rect.top),
+    }
+
+
+def window_display_state(hwnd: int) -> str:
+    if _user32 is None or not _user32.IsWindow(hwnd):
+        return "closed"
+    if _user32.IsIconic(hwnd):
+        return "minimized"
+    if _user32.IsZoomed(hwnd):
+        return "maximized"
+    return "normal"
+
+
 def focus_window(title_substr: str) -> str:
     w = find_window(title_substr)
     if w is None:

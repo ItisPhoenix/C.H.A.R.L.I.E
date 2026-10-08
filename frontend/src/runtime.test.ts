@@ -6,7 +6,8 @@ afterEach(() => vi.restoreAllMocks());
 describe("live runtime boundary", () => {
   it("maps canonical runtime events to truthful orb states", () => {
     expect(orbStateForEvent("transcript")).toBe("listening");
-    expect(orbStateForEvent("thinking")).toBe("working");
+    expect(orbStateForEvent("thinking")).toBe("shaping");
+    expect(orbStateForEvent({ type: "thinking", stage: "planning" })).toBe("weaving");
     expect(orbStateForEvent("speaking_start")).toBe("composing");
     expect(orbStateForEvent("response_done")).toBe("breathing");
     expect(orbStateForEvent("unrelated_event")).toBeNull();

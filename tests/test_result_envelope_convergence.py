@@ -289,7 +289,7 @@ async def test_interactive_approval_denial_short_circuits_the_batch(monkeypatch)
     assert name == "shell_execute"
     assert isinstance(envelope, ResultEnvelope)
     assert envelope.data["failure_kind"] == "approval_denied"
-    assert envelope.data["approval_status"] != "approved"
+    assert envelope.data["approval_status"] == "unavailable"
     assert envelope.requires_approval is True
     assert envelope.status == ResultStatus.CANCELLED
     # The turn reports the denial instead of claiming the command ran.

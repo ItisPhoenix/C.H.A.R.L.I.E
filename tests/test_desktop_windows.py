@@ -16,6 +16,17 @@ def test_find_window_matches_substring_case_insensitive(monkeypatch):
     assert windows.find_window("chrome") is None
 
 
+def test_window_target_is_current_returns_identity_match(monkeypatch):
+    target = {"window_id": 7, "pid": 42, "create_time": 12.5, "title": "Calculator"}
+    monkeypatch.setattr(
+        windows,
+        "window_identity",
+        lambda _hwnd, _title: {"pid": 42, "create_time": 12.5},
+    )
+
+    assert windows.window_target_is_current(target) is True
+
+
 def test_manage_window_minimize_calls_showwindow(monkeypatch):
     monkeypatch.setattr(windows, "find_window", lambda _: {"hwnd": 5, "title": "Test"})
     mock_user32 = MagicMock()

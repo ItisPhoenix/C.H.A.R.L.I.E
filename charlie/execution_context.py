@@ -49,6 +49,18 @@ def _capture_owned_process(process: Any) -> OwnedProcess:
     return OwnedProcess(process, identity, pid, creation_time, process_group_id)
 
 
+def capture_owned_pid(pid: int) -> OwnedProcess:
+    """Capture an already-launched PID without claiming any unrelated process."""
+    identity = psutil.Process(int(pid))
+    return OwnedProcess(
+        None,
+        identity,
+        int(pid),
+        float(identity.create_time()),
+        None,
+    )
+
+
 def _identity_state(owned: OwnedProcess) -> str:
     """Return owned, gone, or uncertain without trusting a reused PID."""
     try:
@@ -167,5 +179,6 @@ __all__ = [
     "activate_execution_context",
     "get_current_execution_context",
     "reset_execution_context",
+    "capture_owned_pid",
     "terminate_process_tree",
 ]

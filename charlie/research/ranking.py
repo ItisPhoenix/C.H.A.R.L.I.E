@@ -13,20 +13,51 @@ from charlie.research.credibility import organisational_domain, rank_prior
 from charlie.research.fetch import canonicalize_url
 from charlie.research.models import ResearchPlan, SearchResult, SourceDocument
 from charlie.research.semantics import SemanticRelevance
+from charlie.research.sources import SourceClass, classify
 
 logger = logging.getLogger("charlie.research.ranking")
 
 _TOKEN_RE = re.compile(r"[a-z0-9]{3,}", re.I)
-_PRIMARY_HINTS = (".gov", ".edu", "github.com", "python.org", "openai.com", "x.com", "twitter.com")
 _STOPWORDS = {
     "about", "and", "are", "for", "from", "how", "is", "it", "its", "the", "this", "to",
     "use", "used", "what", "when", "where", "which", "with", "briefing", "daily", "intelligence",
+    "best", "latest", "stable", "current", "official", "source", "sources", "using", "give", "tell",
+    "version", "versions", "release", "releases", "date", "dates", "two", "three", "sentences",
+    "under", "below", "within", "less", "than", "india", "inr", "rupees", "price", "prices",
 }
 _IDENTIFIER_RE = re.compile(r"\b[a-z]{2,}-\d+[a-z0-9-]*\b", re.I)
+
+_SOURCE_WEIGHTS = {
+    SourceClass.OFFICIAL: 0.35,
+    SourceClass.OFFICIAL_STORE: 0.30,
+    SourceClass.OFFICIAL_UNVERIFIED: 0.20,
+    SourceClass.REFERENCE: 0.15,
+    SourceClass.NEWS: 0.12,
+    SourceClass.REVIEW: 0.10,
+    SourceClass.RETAILER: 0.05,
+    SourceClass.UNKNOWN: 0.0,
+    SourceClass.FORUM_SOCIAL: -0.50,
+}
 
 
 def _tokens(text: str) -> set[str]:
     return set(_TOKEN_RE.findall(text.lower()))
+
+
+def search_result_matches_query(query: str, result: SearchResult) -> bool:
+    """Reject pages that only match generic request wording.
+
+    SearXNG can return HTTP 200 with a thematically unrelated page. Requiring
+    one subject token for short queries and two for longer queries prevents
+    those pages from becoming research evidence while retaining concise
+    release and product searches.
+    """
+    terms = _tokens(query) - _STOPWORDS
+    content = _tokens(f"{result.title} {result.snippet} {result.domain}")
+    if not terms:
+        return True
+    required_overlap = 1 if len(terms) <= 3 else 2
+    return len(terms & content) >= required_overlap
 
 
 def _freshness_timestamp(value: str | None) -> float:
@@ -49,7 +80,17 @@ def _score(query: str, result: SearchResult) -> float:
     query_tokens = _tokens(query) - _STOPWORDS
     result_tokens = _tokens(f"{result.title} {result.snippet} {result.domain}")
     overlap = len(query_tokens & result_tokens) / max(1, len(query_tokens))
-    primary = 0.12 if any(hint in result.domain for hint in _PRIMARY_HINTS) else 0.0
+
+    # Only boost official sources when the user explicitly asked for official sources or specifications
+    is_official_requested = bool(re.search(r"\b(official|specifications?|specs?|manufacturer)\b", query, re.I))
+    s_class = classify(result.url)
+    class_weight = 0.0
+    if is_official_requested:
+        if s_class in (SourceClass.OFFICIAL, SourceClass.OFFICIAL_STORE):
+            class_weight = 0.20
+        elif s_class == SourceClass.OFFICIAL_UNVERIFIED:
+            class_weight = 0.10
+
     freshness = 0.0
     if _fresh_query(query) and _freshness_timestamp(result.published_at):
         age_days = max(
@@ -57,12 +98,14 @@ def _score(query: str, result: SearchResult) -> float:
             (datetime.now(timezone.utc).timestamp() - _freshness_timestamp(result.published_at)) / 86400,
         )
         freshness = max(-0.35, 0.35 - min(age_days, 30) * 0.02)
-    return overlap + primary + freshness + rank_prior(result.rank)
+    return overlap + class_weight + freshness + rank_prior(result.rank)
 
 
 def rank_search_results(results: Iterable[SearchResult], plan: ResearchPlan, limit: int) -> List[SearchResult]:
     best: dict[str, SearchResult] = {}
     for result in results:
+        if not search_result_matches_query(plan.goal, result):
+            continue
         key = canonicalize_url(result.url)
         if key not in best or _score(plan.goal, result) > _score(plan.goal, best[key]):
             best[key] = result
@@ -138,6 +181,8 @@ async def rank_documents(
     semantic_mode = semantic.mode if semantic else "disabled"
 
     for document in unique.values():
+        if not getattr(document, "source_class", None) or document.source_class == SourceClass.UNKNOWN.value:
+            document.source_class = classify(document.url).value
         content_tokens = _tokens(f"{document.title} {document.content}")
         if requires_identifier and numeric_tokens and not numeric_tokens.intersection(content_tokens):
             document.relevance_score = 0.0

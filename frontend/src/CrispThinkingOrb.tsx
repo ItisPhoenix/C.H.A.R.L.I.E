@@ -9,19 +9,26 @@ export function CrispThinkingOrb({ state, speed = 0.9 }: { state: OrbState; spee
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    canvas.width = Math.round(DRAW_SIZE * dpr);
-    canvas.height = Math.round(DRAW_SIZE * dpr);
     canvas.style.width = `${DRAW_SIZE}px`;
     canvas.style.height = `${DRAW_SIZE}px`;
     const context = canvas.getContext("2d");
     if (!context) return;
 
+    // 64 selects density/speed tuning; frame() computes new geometry at 256.
+    // No 64px bitmap is created or enlarged.
     const { mode, speed: presetSpeed, opts } = resolvePreset(state, 64);
     const frame = MODE_FRAMES[mode];
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const draw = (seconds: number) => {
-      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const pixels = Math.round(DRAW_SIZE * (window.devicePixelRatio || 1));
+      if (canvas.width !== pixels || canvas.height !== pixels) {
+        canvas.width = pixels;
+        canvas.height = pixels;
+      }
+      const scale = pixels / DRAW_SIZE;
+      context.setTransform(scale, 0, 0, scale, 0, 0);
+      context.filter = "none";
+      context.shadowBlur = 0;
       context.clearRect(0, 0, DRAW_SIZE, DRAW_SIZE);
       paintFrame(context, frame(DRAW_SIZE, seconds, opts), true);
     };
@@ -66,5 +73,5 @@ export function CrispThinkingOrb({ state, speed = 0.9 }: { state: OrbState; spee
     };
   }, [speed, state]);
 
-  return <canvas ref={canvasRef} className="crisp-thinking-orb" role="img" aria-label={`Charlie ${state}`} />;
+  return <canvas ref={canvasRef} width={DRAW_SIZE} height={DRAW_SIZE} className="crisp-thinking-orb" role="img" aria-label={`Charlie ${state}`} />;
 }

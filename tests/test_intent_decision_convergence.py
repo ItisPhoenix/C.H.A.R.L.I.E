@@ -283,7 +283,9 @@ async def test_research_turn_records_research_and_live_freshness(
         mode=ResearchMode.STANDARD,
         sources=[SourceDocument(source_id="S1", url="https://example.com/advisory", title="Advisory")],
         evidence=[EvidenceItem(source_id="S1", statement="Fetched statement.")],
-        citations=[Citation(source_id="S1", url="https://example.com/advisory", title="Advisory", domain="example.com")],
+        citations=[Citation(
+            source_id="S1", url="https://example.com/advisory", title="Advisory", domain="example.com"
+        )],
         stop_reason="evidence-sufficient",
     )
     decisions: list[IntentDecision] = []

@@ -1,5 +1,6 @@
 import logging
 import os
+import tempfile
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -32,6 +33,20 @@ if os.getenv("CHARLIE_TEST_MODE", "").lower() != "true":
 #                only takes effect on a full app restart.
 
 
+def _default_browser_profile_path() -> str:
+    """Headless Playwright profile location, kept outside the repository.
+
+    The repo must never hold browser state: it can be committed by accident, and
+    Charlie's own privacy validator rejects any profile path inside the project root.
+    Falls back to a temp directory when the platform exposes no per-user data dir.
+    """
+    import tempfile
+
+    base = os.getenv("LOCALAPPDATA") or os.getenv("XDG_STATE_HOME")
+    root = Path(base) if base else Path(tempfile.gettempdir())
+    return str(root / "Charlie" / "browser_profile")
+
+
 def _meta(
     env: str,
     group: str,
@@ -57,15 +72,19 @@ _TRUST_ENV_RISK_WARNED = False
 
 @dataclass
 class Config:
-    llm_url: str = field(default=os.getenv("LLM_URL", ""), metadata=_meta("LLM_URL", "LLM"))
+    llm_url: str = field(default=os.getenv("LLM_URL", ""), metadata=_meta("LLM_URL", "LLM", restart="process"))
     llm_key: str = field(
         default=os.getenv("LLM_API_KEY", "no-key"),
-        metadata=_meta("LLM_API_KEY", "LLM", secret=True),
+        metadata=_meta("LLM_API_KEY", "LLM", secret=True, restart="process"),
     )
     llm_model: str = field(default=os.getenv("LLM_MODEL", ""), metadata=_meta("LLM_MODEL", "LLM"))
+    llm_reasoning_enabled: bool = field(
+        default=os.getenv("LLM_REASONING_ENABLED", "false").lower() == "true",
+        metadata=_meta("LLM_REASONING_ENABLED", "LLM", restart="process"),
+    )
     llm_trust_env: bool = field(
         default=os.getenv("LLM_TRUST_ENV", "false").lower() == "true",
-        metadata=_meta("LLM_TRUST_ENV", "LLM"),
+        metadata=_meta("LLM_TRUST_ENV", "LLM", restart="process"),
     )
 
     # -1 = system default input device; >=0 = specific device index
@@ -126,6 +145,10 @@ class Config:
     vad_silence_timeout: float = field(
         default=float(os.getenv("VAD_SILENCE_TIMEOUT", "1.3")),
         metadata=_meta("VAD_SILENCE_TIMEOUT", "VAD & ASR Tuning", restart="voice"),
+    )
+    asr_vad_threshold: float = field(
+        default=float(os.getenv("ASR_VAD_THRESHOLD", "0.45")),
+        metadata=_meta("ASR_VAD_THRESHOLD", "VAD & ASR Tuning", restart="voice"),
     )
     vad_min_speech_duration_ms: int = field(
         default=int(os.getenv("VAD_MIN_SPEECH_DURATION_MS", "120")),
@@ -223,6 +246,44 @@ class Config:
     )
     # Search provider (SearXNG self-hosted)
     searxng_url: str = field(default=os.getenv("SEARXNG_URL", ""), metadata=_meta("SEARXNG_URL", "Search Providers"))
+    web_port: int = field(default=int(os.getenv("CHARLIE_WEB_PORT", "8000")), metadata=_meta("CHARLIE_WEB_PORT", "Server", restart="process"))
+    searxng_engines: str = field(default=os.getenv("SEARXNG_ENGINES", ""), metadata=_meta("SEARXNG_ENGINES", "Search Providers"))
+    searxng_fallback_engines: str = field(
+        default=os.getenv("SEARXNG_FALLBACK_ENGINES", ""),
+        metadata=_meta("SEARXNG_FALLBACK_ENGINES", "Search Providers"),
+    )
+    research_yacy_enabled: bool = field(
+        default=os.getenv("RESEARCH_YACY_ENABLED", "false").lower() == "true",
+        metadata=_meta("RESEARCH_YACY_ENABLED", "Search Providers"),
+    )
+    research_yacy_url: str = field(
+        default=os.getenv("RESEARCH_YACY_URL", ""),
+        metadata=_meta("RESEARCH_YACY_URL", "Search Providers"),
+    )
+    research_yacy_resource: str = field(
+        default=os.getenv("RESEARCH_YACY_RESOURCE", "local"),
+        metadata=_meta("RESEARCH_YACY_RESOURCE", "Search Providers"),
+    )
+    research_yacy_verify: str = field(
+        default=os.getenv("RESEARCH_YACY_VERIFY", "cacheonly"),
+        metadata=_meta("RESEARCH_YACY_VERIFY", "Search Providers"),
+    )
+    research_ddg_endpoint: str = field(
+        default=os.getenv("RESEARCH_DDG_ENDPOINT", ""),
+        metadata=_meta("RESEARCH_DDG_ENDPOINT", "Search Providers"),
+    )
+    research_bing_enabled: bool = field(
+        default=os.getenv("RESEARCH_BING_ENABLED", "false").lower() == "true",
+        metadata=_meta("RESEARCH_BING_ENABLED", "Search Providers"),
+    )
+    research_bing_endpoint: str = field(
+        default=os.getenv("RESEARCH_BING_ENDPOINT", ""),
+        metadata=_meta("RESEARCH_BING_ENDPOINT", "Search Providers"),
+    )
+    research_provider_order: str = field(
+        default=os.getenv("RESEARCH_PROVIDER_ORDER", ""),
+        metadata=_meta("RESEARCH_PROVIDER_ORDER", "Search Providers"),
+    )
     exa_api_key: str = field(
         default=os.getenv("EXA_API_KEY", ""),
         metadata=_meta("EXA_API_KEY", "Search Providers", secret=True),
@@ -304,6 +365,22 @@ class Config:
     research_jina_enabled: bool = field(
         default=os.getenv("RESEARCH_JINA_ENABLED", "false").lower() == "true",
         metadata=_meta("RESEARCH_JINA_ENABLED", "Research Advanced"),
+    )
+    research_total_timeout_sustained_s: float = field(
+        default=float(os.getenv("RESEARCH_TOTAL_TIMEOUT_SUSTAINED_S", "180")),
+        metadata=_meta("RESEARCH_TOTAL_TIMEOUT_SUSTAINED_S", "Research Advanced"),
+    )
+    research_max_verify_rounds: int = field(
+        default=int(os.getenv("RESEARCH_MAX_VERIFY_ROUNDS", "2")),
+        metadata=_meta("RESEARCH_MAX_VERIFY_ROUNDS", "Research Advanced"),
+    )
+    research_synthesis_model: str = field(
+        default=os.getenv("RESEARCH_SYNTHESIS_MODEL", ""),
+        metadata=_meta("RESEARCH_SYNTHESIS_MODEL", "Research Advanced", restart="process"),
+    )
+    research_verify_fetch_chars: int = field(
+        default=int(os.getenv("RESEARCH_VERIFY_FETCH_CHARS", "60000")),
+        metadata=_meta("RESEARCH_VERIFY_FETCH_CHARS", "Research Advanced"),
     )
 
     # Wake Word Configuration -- classifier is loaded once when VoiceEngine starts.
@@ -435,9 +512,17 @@ class Config:
         default=os.getenv("BROWSER_ENABLED", "false").lower() == "true",
         metadata=_meta("BROWSER_ENABLED", "Browser", restart="reload"),
     )
+    # Kept outside the repository on purpose: privacy_service.validate_browser_profile_path
+    # rejects any path inside the project root, and a repo-local profile would also risk
+    # being committed. Never point this at the user's real browser profile.
     browser_profile_path: str = field(
-        default=os.getenv("BROWSER_PROFILE_PATH", "browser_profile"),
+        default=os.getenv("BROWSER_PROFILE_PATH") or _default_browser_profile_path(),
         metadata=_meta("BROWSER_PROFILE_PATH", "Browser", restart="process"),
+    )
+    browser_user_profile_path: str = field(
+        default=os.getenv("BROWSER_USER_PROFILE_PATH")
+        or str(Path(os.getenv("LOCALAPPDATA") or tempfile.gettempdir()) / "Charlie" / "browser_user_profile"),
+        metadata=_meta("BROWSER_USER_PROFILE_PATH", "Browser", restart="process"),
     )
     browser_idle_timeout_s: int = field(
         default=int(os.getenv("BROWSER_IDLE_TIMEOUT_S", "120")),
