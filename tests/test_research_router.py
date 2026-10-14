@@ -22,6 +22,7 @@ from charlie.research.models import (
     SourceDocument,
 )
 from charlie.research.router import is_briefing_query, is_sustained_research_query, route
+from charlie.research.releases import canonical_release_urls, pick_stable
 from charlie.research.search import build_plan, clean_query, discovery_queries, parse_brief
 
 
@@ -29,8 +30,75 @@ def test_research_router_distinguishes_stable_and_fresh_requests():
     assert route("what is a Python list comprehension").should_research is False
     current = route("what's trending on X right now")
     assert current.should_research is True
-    assert current.mode is ResearchMode.STANDARD
+    assert current.mode is ResearchMode.QUICK
     assert route("deep research open source browser agents").mode is ResearchMode.DEEP
+
+
+def test_explicit_research_keyword_keeps_full_mode_when_tool_requests_quick():
+    assert route("Research the latest Python release", ResearchMode.QUICK).mode is ResearchMode.STANDARD
+    assert route("Deep research current browser agent security", ResearchMode.QUICK).mode is ResearchMode.DEEP
+
+
+def test_fresh_lookup_stays_quick_even_when_configured_for_full_research():
+    decision = route("What is the current stock price of NVIDIA?", ResearchMode.STANDARD)
+    assert decision.should_research is True
+    assert decision.mode is ResearchMode.QUICK
+
+
+def test_local_notepad_write_does_not_research_words_inside_the_note():
+    query = (
+        "In the open Notepad window, write this short note: I help with research, reminders, and weather. "
+        "Then save it on the Desktop as About Charlie.txt."
+    )
+    decision = route(query)
+    assert decision.should_research is False
+    assert decision.reason == "local desktop or file action"
+
+
+def test_current_local_ui_controls_stay_out_of_web_research():
+    for query in (
+        "Use the currently open Save As dialog. Type C:\\Users\\me\\Desktop\\About Charlie.txt "
+        "into the observed File name field, then click Save.",
+        "Use the current file picker dialog and keyboard to enter a filename, then press Save.",
+    ):
+        decision = route(query)
+        assert decision.should_research is False
+        assert decision.reason == "local desktop or file action"
+
+
+def test_explicit_research_then_save_still_uses_web_research():
+    decision = route("Research how Charlie can save notes in Notepad, then save the findings on the Desktop.")
+    assert decision.should_research is True
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "What's the price of gold in Kanpur right now?",
+        "What is the current stock price of NVIDIA?",
+    ],
+)
+def test_current_fact_uses_quick_search_without_an_atomic_query_gate(query):
+    decision = route(query)
+    assert decision.should_research is True
+    assert decision.mode is ResearchMode.QUICK
+
+
+def test_broad_current_topic_keeps_quick_search_budget():
+    assert route("What's trending in India right now?").mode is ResearchMode.QUICK
+
+
+@pytest.mark.parametrize(
+    ("query", "domains"),
+    [
+        ("Search GitHub for Charlie plugins", ["github.com"]),
+        ("Search Bilibili for Charlie assistants", ["bilibili.com", "b23.tv"]),
+        ("What's trending on Twitter right now?", ["x.com", "twitter.com"]),
+        ("Search Reddit for local assistant reviews", ["reddit.com"]),
+    ],
+)
+def test_agent_reach_platform_queries_scope_public_domain_search(query, domains):
+    assert build_plan(query, ResearchMode.STANDARD).domain_filters == domains
 
 
 def test_installed_local_version_and_help_request_does_not_start_web_research():
@@ -59,9 +127,9 @@ def test_explicit_background_action_is_not_preempted_by_a_version_signal():
     "query",
     [
         "Deep research the latest Windows security changes",
-        "Investigate current browser agent security",
-        "Compare Playwright and Selenium thoroughly",
-        "Do a multi-source analysis of local LLM runtimes",
+        "Research current browser agent security thoroughly",
+        "Research and compare Playwright and Selenium",
+        "Research local LLM runtimes across multiple sources",
     ],
 )
 def test_explicit_sustained_research_is_task_routed(query):
@@ -77,7 +145,7 @@ def test_short_explicit_research_request_stays_on_foreground_research_turn():
     assert is_sustained_research_query(query, decision) is False
 
 
-def test_three_subject_multi_dimension_research_is_sustained_without_keyword():
+def test_three_subject_multi_dimension_research_is_sustained_with_keyword():
     query = (
         "Research the architecture, advantages and limitations of SearXNG, Crawl4AI and Scrapling. "
         "Use their official project documentation and identify missing evidence."
@@ -107,16 +175,31 @@ def test_memory_and_reminder_updates_with_relative_time_are_not_research():
     assert mixed.should_research is True
 
 
-def test_current_request_asking_for_sources_fetches_documents():
+def test_relabeling_an_existing_timer_is_local_state_work_not_research():
+    decision = route("Relabel my existing timer to Take Medicine.")
+    assert decision.should_research is False
+    assert decision.reason == "local state update"
+
+
+def test_personal_calendar_questions_do_not_trigger_web_research():
+    decision = route("What events are on my calendar today?")
+    assert decision.should_research is False
+    assert decision.reason == "personal calendar lookup"
+
+    explicit = route("Research calendar apps with the best event reminders.")
+    assert explicit.should_research is True
+
+
+def test_current_request_asking_for_sources_uses_quick_search():
     decision = route("latest major AI developments today with sources")
     assert decision.should_research is True
-    assert decision.mode is ResearchMode.STANDARD
+    assert decision.mode is ResearchMode.QUICK
 
 
-def test_official_publication_query_promotes_quick_to_fetched_mode():
+def test_official_publication_query_stays_on_quick_budget():
     decision = route("NIST AI Risk Management Framework official publication page", "quick")
     assert decision.should_research is True
-    assert decision.mode is ResearchMode.STANDARD
+    assert decision.mode is ResearchMode.QUICK
 
 
 def test_action_report_phrase_does_not_trigger_research():
@@ -138,13 +221,16 @@ def test_briefing_intent_is_shared_by_research_and_runtime(query):
 
 
 def test_research_router_routes_factual_and_comparison_queries():
-    assert route("What is WebAssembly and what is it used for?").mode is ResearchMode.STANDARD
-    assert route("Compare Playwright and Selenium for browser automation.").mode is ResearchMode.STANDARD
-    assert route("What is the WebAssembly component model proposal status?").mode is ResearchMode.STANDARD
+    assert route("What is WebAssembly and what is it used for?").should_research is False
+    assert route("Compare Playwright and Selenium for browser automation.").mode is ResearchMode.QUICK
+    assert route("What is the WebAssembly component model proposal status?").should_research is False
 
 
-def test_current_queries_use_extraction_capable_standard_mode():
-    assert route("What is the latest Python release?").mode is ResearchMode.STANDARD
+def test_current_facts_do_not_depend_on_query_length_or_topic_whitelists():
+    assert route("What is the latest Python release?").mode is ResearchMode.QUICK
+    assert route(
+        "Could you tell me what the current population estimate is for Kanpur, including the district boundary estimate?"
+    ).mode is ResearchMode.QUICK
 
 
 @pytest.mark.parametrize(
@@ -152,11 +238,11 @@ def test_current_queries_use_extraction_capable_standard_mode():
     [
         ("Research the current Python release", ResearchMode.STANDARD),
         ("Deep research current browser agent security", ResearchMode.DEEP),
-        ("What is WebAssembly and what is it used for?", ResearchMode.STANDARD),
+        ("What is WebAssembly and what is it used for?", ResearchMode.QUICK),
         ("latest Python release", ResearchMode.QUICK),
     ],
 )
-def test_explicit_research_intent_overrides_quick_but_simple_lookup_stays_quick(query, expected_mode):
+def test_explicit_research_keyword_controls_full_mode(query, expected_mode):
     assert route(query, ResearchMode.QUICK).mode is expected_mode
 
 
@@ -188,7 +274,9 @@ def test_social_freshness_words_stay_conversation(query):
     ],
 )
 def test_domain_freshness_words_still_research(query):
-    assert route(query).should_research is True
+    decision = route(query)
+    assert decision.should_research is True
+    assert decision.mode is ResearchMode.QUICK
 
 
 @pytest.mark.asyncio
@@ -218,6 +306,42 @@ def test_clean_query_removes_instruction_and_format_noise():
     assert cleaned == "trending in AI & tech"
 
 
+def test_open_source_reimplementation_is_not_misrouted_as_release_research():
+    from charlie.research.search import parse_brief
+
+    query = "Brainstorm ideas for building a free open-source version of an app feature."
+    assert route(query).should_research is False
+    assert parse_brief(query).entity_kind == "general"
+    assert route("What is the latest stable Python version?").should_research is True
+
+
+def test_release_lookup_only_requires_a_date_when_the_user_asks_for_one():
+    version_only = parse_brief("What is the latest stable Node.js LTS release?")
+    with_date = parse_brief("What is the release date of Node.js v24.21.0?")
+
+    assert version_only.aspects == ["version"]
+    assert with_date.aspects == ["version", "release_date"]
+
+
+def test_lts_release_lookup_selects_the_lts_version_not_the_current_channel():
+    brief = parse_brief("What is the latest stable Node.js LTS release?")
+    source = SourceDocument(
+        source_id="S1",
+        content="v26.11.1 Current\nv24.21.0 Latest LTS\nv22.23.3 LTS",
+    )
+
+    assert pick_stable([source], brief) == ("24.21.0", "", "S1")
+
+
+def test_canonical_release_urls_preserve_the_registered_official_domain():
+    urls = canonical_release_urls(parse_brief("What is the latest stable Node.js release?"))
+
+    assert urls == [
+        "https://nodejs.org/en/download",
+        "https://nodejs.org/en/about/previous-releases",
+    ]
+
+
 def test_llm_release_query_normalizes_closed_source_typo_and_searches_both_release_types():
     query = "Research what's the latest close source and open source LLM released."
     brief = parse_brief(query)
@@ -228,7 +352,7 @@ def test_llm_release_query_normalizes_closed_source_typo_and_searches_both_relea
     assert any("open-source" in item.casefold() for item in queries)
     assert any("proprietary" in item.casefold() for item in queries)
     assert any("open-weight" in item.casefold() for item in queries)
-    assert is_sustained_research_query(query, route(query))
+    assert not is_sustained_research_query(query, route(query))
 
 
 def test_clean_query_removes_assistant_and_citation_instructions_but_preserves_quotes_and_domain():
@@ -303,11 +427,24 @@ async def test_quick_research_does_not_launch_browser(monkeypatch):
         research_total_timeout_deep_s=5,
     )
     engine = ResearchEngine(config, browser_fetch=lambda result: pytest.fail("quick research launched browser"))
-    monkeypatch.setattr(engine, "_providers", lambda: [_Provider()])
+    async def search(_plan):
+        return [SearchResult("Python release", "https://www.python.org/downloads/release/python-3130/")]
+
+    async def fetch(result, **_kwargs):
+        return SourceDocument(
+            url=result.url, title=result.title, domain="www.python.org",
+            content="Python 3.13.0 is a stable Python release. Release date: October 7, 2024.",
+            quality_score=0.8,
+        )
+
+    monkeypatch.setattr(engine, "_search", search)
+    monkeypatch.setattr("charlie.research.engine.fetch_document", fetch)
     report = await engine.run("latest Python release", "quick")
     assert report.successful
     assert report.mode is ResearchMode.QUICK
+    assert report.search_results[0].url.rstrip("/") == "https://python.org/downloads"
     assert report.citations[0].source_id == "S1"
+    assert report.sources and report.evidence
 
 
 @pytest.mark.asyncio
@@ -344,6 +481,60 @@ async def test_explicit_research_overrides_quick_and_fetches_cites_sources(monke
     assert report.sources
     assert report.citations[0].source_id == "S1"
     assert "[S1]" in report.prompt_context()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["quick", "standard"])
+async def test_product_extraction_uses_selected_budget_without_forcing_deep(monkeypatch, mode):
+    config = SimpleNamespace(
+        research_enabled=True,
+        research_total_timeout_standard_s=5,
+        research_total_timeout_sustained_s=5,
+    )
+    engine = ResearchEngine(config)
+    configured = []
+    sustained_called = []
+    inner_called = []
+
+    def configure(mode, *, sustained):
+        configured.append((mode, sustained))
+        return 5
+
+    async def run_sustained(query, *, mode, **kwargs):
+        sustained_called.append((query, mode))
+        return ResearchReport(query=query, mode=mode)
+
+    async def run_inner(query, mode, *args, **kwargs):
+        inner_called.append((query, mode))
+        return ResearchReport(query=query, mode=mode)
+
+    monkeypatch.setattr(engine, "_configure_budget", configure)
+    monkeypatch.setattr(engine, "_run_sustained", run_sustained)
+    monkeypatch.setattr(engine, "_run_inner", run_inner)
+    await engine.run("Recommend headphones under ₹2000 for music", mode)
+
+    assert configured == [(ResearchMode.QUICK, False)]
+    assert sustained_called == []
+    assert inner_called == [("Recommend headphones under ₹2000 for music", ResearchMode.QUICK)]
+
+
+@pytest.mark.asyncio
+async def test_explicit_product_research_keeps_full_research_path(monkeypatch):
+    engine = ResearchEngine(SimpleNamespace(research_enabled=True, research_total_timeout_standard_s=5))
+    configured = []
+    sustained_called = []
+
+    monkeypatch.setattr(engine, "_configure_budget", lambda mode, *, sustained: configured.append((mode, sustained)) or 5)
+
+    async def run_sustained(query, *, mode, **kwargs):
+        sustained_called.append((query, mode))
+        return ResearchReport(query=query, mode=mode)
+
+    monkeypatch.setattr(engine, "_run_sustained", run_sustained)
+    await engine.run("Research headphones under ₹2000 for music", "quick")
+
+    assert configured == [(ResearchMode.STANDARD, True)]
+    assert sustained_called == [("Research headphones under ₹2000 for music", ResearchMode.STANDARD)]
 
 
 def test_standard_prompt_context_contains_only_grounded_evidence():
@@ -496,7 +687,7 @@ def test_evidence_dedupes_repeated_sentences_within_a_source():
 
 
 @pytest.mark.asyncio
-async def test_standard_research_keeps_every_fetched_source_that_produced_evidence(monkeypatch):
+async def test_standard_research_stops_at_coverage_and_keeps_fetched_evidence(monkeypatch):
     config = SimpleNamespace(
         research_enabled=True,
         research_max_search_queries=3,
@@ -524,7 +715,10 @@ async def test_standard_research_keeps_every_fetched_source_that_produced_eviden
                 for index in range(1, 7)
             ]
 
+    fetched = []
+
     async def fake_fetch(result, **_kwargs):
+        fetched.append(result.url)
         return _verbose_document("", result.url)
 
     monkeypatch.setattr("charlie.research.engine.fetch_document", fake_fetch)
@@ -534,12 +728,12 @@ async def test_standard_research_keeps_every_fetched_source_that_produced_eviden
     report = await engine.run("research current browser agent security", "standard")
 
     assert len(report.search_results) == 6
-    assert len(report.sources) == 6
-    assert len(report.citations) == 6
-    assert {item.source_id for item in report.evidence} == {f"S{index}" for index in range(1, 7)}
-    assert {citation.domain for citation in report.citations} == {
-        f"site{index}.example" for index in range(1, 7)
+    assert 0 < len(fetched) < len(report.search_results)
+    assert len(report.sources) == len(report.citations) == len(fetched)
+    assert {item.source_id for item in report.evidence} == {
+        citation.source_id for citation in report.citations
     }
+    assert {source.url for source in report.sources} == set(fetched)
     assert report.stop_reason == "evidence-sufficient"
 
 

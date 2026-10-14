@@ -172,6 +172,21 @@ class TestTextStreamFilter:
         assert "hi" in combined
         assert "bye" in combined
 
+    def test_structured_tool_call_is_stripped_across_chunks(self):
+        from charlie.streaming import TextStreamFilter
+        f = TextStreamFilter()
+        chunks = (
+            "Before.\n_tool_",
+            "call\n{\"name\":\"desktop_open_app\",",
+            "\"arguments\":{\"app\":\"notepad\"}}",
+            "\nAfter.",
+        )
+        result = "".join(f.push(chunk) for chunk in chunks) + f.flush()
+        assert "Before." in result
+        assert "After." in result
+        assert "_tool_call" not in result
+        assert "desktop_open_app" not in result
+
     def test_think_block_multiple(self):
         from charlie.streaming import TextStreamFilter
         f = TextStreamFilter()

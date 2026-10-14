@@ -10,13 +10,20 @@ from charlie.research.models import ResearchMode
 
 _CURRENT_SIGNALS = re.compile(
     r"\b(latest|current|currently|today|now|right now|live|recent|recently|lately|breaking|trending|news|"
-    r"price|prices|cost|buy|shopping|recommend|recommendation|travel|release|version|"
+    r"price|prices|cost|buy|shopping|recommend|recommendation|travel|"
     r"availability|schedule|score|weather|sports|on twitter|on x\b)\b",
     re.IGNORECASE,
 )
 _SOCIAL_CONVERSATION_SIGNALS = re.compile(
     r"\b(?:how\s+(?:are|have)\s+you\b|are\s+you\s+(?:okay|ok|well|doing)\b|"
     r"what(?:'s|\s+is)\s+up\s+with\s+you\b|how\s+are\s+things\s+going\b)",
+    re.IGNORECASE,
+)
+_RELEASE_LOOKUP_SIGNALS = re.compile(
+    r"\b(?:release\s+(?:notes?|date|history)|version\s+(?:number|\d+(?:\.\d+)+)|"
+    r"(?:what|which)\s+(?:is\s+)?(?:the\s+)?version|"
+    r"(?:latest|current|recent|newest|stable)\b.{0,40}\b(?:release|version)\b|"
+    r"when\s+(?:was|did)\b.{0,100}\breleased)\b",
     re.IGNORECASE,
 )
 _LOCAL_VERSION_CONTEXT = re.compile(
@@ -33,19 +40,15 @@ _RESEARCH_SIGNALS = re.compile(
     r"look into|analyze current|multi[- ]source|multi[- ]step)\b",
     re.IGNORECASE,
 )
+_EXPLICIT_RESEARCH_KEYWORD = re.compile(r"\bresearch\b", re.IGNORECASE)
 _FETCHED_EVIDENCE_SIGNALS = re.compile(
-    r"\b(?:official\s+(?:source|sources|publication|page)|sources?|citations?|"
+    r"\b(?:official\s+(?:source|sources|publication|page)|(?<!open[- ])sources?|citations?|"
     r"evidence|publication|paper)\b",
     re.IGNORECASE,
 )
 _SUSTAINED_RESEARCH_SIGNALS = re.compile(
     r"\b(?:investigate|deep\s+research|in[- ]depth|thorough(?:ly)?|"
-    r"multi[- ]source|multi[- ]step|look\s+into|analyze\s+current|comparison|compare)\b",
-    re.IGNORECASE,
-)
-_LLM_RELEASE_COMPARISON = re.compile(
-    r"\b(?:llms?|large\s+language\s+models?)\b"
-    r"(?s:.{0,160})\b(?:latest|current|release|released|announcement)\b",
+    r"multi[- ]source|multiple\s+sources?|multi[- ]step|look\s+into|analyze\s+current|comparison|compare)\b",
     re.IGNORECASE,
 )
 _BROAD_RESEARCH_SUBJECTS = re.compile(r"\b(?:of|from|across)\s+([^?.;]+)", re.IGNORECASE)
@@ -58,30 +61,34 @@ _BACKGROUND_TASK_REQUEST = re.compile(
     re.IGNORECASE,
 )
 _LOCAL_STATE_UPDATE = re.compile(
-    r"\b(?:update|change|reschedule|cancel|remove|delete|edit|replace|correct)\b"
-    r"(?s:.{0,160}?)\b(?:memory|notes?|reminder|schedule|task)\b",
+    r"\b(?:update|change|reschedule|cancel|remove|delete|edit|replace|correct|rename|relabel)\b"
+    r"(?s:.{0,160}?)\b(?:memory|notes?|reminder|schedule|task|timer)\b",
+    re.IGNORECASE,
+)
+_LOCAL_CALENDAR_LOOKUP = re.compile(r"\b(?:my|our)\s+(?:calendar|agenda|schedule|events?)\b", re.IGNORECASE)
+_LOCAL_DESKTOP_ACTION = re.compile(
+    r"\bnotepad\b(?s:.{0,220}?)\b(?:write|type|save|edit)\b|"
+    r"\b(?:write|type|save|edit)\b(?s:.{0,220}?)\b(?:in|into|on|to)\s+(?:the\s+)?(?:notepad|text\s+editor|desktop|file|document)\b|"
+    r"\b(?:write|create|save)\b(?s:.{0,180}?)\b(?:on|to|in)\s+(?:my\s+)?desktop\b|"
+    r"\b(?:use|operate|control|focus|switch\s+to)\b(?s:.{0,160}?)"
+    r"\b(?:current(?:ly)?|open|foreground|native|desktop|mouse|keyboard)\b(?s:.{0,120}?)"
+    r"\b(?:window|dialog|file\s+picker|field|control|button|input|form|text\s+editor|notepad)\b"
+    r"(?s:.{0,180}?)\b(?:type|enter|fill|write|save|click|press|select|set|create|edit|replace)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_RESEARCH_LEAD = re.compile(
+    r"^\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?"
+    r"(?:research|investigate|compare|search|look\s+into|analyze|find\s+out)\b",
     re.IGNORECASE,
 )
 _BRIEFING_SIGNALS = re.compile(
     r"\b(?:briefing|news\s+roundup|news\s+digest|daily\s+summary|intelligence\s+briefing)\b",
     re.IGNORECASE,
 )
-_FACTUAL_RESEARCH = re.compile(r"\bwhat\s+is\b.+\bused\s+for\b", re.IGNORECASE)
-_SPECIALIZED_FACTUAL = re.compile(
-    r"\bwhat\s+is\b.+\b(status|proposal|protocol|canonicalization|specification|discovery)\b",
-    re.IGNORECASE,
-)
 _INTERACTIVE_SIGNALS = re.compile(
     r"\b(play|watch|listen|open|click|fill|submit|post|send|log in|show me on)\b",
     re.IGNORECASE,
 )
-_STABLE_EXPLANATION = re.compile(
-    r"\b(what is|what are|how does|how do|explain|define)\b.*\b(list comprehension|"
-    r"recursion|variable|function|python|javascript|math|grammar)\b",
-    re.IGNORECASE,
-)
-
-
 @dataclass(frozen=True)
 class ResearchDecision:
     should_research: bool
@@ -95,6 +102,16 @@ def is_briefing_query(query: str) -> bool:
     return bool(_BRIEFING_SIGNALS.search(query.strip()))
 
 
+def is_release_lookup_query(query: str) -> bool:
+    """Match release/version lookups without treating reimplementations as release news."""
+    return bool(_RELEASE_LOOKUP_SIGNALS.search(query.strip()))
+
+
+def is_local_state_update(query: str) -> bool:
+    """Return whether the request edits already-owned local state."""
+    return bool(_LOCAL_STATE_UPDATE.search(query.strip()))
+
+
 def _coerce_mode(mode: str | ResearchMode | None) -> Optional[ResearchMode]:
     if mode is None or str(mode).lower() in {"", "auto"}:
         return None
@@ -105,46 +122,43 @@ def _coerce_mode(mode: str | ResearchMode | None) -> Optional[ResearchMode]:
 
 
 def choose_mode(query: str, requested: str | ResearchMode | None = None) -> ResearchDecision:
-    """Choose research mode without making the LLM responsible for obvious routing."""
+    """Use full research only when asked; route other live lookups to quick search."""
     explicit = _coerce_mode(requested)
     text = query.strip()
-    requires_fetched_sources = (
-        is_briefing_query(text)
-        or _RESEARCH_SIGNALS.search(text) is not None
-        or _FETCHED_EVIDENCE_SIGNALS.search(text) is not None
-        or _FACTUAL_RESEARCH.search(text) is not None
-        or _SPECIALIZED_FACTUAL.search(text) is not None
-    )
-    if explicit is not None and (explicit is not ResearchMode.QUICK or not requires_fetched_sources):
-        return ResearchDecision(True, explicit, "explicit mode")
-    if _BACKGROUND_TASK_REQUEST.search(text) and not _RESEARCH_SIGNALS.search(text):
+    explicit_research = bool(_EXPLICIT_RESEARCH_KEYWORD.search(text))
+    if _LOCAL_CALENDAR_LOOKUP.search(text) and not explicit_research:
+        return ResearchDecision(False, None, "personal calendar lookup")
+    if _BACKGROUND_TASK_REQUEST.search(text) and not explicit_research:
         return ResearchDecision(False, None, "explicit background task request")
+    if _LOCAL_DESKTOP_ACTION.search(text) and not _EXPLICIT_RESEARCH_LEAD.match(text):
+        return ResearchDecision(False, None, "local desktop or file action")
     if _INTERACTIVE_SIGNALS.search(text) and re.search(r"\bon\s+(youtube|amazon|x|twitter)\b", text, re.I):
         return ResearchDecision(False, None, "interactive site task", interactive=True)
-    if is_briefing_query(text):
-        return ResearchDecision(True, ResearchMode.STANDARD, "briefing requires fresh sources")
-    if _RESEARCH_SIGNALS.search(text):
+    if explicit_research:
+        if explicit in {ResearchMode.STANDARD, ResearchMode.DEEP}:
+            return ResearchDecision(True, explicit, "explicit mode")
         mode = ResearchMode.DEEP if re.search(r"deep|in[- ]depth|thorough", text, re.I) else ResearchMode.STANDARD
         return ResearchDecision(True, mode, "explicit research intent")
+    if explicit is ResearchMode.QUICK:
+        return ResearchDecision(True, explicit, "explicit mode")
     # Relative reminder times contain freshness words such as "now" and "schedule".
     # Keep clear local state edits on the tool path instead of sending them to web search.
-    if _LOCAL_STATE_UPDATE.search(text):
+    if is_local_state_update(text):
         return ResearchDecision(False, None, "local state update")
     if _FETCHED_EVIDENCE_SIGNALS.search(text):
-        return ResearchDecision(True, ResearchMode.STANDARD, "fetched evidence requested")
+        return ResearchDecision(True, ResearchMode.QUICK, "quick lookup with sources")
     if re.search(r"\bversion\b", text, re.IGNORECASE) and _LOCAL_VERSION_CONTEXT.search(text):
         return ResearchDecision(False, None, "local installed-version lookup")
-    if _LOCAL_SHELL_FACTS.search(text) and not _RESEARCH_SIGNALS.search(text):
+    if _LOCAL_SHELL_FACTS.search(text) and not explicit_research:
         return ResearchDecision(False, None, "local shell fact lookup")
     if _SOCIAL_CONVERSATION_SIGNALS.search(text):
         return ResearchDecision(False, None, "social conversation is not a live-web request")
-    if _STABLE_EXPLANATION.search(text) and not _CURRENT_SIGNALS.search(text):
-        return ResearchDecision(False, None, "stable general knowledge")
-    if _FACTUAL_RESEARCH.search(text) or _SPECIALIZED_FACTUAL.search(text):
-        return ResearchDecision(True, ResearchMode.STANDARD, "factual explanation requiring sources")
-    if _CURRENT_SIGNALS.search(text):
-        mode = ResearchMode.STANDARD
-        return ResearchDecision(True, mode, "fresh or materially changing information")
+    if is_briefing_query(text):
+        return ResearchDecision(True, ResearchMode.QUICK, "quick web summary")
+    if _RESEARCH_SIGNALS.search(text):
+        return ResearchDecision(True, ResearchMode.QUICK, "quick web search")
+    if _CURRENT_SIGNALS.search(text) or is_release_lookup_query(text):
+        return ResearchDecision(True, ResearchMode.QUICK, "quick web search for fresh information")
     return ResearchDecision(False, None, "no live-web signal")
 
 
@@ -157,13 +171,9 @@ def is_sustained_research_query(query: str, decision: ResearchDecision | None = 
     if decision is not None and not decision.should_research:
         return False
     text = query.strip()
+    if not _EXPLICIT_RESEARCH_KEYWORD.search(text):
+        return False
     if _SUSTAINED_RESEARCH_SIGNALS.search(text):
-        return True
-    if (
-        _LLM_RELEASE_COMPARISON.search(text)
-        and re.search(r"\bopen[- ](?:source|weight)\b", text, re.I)
-        and re.search(r"\b(?:close|closed)[- ]source\b|\bproprietary\b", text, re.I)
-    ):
         return True
     subject_list = _BROAD_RESEARCH_SUBJECTS.search(text)
     if subject_list is None:

@@ -403,6 +403,57 @@ def test_general_deterministic_answer_covers_supported_comparison_fields():
     assert validate_claim_support(answer, report) is True
 
 
+def test_general_deterministic_answer_keeps_all_supported_claims():
+    statements = [
+        "Use certified safety glasses when viewing the Sun directly.",
+        "Never look through unfiltered optics while wearing safety glasses.",
+        "Supervise children using solar viewers.",
+    ]
+    source = SourceDocument(
+        source_id="S1",
+        url="https://alpha.example/safety",
+        title="Alpha safety guidance",
+        domain="alpha.example",
+        content=" ".join(statements),
+        source_class="official",
+    )
+    passages = []
+    evidence = []
+    claim_ids = []
+    offset = 0
+    for index, statement in enumerate(statements, start=1):
+        passage_id = f"p{index}"
+        claim_ids.append(passage_id)
+        passages.append(EvidencePassage(
+            passage_id, "S1", source.url, source.canonical_url, source.content_hash,
+            statement, offset, offset + len(statement), "now", None, "official",
+        ))
+        evidence.append(EvidenceItem(
+            "S1", statement, relevance=1 / index, passage_id=passage_id,
+            start_offset=offset, end_offset=offset + len(statement), document_hash=source.content_hash,
+        ))
+        offset += len(statement) + 1
+
+    report = ResearchReport(
+        query="What safety steps should I follow?",
+        mode=ResearchMode.DEEP,
+        brief=ResearchBrief(topic="solar viewing safety", entity_kind="general"),
+        sources=[source],
+        citations=[Citation("S1", source.url, source.title, source.domain)],
+        evidence=evidence,
+        passages=passages,
+        coverage=[Subquestion(
+            "q1", "What safety steps should I follow?", ["answer"],
+            status="supported", supporting_claim_ids=claim_ids,
+        )],
+    )
+
+    answer = report.deterministic_answer()
+
+    assert all(statement in answer for statement in statements)
+    assert not any(line.lstrip().startswith("- ") for line in answer.splitlines())
+
+
 def test_pick_stable_python_with_dotted_month():
     # Test dotted month abbreviation like 'Feb. 4, 2025' from python.org
     content = """

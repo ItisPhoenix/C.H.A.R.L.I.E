@@ -247,6 +247,52 @@ async def test_every_tool_in_a_batch_yields_one_correlated_envelope(monkeypatch)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "structured"),
+    [
+        ("weather_get", {"location": "Kanpur"}, {"ok": True, "verified": True, "location": {}, "current": {}}),
+        ("timer_create", {"delay_seconds": 30, "text": "Timer finished"}, {"ok": True, "verified": True, "id": "timer-1"}),
+        ("timer_cancel", {"schedule_id": "timer-1"}, {"ok": True, "verified": True, "id": "timer-1"}),
+        ("stopwatch_control", {"action": "start"}, {"ok": True, "verified": True, "state": "running", "elapsed_seconds": 0}),
+        (
+            "dashboard_widget_control",
+            {"widget": "clock", "visible": True},
+            {"ok": True, "verified": True, "widget": "clock", "visible": True},
+        ),
+    ],
+)
+async def test_dashboard_widget_operations_preserve_structured_results(
+    monkeypatch, tool_name, arguments, structured
+):
+    brain = Brain(Config(llm_url="http://localhost:11434", llm_key="no-key", llm_model="dummy"))
+    envelopes = []
+    brain.on_operation_result = lambda name, envelope: envelopes.append((name, envelope))
+    monkeypatch.setattr(
+        core.tool_registry,
+        "execute_tool_structured",
+        lambda _name, _arguments: ToolExecutionResult("Verified", structured, tool_name),
+    )
+    monkeypatch.setattr(core.tool_registry, "execute_tool", lambda *_args: "legacy text only")
+
+    try:
+        await brain.execute_tool_operation(
+            tool_name,
+            arguments,
+            request=f"Run {tool_name}",
+            task_id=None,
+            session_id="widget-session",
+            turn_id="widget-turn",
+            platform="web",
+        )
+    finally:
+        await brain.close()
+
+    assert len(envelopes) == 1
+    assert envelopes[0][0] == tool_name
+    assert envelopes[0][1].data["structured_data"] == structured
+
+
+@pytest.mark.asyncio
 async def test_interactive_approval_denial_short_circuits_the_batch(monkeypatch):
     """A denied interactive call must arrive as a structured denial envelope.
 

@@ -3,9 +3,8 @@
 Domain-agnostic -- no charlie.core/Brain import -- so charlie/background_task.py
 can wire its own planning/execution logic in via a run_fn closure per task. A
 ManagedTask's status is the single source of truth the manager schedules
-from; a run_fn is responsible for setting its own task's status to a
-terminal value ("done"/"failed"/"cancelled") before returning, or the
-manager defaults it to "done" on a clean return.
+from. A queued cancellation invokes its optional cleanup callback, never its
+run_fn.
 """
 
 import asyncio
@@ -49,6 +48,7 @@ class TaskManager:
         self._max_terminal_records = resolve_task_history_max_terminal(max_terminal_records)
         self._tasks: Dict[str, ManagedTask] = {}
         self._run_fns: Dict[str, Callable[[], Awaitable[None]]] = {}
+        self._cancel_cleanup_fns: Dict[str, Callable[[], Awaitable[None]]] = {}
         self._running_ids: Set[str] = set()
         self._task_handles: Dict[str, asyncio.Task] = {}
         self._terminal_order: Dict[str, int] = {}
@@ -87,13 +87,22 @@ class TaskManager:
         for task in oldest:
             self._tasks.pop(task.id, None)
             self._run_fns.pop(task.id, None)
+            self._cancel_cleanup_fns.pop(task.id, None)
             self._terminal_order.pop(task.id, None)
 
-    def submit(self, task: ManagedTask, run_fn: Callable[[], Awaitable[None]]) -> None:
+    def submit(
+        self,
+        task: ManagedTask,
+        run_fn: Callable[[], Awaitable[None]],
+        *,
+        cancel_cleanup: Optional[Callable[[], Awaitable[None]]] = None,
+    ) -> None:
         if not self._accepting:
             raise TaskManagerAdmissionClosed("Task manager is shutting down")
         self._tasks[task.id] = task
         self._run_fns[task.id] = run_fn
+        if cancel_cleanup is not None:
+            self._cancel_cleanup_fns[task.id] = cancel_cleanup
         self._set_status(task, "queued")
         self._schedule()
 
@@ -108,30 +117,32 @@ class TaskManager:
 
     def cancel(self, task_id: str) -> bool:
         task = self._tasks.get(task_id)
-        if task is None:
+        if task is None or task.status in _TERMINAL_STATUSES:
             return False
-        if task.status == "queued":
-            self._set_status(task, "cancelled")
-            self._schedule()
-        else:
-            task.cancel_requested = True
+        already_requested = task.cancel_requested
+        task.cancel_requested = True
+        if task.status == "running" and not already_requested:
+            handle = self._task_handles.get(task_id)
+            if handle is not None and not handle.done() and not handle.cancelling():
+                handle.cancel()
+        self._schedule()
         return True
 
     def _ready(self, task: ManagedTask) -> bool:
-        return all(
+        return task.cancel_requested or all(
             dep_id in self._tasks and self._tasks[dep_id].status == "done"
             for dep_id in task.depends_on
         )
 
     def _cancel_blocked_dependents(self) -> None:
         for task in self._tasks.values():
-            if task.status != "queued":
+            if task.status != "queued" or task.cancel_requested:
                 continue
             if any(
                 dep_id not in self._tasks or self._tasks[dep_id].status in ("failed", "cancelled")
                 for dep_id in task.depends_on
             ):
-                self._set_status(task, "cancelled")
+                task.cancel_requested = True
 
     def _schedule(self) -> None:
         try:
@@ -160,13 +171,19 @@ class TaskManager:
         try:
             for task in self._tasks.values():
                 if task.status == "queued":
-                    self._set_status(task, "cancelled")
+                    task.cancel_requested = True
+            self._schedule()
         finally:
             self._prune_terminal_history()
 
     async def _run(self, task: ManagedTask) -> None:
         try:
-            await self._run_fns[task.id]()
+            if task.cancel_requested:
+                cleanup = self._cancel_cleanup_fns.get(task.id)
+                if cleanup is not None:
+                    await cleanup()
+            else:
+                await self._run_fns[task.id]()
         except asyncio.CancelledError:
             if task.status == "running":
                 self._set_status(task, "cancelled")
@@ -178,8 +195,9 @@ class TaskManager:
         finally:
             self._running_ids.discard(task.id)
             self._task_handles.pop(task.id, None)
+            self._cancel_cleanup_fns.pop(task.id, None)
             if task.status == "running":
-                self._set_status(task, "done")
+                self._set_status(task, "cancelled" if task.cancel_requested else "done")
             elif task.status in _TERMINAL_STATUSES and task.id not in self._terminal_order:
                 # Legacy run functions may mutate status directly; seed ordering
                 # only when no canonical _set_status transition recorded it.
@@ -190,19 +208,21 @@ class TaskManager:
         """Cancel queued/running work and wait for task bodies to quiesce."""
         self.close_admission()
         for task in self._tasks.values():
-            if task.status == "queued":
-                self._set_status(task, "cancelled")
-            elif task.status == "running":
+            if task.status == "running":
                 task.cancel_requested = True
-        handles = list(self._task_handles.values())
-        for handle in handles:
-            if not handle.done():
-                handle.cancel()
-        if handles:
-            try:
-                await asyncio.wait_for(asyncio.gather(*handles, return_exceptions=True), timeout=timeout)
-            except asyncio.TimeoutError:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while self._task_handles:
+            handles = list(self._task_handles.values())
+            remaining = deadline - loop.time()
+            if remaining <= 0:
                 logger.error("Task manager shutdown timed out; tasks are not quiescent")
-                raise
-        self._running_ids.clear()
+                raise asyncio.TimeoutError
+            _, pending = await asyncio.wait(handles, timeout=remaining)
+            if pending:
+                logger.error("Task manager shutdown timed out; tasks are not quiescent")
+                raise asyncio.TimeoutError
+        if self.active_count():
+            logger.error("Task manager shutdown left queued or running work; tasks are not quiescent")
+            raise asyncio.TimeoutError
         self._prune_terminal_history()

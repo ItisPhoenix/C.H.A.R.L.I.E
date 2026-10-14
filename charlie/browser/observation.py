@@ -131,7 +131,7 @@ def rank_and_cap(marks: List[Mark], max_marks: int = _MAX_MARKS) -> List[Mark]:
 
 
 def extract_visible_text(page: Any, max_chars: int = _TEXT_BUDGET_CHARS) -> str:
-    """Extract readable page text via trafilatura, same extractor the deleted BrowserPlugin used."""
+    """Extract readable page text via trafilatura."""
     import trafilatura
     text = trafilatura.extract(page.content()) or ""
     return text[:max_chars]

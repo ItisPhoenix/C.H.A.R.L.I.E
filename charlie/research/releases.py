@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from charlie.research.models import Fact, ResearchBrief, SourceDocument
-from charlie.research.sources import OFFICIAL_REGISTRY, get_official_domains, resolve_brand
 
 # Regex for semver and PEP 440 version strings
 # Matches: 3.13.2, 3.14.0rc1, 3.12.8, etc.
@@ -72,6 +72,7 @@ def pick_stable(
     """
     items = list(facts_or_docs)
     requested = parse_version_tuple(brief.requested_version) if brief and brief.requested_version else None
+    lts_requested = bool(brief and re.search(r"\bLTS\b", brief.original_request or brief.topic, re.I))
     stable_candidates: List[Tuple[Tuple[int, int, int], str, str, str]] = []
 
     # Map dates by: candidate, quote content, and source_id
@@ -89,6 +90,49 @@ def pick_stable(
     for item in items:
         if isinstance(item, SourceDocument):
             prior_count = len(stable_candidates)
+            if lts_requested:
+                from charlie.research.facts import _DATE_RE
+
+                if item.content.lstrip().startswith("["):
+                    try:
+                        release_rows = json.loads(item.content)
+                    except (TypeError, ValueError):
+                        release_rows = None
+                    if isinstance(release_rows, list):
+                        for row in release_rows:
+                            if not isinstance(row, dict) or not row.get("lts"):
+                                continue
+                            raw_version = str(row.get("version") or "").strip()
+                            version = re.sub(r"^v(?=\d)", "", raw_version, flags=re.I)
+                            parsed = parse_version_tuple(version) if is_stable_version(version) else None
+                            if parsed is None or (requested is not None and parsed[:3] != requested[:3]):
+                                continue
+                            stable_candidates.append((
+                                parsed[:3], raw_version,
+                                str(row.get("date") or "").strip(), item.source_id,
+                            ))
+                        if len(stable_candidates) > prior_count:
+                            continue
+
+                for line in re.split(r"[\r\n]+", item.content):
+                    if not re.search(r"\bLTS\b", line, re.I):
+                        continue
+                    version_text = re.sub(r"\bv(?=\d)", "", line, flags=re.I)
+                    versions = list(dict.fromkeys(
+                        match.group(0)
+                        for match in _VERSION_PARSE_RE.finditer(version_text)
+                        if is_stable_version(match.group(0))
+                    ))
+                    if len(versions) != 1:
+                        continue
+                    version = versions[0]
+                    parsed = parse_version_tuple(version)
+                    if parsed is None or (requested is not None and parsed[:3] != requested[:3]):
+                        continue
+                    dates = list(_DATE_RE.finditer(line))
+                    date_value = dates[0].group(1).strip() if len(dates) == 1 else ""
+                    stable_candidates.append((parsed[:3], version, date_value, item.source_id))
+                continue
             if requested is not None:
                 from charlie.research.facts import _DATE_RE
 
@@ -138,6 +182,8 @@ def pick_stable(
                             stable_candidates.append((key, ver, dt_str, item.source_id))
         elif isinstance(item, Fact):
             if item.aspect == "version":
+                if lts_requested and not re.search(r"\bLTS\b", item.quote, re.I):
+                    continue
                 ver = item.value
                 if is_stable_version(ver):
                     parsed = parse_version_tuple(ver)
@@ -175,21 +221,3 @@ def pick_stable(
         return None
     best = next((value for value in best_group if value[2]), best_group[0])
     return (best[1], best[2], best[3])
-
-
-def get_canonical_release_paths(domain_or_brand: str) -> List[str]:
-    """Return canonical release paths from registry for a brand or domain."""
-    for key, info in OFFICIAL_REGISTRY.items():
-        if key == domain_or_brand.lower() or domain_or_brand.lower() in info.get("domains", set()):
-            return list(info.get("canonical_paths", []))
-    return []
-
-
-def canonical_release_urls(brief: ResearchBrief) -> List[str]:
-    """Reuse the official registry even when a search provider returns nothing."""
-    brand = resolve_brand(brief.topic)
-    domains = brief.explicit_domains or (get_official_domains(brand) if brand else [])
-    return list(dict.fromkeys(
-        f"https://www.{domain.removeprefix('www.')}{path}"
-        for domain in domains for path in get_canonical_release_paths(domain.removeprefix("www."))
-    ))

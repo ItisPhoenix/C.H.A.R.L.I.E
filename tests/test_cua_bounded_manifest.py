@@ -320,3 +320,79 @@ def test_start_failure_surfaces_reason(monkeypatch):
 def test_bridge_carries_its_scope():
     assert CuaRuntimeBridge(scope=manifest_mod.BROWSER_SCOPE)._scope == "browser"
     assert CuaRuntimeBridge()._scope == "native"
+
+
+def test_native_bridge_reports_five_minute_idle_expiry(monkeypatch):
+    from charlie.computer import cua_bridge
+
+    now = 100.0
+    bridge = CuaRuntimeBridge()
+    bridge._driver = object()
+    bridge._last_activity_at = now
+    monkeypatch.setattr(cua_bridge.time, "monotonic", lambda: now)
+    assert not bridge.is_idle_expired
+    now += manifest_mod.IDLE_TIMEOUT_SECONDS
+    assert bridge.is_idle_expired
+
+
+@pytest.mark.parametrize("target_is_current", [True, False])
+def test_backend_renews_expired_bounded_runtime_only_for_live_target(monkeypatch, target_is_current):
+    from charlie.computer import backend as backend_mod
+    from charlie.computer.backend import DesktopBackend
+
+    target = {"pid": 4242, "window_id": 8192}
+
+    class OldBridge:
+        is_idle_expired = True
+
+        def __init__(self):
+            self.closed = False
+
+        def shutdown(self):
+            self.closed = True
+
+    class NewBridge:
+        instances = []
+
+        def __init__(self, *, window_target):
+            self.target = window_target
+            self.started = False
+            self.closed = False
+            self.instances.append(self)
+
+        def ensure_started(self):
+            self.started = True
+            return True
+
+        def shutdown(self):
+            self.closed = True
+
+    class Adapter:
+        available = True
+
+        def __init__(self, bridge):
+            self.bridge = bridge
+
+    old_bridge = OldBridge()
+    backend = DesktopBackend()
+    backend._bridge = old_bridge
+    backend._adapter = Adapter(old_bridge)
+    backend._target = target
+    monkeypatch.setattr(backend_mod, "CuaRuntimeBridge", NewBridge)
+    monkeypatch.setattr(backend_mod, "CuaAdapter", Adapter)
+    monkeypatch.setattr(backend_mod, "_window_target_is_current", lambda _target: target_is_current)
+
+    adapter = backend._ensure(target)
+
+    assert old_bridge.closed
+    if target_is_current:
+        assert len(NewBridge.instances) == 1
+        renewed = NewBridge.instances[0]
+        assert renewed.started
+        assert renewed.target == target
+        assert adapter.bridge is renewed
+        assert backend._target == target
+    else:
+        assert NewBridge.instances == []
+        assert adapter is None
+        assert backend._target is None

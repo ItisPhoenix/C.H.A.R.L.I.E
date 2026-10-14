@@ -418,7 +418,11 @@ async def test_sustained_research_uses_task_lane_and_preserves_request_identity(
         "turn_id": "turn-research",
         "channel": "voice",
     }
-    assert any(event_type == "research_progress" for event_type, _payload in bus.events)
+    progress_events = [payload for event_type, payload in bus.events if event_type == "research_progress"]
+    assert [payload["stage"] for payload in progress_events] == ["searching", "synthesizing"]
+    assert progress_events[-1]["current"] == 1
+    assert progress_events[-1]["total"] == 2
+    assert task.steps == ["Research: Deep research Windows security", "Prepare grounded answer"]
 
 
 @pytest.mark.asyncio
@@ -444,7 +448,11 @@ async def test_research_synthesis_uses_fetched_citations_once_without_tools():
 
         async def _stream_completion(self, payload, generation):
             brain_calls.append((payload, generation))
-            return "The latest stable Python release is 3.14.7 [S1] [S99].", []
+            return (
+                "The latest stable Python release is 3.14.7 [S1] [S99].\n\n"
+                "```python\nfrom pathlib import Path\n```",
+                [],
+            )
 
     source = SourceDocument(
         url="https://docs.python.org/3/",

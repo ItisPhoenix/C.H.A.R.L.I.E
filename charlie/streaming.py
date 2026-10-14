@@ -13,6 +13,17 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("charlie.streaming")
 
+_INTERNAL_BLOCK_TAGS = ("think", "thinking", "thought", "longcat_tool_call")
+_INTERNAL_OPEN_TAG_RE = re.compile(r"<(" + "|".join(_INTERNAL_BLOCK_TAGS) + r")>", re.IGNORECASE)
+
+
+def strip_internal_reasoning(text: str) -> str:
+    """Remove hidden reasoning blocks from a completed response."""
+    for tag in _INTERNAL_BLOCK_TAGS:
+        text = re.sub(rf"<{tag}>.*?(?:</{tag}>|$)", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(rf"</?{tag}>", "", text, flags=re.IGNORECASE)
+    return text.strip()
+
 
 def _merge_tool_call_delta(tc: Dict[str, Any], tc_by_index: Dict[int, Dict[str, str]]) -> None:
     """Merge one streamed tool_call delta into the accumulator dict.
@@ -168,11 +179,14 @@ async def stream_followup_content(
 
 
 class TextStreamFilter:
-    """Filter stream to block <think>...</think> blocks and lines starting with TOOL:."""
+    """Filter reasoning and structured tool-call syntax from user-facing text."""
     def __init__(self):
         self.buffer = ""
-        self.in_thinking = False
+        self.in_internal_block: Optional[str] = None
         self.in_tool_line = False
+        self.in_tool_call = False
+        self.tool_call_xml = False
+        self.await_tool_close = False
 
     def push(self, chunk: str) -> str:
         self.buffer += chunk
@@ -186,14 +200,23 @@ class TextStreamFilter:
         output = ""
 
         while True:
-            if self.in_thinking:
-                end_idx = self.buffer.find("</think>")
-                if end_idx != -1:
-                    self.buffer = self.buffer[end_idx + 8:]
-                    self.in_thinking = False
+            if self.await_tool_close:
+                closing = re.search(r"</tool_call\s*>", self.buffer, re.IGNORECASE)
+                if closing:
+                    self.buffer = self.buffer[closing.end():]
+                    self.await_tool_close = False
+                    continue
+                self.buffer = self.buffer[-64:]
+                break
+            if self.in_internal_block:
+                closing_tag = f"</{self.in_internal_block}>"
+                end_match = re.search(re.escape(closing_tag), self.buffer, re.IGNORECASE)
+                if end_match:
+                    self.buffer = self.buffer[end_match.end():]
+                    self.in_internal_block = None
                     continue
                 else:
-                    keep_len = len("</think>") - 1
+                    keep_len = len(closing_tag) - 1
                     if len(self.buffer) > keep_len:
                         self.buffer = self.buffer[-keep_len:]
                     break
@@ -208,23 +231,53 @@ class TextStreamFilter:
                     self.buffer = ""
                     break
 
+            if self.in_tool_call:
+                json_start = self.buffer.find("{")
+                if json_start == -1:
+                    self.buffer = ""
+                    break
+                try:
+                    _payload, json_length = json.JSONDecoder().raw_decode(self.buffer[json_start:])
+                except json.JSONDecodeError:
+                    break
+                self.buffer = self.buffer[json_start + json_length:]
+                closing_tag = re.match(r"\s*</tool_call\s*>", self.buffer, re.IGNORECASE)
+                if closing_tag:
+                    self.buffer = self.buffer[closing_tag.end():]
+                self.in_tool_call = False
+                self.await_tool_close = self.tool_call_xml and closing_tag is None
+                continue
+
             # Find tags in buffer
-            think_idx = self.buffer.find("<think>")
+            internal_match = _INTERNAL_OPEN_TAG_RE.search(self.buffer)
+            tool_close_match = re.search(r"</tool_call\s*>", self.buffer, re.IGNORECASE)
             tool_idx = self.buffer.find("TOOL:")
+            tool_call_matches = [
+                (index, marker)
+                for marker in ("_tool_call", "<tool_call>")
+                if (index := self.buffer.casefold().find(marker.casefold())) != -1
+            ]
 
             indices = []
-            if think_idx != -1:
-                indices.append((think_idx, "think"))
+            if internal_match:
+                indices.append((internal_match.start(), "internal"))
+            if tool_close_match:
+                indices.append((tool_close_match.start(), "tool_close"))
             if tool_idx != -1:
                 indices.append((tool_idx, "tool"))
+            if tool_call_matches:
+                indices.append((min(tool_call_matches)[0], "tool_call"))
 
             if not indices:
                 # No tags, check for partial match prefixes at end
                 max_partial = 0
-                for pattern in ("<think>", "TOOL:"):
+                patterns = tuple(f"<{tag}>" for tag in _INTERNAL_BLOCK_TAGS) + (
+                    "TOOL:", "_tool_call", "<tool_call>", "</tool_call>"
+                )
+                for pattern in patterns:
                     for i in range(1, len(pattern)):
                         prefix = pattern[:i]
-                        if self.buffer.endswith(prefix):
+                        if self.buffer.casefold().endswith(prefix.casefold()):
                             max_partial = max(max_partial, len(prefix))
 
                 if max_partial > 0:
@@ -243,19 +296,40 @@ class TextStreamFilter:
                     output += self.buffer[:first_idx]
                     self.buffer = self.buffer[first_idx:]
 
-                if tag_type == "think":
-                    self.in_thinking = True
-                    self.buffer = self.buffer[7:]
+                if tag_type == "internal":
+                    assert internal_match is not None
+                    self.in_internal_block = internal_match.group(1).casefold()
+                    self.buffer = self.buffer[internal_match.end() - first_idx:]
                 elif tag_type == "tool":
                     self.in_tool_line = True
                     self.buffer = self.buffer[5:]
+                elif tag_type == "tool_close":
+                    assert tool_close_match is not None
+                    self.buffer = self.buffer[tool_close_match.end() - first_idx:]
+                elif tag_type == "tool_call":
+                    marker_length = next(
+                        len(marker)
+                        for index, marker in tool_call_matches
+                        if index == first_idx
+                    )
+                    self.in_tool_call = True
+                    self.tool_call_xml = self.buffer.casefold().startswith("<tool_call>")
+                    self.buffer = self.buffer[marker_length:]
                 continue
 
         return output
 
     def flush(self) -> str:
-        if not self.in_thinking and not self.in_tool_line:
+        if not self.in_internal_block and not self.in_tool_line and not self.in_tool_call and not self.await_tool_close:
             ret = self.buffer
             self.buffer = ""
+            patterns = tuple(f"<{tag}>" for tag in _INTERNAL_BLOCK_TAGS) + (
+                "TOOL:", "_tool_call", "<tool_call>", "</tool_call>"
+            )
+            for pattern in patterns:
+                for length in range(1, len(pattern)):
+                    if ret.casefold().endswith(pattern[:length].casefold()):
+                        ret = ret[:-length]
+                        break
             return ret
         return ""

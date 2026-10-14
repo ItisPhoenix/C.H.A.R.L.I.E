@@ -2,13 +2,15 @@
 Pure-function code worker for CODE_SMALL extensions.
 
 Security model:
-  - Primary enforcement is at the AST level: only imports from _ALLOWED_IMPORTS
+  - Static enforcement is at the AST level: only imports from _ALLOWED_IMPORTS
     pass static analysis.  Any other import, or any disallowed call pattern,
     is rejected before a byte is written to disk.
-  - Execution happens in an isolated subprocess with a minimal environment.
-  - The worker does NOT monkeypatch builtins or use RestrictedPython.
-    AST analysis is the authoritative boundary; the subprocess merely confirms
-    runtime behaviour under test inputs.
+  - Execution happens in a subprocess the OS contains: a Windows job object
+    (kill-on-close, one active process, no breakaway, job memory and CPU
+    ceilings), a minimal environment, a private temporary working directory,
+    and bytecode writing disabled.
+  - The job object is the OS boundary; it does not deny filesystem writes or
+    network access, so the AST allow-list stays load-bearing.
 
 Allowed stdlib scope (pure-computation only — no filesystem mutation, no
 network, no OS mutation, no process spawning):
@@ -32,12 +34,16 @@ allow-list and are rejected at the AST level.
 from __future__ import annotations
 
 import ast
+import ctypes
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
+from ctypes import wintypes
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -135,6 +141,130 @@ _DISALLOWED_NAMES: frozenset[str] = _DISALLOWED_CALLS | {
 # ── Execution timeout ──────────────────────────────────────────────────────
 
 _EXEC_TIMEOUT_SECONDS: int = 10
+
+# ── Windows job object containment ─────────────────────────────────────────
+# Flag values are from winnt.h / MS Learn "JOBOBJECT_BASIC_LIMIT_INFORMATION".
+
+_JOB_OBJECT_LIMIT_JOB_TIME = 0x00000004
+_JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008
+_JOB_OBJECT_LIMIT_JOB_MEMORY = 0x00000200
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+# JOB_OBJECT_LIMIT_BREAKAWAY_OK (0x800) / SILENT_BREAKAWAY_OK (0x1000) are
+# deliberately NOT set: CREATE_BREAKAWAY_FROM_JOB only succeeds when the job
+# carries BREAKAWAY_OK, so children cannot break away.  There is no
+# JOB_OBJECT_LIMIT_NO_BREAKAWAY constant — omitting both flags *is* the
+# secure state.
+_JOB_LIMIT_FLAGS = (
+    _JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+    | _JOB_OBJECT_LIMIT_JOB_TIME
+    | _JOB_OBJECT_LIMIT_JOB_MEMORY
+    | _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+)
+_INFOCLASS_BASIC_LIMIT = 2
+_INFOCLASS_EXTENDED_LIMIT = 9
+_JOB_MEMORY_LIMIT_BYTES = 1024 * 1024 * 1024  # committed memory for the whole job
+
+
+class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_longlong),
+        ("PerJobUserTimeLimit", ctypes.c_longlong),
+        ("LimitFlags", wintypes.DWORD),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", wintypes.DWORD),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", wintypes.DWORD),
+        ("SchedulingClass", wintypes.DWORD),
+    ]
+
+
+class _IO_COUNTERS(ctypes.Structure):
+    _fields_ = [
+        (name, ctypes.c_ulonglong)
+        for name in (
+            "ReadOperationCount",
+            "WriteOperationCount",
+            "OtherOperationCount",
+            "ReadTransferCount",
+            "WriteTransferCount",
+            "OtherTransferCount",
+        )
+    ]
+
+
+class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
+        ("IoInfo", _IO_COUNTERS),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+def _kernel32() -> Any:
+    """kernel32 with 64-bit-safe handle restypes."""
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateJobObjectW.restype = wintypes.HANDLE
+    k32.SetInformationJobObject.restype = wintypes.BOOL
+    k32.AssignProcessToJobObject.restype = wintypes.BOOL
+    k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    k32.QueryInformationJobObject.restype = wintypes.BOOL
+    k32.TerminateJobObject.restype = wintypes.BOOL
+    k32.CloseHandle.restype = wintypes.BOOL
+    return k32
+
+
+def _open_contained_job(k32: Any, timeout: int) -> int:
+    """
+    Create the containing job and verify every limit actually took effect.
+
+    JOB_TIME is a user-mode CPU ceiling in 100ns ticks; the default
+    end-of-job-time action terminates the job.
+    """
+    job = k32.CreateJobObjectW(None, None)
+    if not job:
+        raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
+    info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+    info.BasicLimitInformation.LimitFlags = _JOB_LIMIT_FLAGS
+    info.BasicLimitInformation.ActiveProcessLimit = 1
+    info.BasicLimitInformation.PerJobUserTimeLimit = int(timeout) * 10_000_000
+    info.JobMemoryLimit = _JOB_MEMORY_LIMIT_BYTES
+    if not k32.SetInformationJobObject(
+        job,
+        _INFOCLASS_EXTENDED_LIMIT,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+    ):
+        err = ctypes.get_last_error()
+        k32.CloseHandle(job)
+        raise OSError(err, "SetInformationJobObject failed")
+
+    # Read the limits back so a struct layout mistake fails closed instead of
+    # silently leaving the child uncontained.
+    readback = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+    returned = wintypes.DWORD()
+    ok = k32.QueryInformationJobObject(
+        job,
+        _INFOCLASS_EXTENDED_LIMIT,
+        ctypes.byref(readback),
+        ctypes.sizeof(readback),
+        ctypes.byref(returned),
+    )
+    if not ok or (
+        readback.BasicLimitInformation.LimitFlags & _JOB_LIMIT_FLAGS
+        != _JOB_LIMIT_FLAGS
+        or readback.BasicLimitInformation.ActiveProcessLimit != 1
+        or readback.BasicLimitInformation.PerJobUserTimeLimit
+        != info.BasicLimitInformation.PerJobUserTimeLimit
+        or readback.JobMemoryLimit != _JOB_MEMORY_LIMIT_BYTES
+    ):
+        err = ctypes.get_last_error()
+        k32.CloseHandle(job)
+        raise OSError(err, "job object limits did not take effect")
+    return int(job)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -260,9 +390,11 @@ def run_worker(
     # The child re-reads and validates the file immediately before execution.
     # It then executes that exact validated source string, eliminating the
     # parent-validation/write/execution TOCTOU gap.
+    repo_root = str(Path(__file__).resolve().parents[2])
     runner = textwrap.dedent(
         f"""\
 import sys, json, traceback, types
+sys.path.insert(0, {repo_root!r})
 from charlie.self_extension.code_worker import validate_ast_allow_list
 
 module_path = {str(module_path)!r}
@@ -306,21 +438,67 @@ except Exception as exc:
         "PYTHONPATH": "",
     }
 
+    k32 = _kernel32()
     try:
-        proc = subprocess.run(
-            [sys.executable, "-c", runner],
-            capture_output=True,
+        job = _open_contained_job(k32, timeout)
+    except (AttributeError, OSError) as exc:
+        return False, None, f"OS containment unavailable, refusing to execute: {exc}"
+
+    workdir = tempfile.mkdtemp(prefix="charlie-code-worker-")
+    proc: Optional[subprocess.Popen] = None
+    try:
+        proc = subprocess.Popen(
+            # -B: the contained child never writes .pyc files anywhere.
+            [sys.executable, "-B", "-c", runner],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
             env=minimal_env,
+            cwd=workdir,
         )
-    except subprocess.TimeoutExpired:
-        return False, None, f"Worker timed out after {timeout}s."
+        # Pre-assignment window: stdlib Popen closes the primary thread handle,
+        # so CREATE_SUSPENDED + ResumeThread needs a hand-rolled CreateProcessW
+        # and is not reachable here.  Until the assignment below succeeds the
+        # child is uncontained; in that window it runs only interpreter startup
+        # plus the charlie / charlie.self_extension import, and reaches the
+        # extension source only afterwards.
+        handle = int(getattr(proc, "_handle", 0) or 0)
+        if not handle or not k32.AssignProcessToJobObject(job, handle):
+            err = ctypes.get_last_error()
+            proc.kill()
+            proc.wait()
+            logger.warning(
+                "Job assignment failed (%s): killed the direct child only. Any "
+                "grandchild it spawned during the pre-assignment window is "
+                "orphaned with no job containment.",
+                err,
+            )
+            return (
+                False,
+                None,
+                f"Containment unavailable (job assignment failed: {err}), "
+                f"refusing to execute.",
+            )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            k32.TerminateJobObject(job, 1)
+            try:
+                proc.communicate()
+            except Exception:
+                proc.wait()
+            return False, None, f"Worker timed out after {timeout}s."
     except Exception as exc:
         return False, None, f"Worker launch failed: {exc}"
+    finally:
+        if proc is not None and proc.poll() is None:
+            k32.TerminateJobObject(job, 1)
+            proc.wait()
+        k32.CloseHandle(job)
+        shutil.rmtree(workdir, ignore_errors=True)
 
-    stdout = (proc.stdout or "").strip()[:65536]   # cap at 64 KB
-    stderr = (proc.stderr or "").strip()[:4096]
+    stdout = (stdout or "").strip()[:65536]   # cap at 64 KB
+    stderr = (stderr or "").strip()[:4096]
 
     if proc.returncode != 0 or not stdout:
         detail = stderr or stdout or "(no output)"

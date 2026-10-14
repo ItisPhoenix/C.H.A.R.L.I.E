@@ -3,29 +3,10 @@
 from __future__ import annotations
 
 import logging
-import re
 
 from charlie.self_extension.models import ExtensionKind, ExtensionRequest, GuardDecision, RiskClass
 
 logger = logging.getLogger("charlie.self_extension.guard")
-
-# The decision reason is interpolated straight into the owner's prompt by
-# charlie.core (``f"Need your OK: {reason}. Yes or no?"``) and handed to
-# ``on_tool_approval_request``.  For ``self_extension_proposal`` the hardened
-# preview channel (``charlie.core._approval_operation_preview``) returns None, so
-# nothing escapes or redacts it.  The argv is LLM-planned from natural language,
-# so a prompt-injected plan could otherwise plant control characters or its own
-# "Yes." inside the owner's own question.  Only the executable name survives, and
-# only after being reduced to a character class that cannot carry structure.
-_UNSAFE_COMMAND_CHARS = re.compile(r"[^A-Za-z0-9._+-]")
-_MAX_COMMAND_TOKEN = 48
-
-
-def _safe_command_token(token: str) -> str:
-    """Reduce an argv element to a printable, structure-free token."""
-    cleaned = _UNSAFE_COMMAND_CHARS.sub("", str(token or ""))[:_MAX_COMMAND_TOKEN]
-    return cleaned or "unresolved"
-
 
 class AuthorizationGuard:
     """Evaluates whether an extension request is authorized or requires explicit user approval."""
@@ -73,11 +54,7 @@ class AuthorizationGuard:
             )
 
         # Rule 3: External dependency additions or system-level mutations require approval.
-        # MCP_TOOL deliberately falls through to Rule 6 instead. Rule 6 requires
-        # approval too, but it also binds the decision to the exact argv, and an
-        # owner cannot grant an approval that carries no digest. Pre-empting it
-        # here would leave every MCP request permanently unapprovable.
-        if request.required_dependencies and kind != ExtensionKind.MCP_TOOL:
+        if request.required_dependencies:
             return self._bound(
                 GuardDecision(
                     is_authorized=False,
@@ -110,39 +87,7 @@ class AuthorizationGuard:
                 risk_class=RiskClass.REVERSIBLE,
             )
 
-        # Rule 6: MCP tools launch an external server process on this host, so they
-        # are never auto-authorized. The decision carries the exact argv so the
-        # owner's approval is bound to one executable and argument list.
-        if kind == ExtensionKind.MCP_TOOL:
-            argv = request.plan.resolve_argv() if request.plan else []
-            if not argv:
-                return self._bound(
-                    GuardDecision(
-                        is_authorized=False,
-                        requires_approval=True,
-                        reason=(
-                            "APPROVAL_REQUIRED: MCP server integration cannot be authorized "
-                            "without an exact command and argument list to review."
-                        ),
-                        risk_class=RiskClass.DANGEROUS,
-                    ),
-                    request,
-                )
-            return self._bound(
-                GuardDecision(
-                    is_authorized=False,
-                    requires_approval=True,
-                    reason=(
-                        "MCP server integration launches a new external process; "
-                        f"review and approve the exact command '{_safe_command_token(argv[0])}' "
-                        "before it is started."
-                    ),
-                    risk_class=RiskClass.DANGEROUS,
-                ),
-                request,
-            )
-
-        # Rule 7: Bounded small code additions with explicit user command
+        # Rule 6: Bounded small code additions with explicit user command
         if kind == ExtensionKind.CODE_SMALL and request.explicit_user_request:
             return GuardDecision(
                 is_authorized=True,

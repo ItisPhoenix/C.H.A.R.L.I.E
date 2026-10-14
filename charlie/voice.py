@@ -8,6 +8,7 @@ import asyncio
 import atexit
 import inspect
 import logging
+import math
 import multiprocessing as mp
 import os
 import queue
@@ -26,6 +27,7 @@ from kokoro_onnx import Kokoro
 from charlie.asr_worker import asr_worker_process
 from charlie.core import strip_internal_reasoning
 from charlie.events import EventMeta, EventSource
+from charlie.text_utils import normalize_rupee_amounts
 from charlie.voice_diagnostics import VoiceDiagnostics, VoiceDiagnosticTrace
 from charlie.wake_word import WakeWordDetector
 
@@ -134,6 +136,34 @@ _VAD_NOISE_CALIBRATION_SECONDS = 1.5
 _VAD_NOISE_PERCENTILE = 20.0
 _VAD_NOISE_MULTIPLIER = 4.0
 _VAD_MIN_EFFECTIVE_THRESHOLD = 0.01
+
+
+class _TTSSpeechOwner:
+    """Per-turn cancellation token carried with speech through playback."""
+
+    def __init__(self, owner_id: str) -> None:
+        self.owner_id = owner_id
+        self._lock = threading.Lock()
+        self._cancelled = False
+
+    @property
+    def is_cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._cancelled = True
+
+    def start_if_active(self, start_playback: Callable[[], None]) -> bool:
+        # Linearize cancellation against the playback start. If start wins,
+        # cancel returns only after sd.play has begun; that chunk is already
+        # playing and cannot be preempted by a queue discard.
+        with self._lock:
+            if self._cancelled:
+                return False
+            start_playback()
+            return True
 
 
 @dataclass(frozen=True)
@@ -580,9 +610,9 @@ class VoiceEngine:
         phrase_min_duration: float,
         phrase_max_duration: float,
     ) -> bool:
-        return (
+        return speech_duration >= phrase_max_duration or (
             silence_duration >= silence_timeout and speech_duration >= phrase_min_duration
-        ) or speech_duration >= phrase_max_duration
+        )
 
     def _ensure_models(self):
         os.makedirs(self.config.kokoro_model_dir, exist_ok=True)
@@ -954,7 +984,7 @@ class VoiceEngine:
         text = re.sub(r"https?://\S+", "", text)
         text = re.sub(r"(?<!\w)[#$%^&*_=+<>\\|~`]{2,}(?!\w)", " ", text)
         text = re.sub(r"\bC#(?=\W|$)", "C sharp", text)
-        text = re.sub(r"₹\s*(\d+(?:,\d+)*)", lambda match: match.group(1).replace(",", "") + " rupees", text)
+        text = normalize_rupee_amounts(text)
         text = re.sub(r"[#^|~`]", " ", text)
 
         # 1. Ellipsis handling: "..." -> ".", "wait..." -> "wait."
@@ -990,7 +1020,12 @@ class VoiceEngine:
             text = m.group(1)
 
         # 6. Parenthetical aside handling
-        text = re.sub(r"\((?:sources?|citations?|see|ref|https?):?[^)]*\)", "", text, flags=re.I)
+        text = re.sub(
+            r"\((?:https?://|(?:sources?|citations?|see|ref)\s*:)[^)]*\)",
+            "",
+            text,
+            flags=re.I,
+        )
         text = re.sub(r"\([S\d]+(?:,\s*[S\d]+)*\)", "", text)
         text = _RE_PAREN_SHORT.sub(r", \1, ", text)
         text = _RE_PAREN_LONG.sub(r"\1", text)  # keep content of long asides
@@ -1064,8 +1099,25 @@ class VoiceEngine:
         old_words = getattr(self, "_recent_spoken_words", set())
         return bool(new_words and new_words.issubset(old_words))
 
-    def speak(self, text: str, emotional_state: str = "neutral"):
+    def create_speech_owner(self, owner_id: str) -> _TTSSpeechOwner:
+        """Create a per-turn token for queued speech that may be cancelled independently."""
+        return _TTSSpeechOwner(str(owner_id))
+
+    @staticmethod
+    def cancel_speech_owner(speech_owner: Optional[_TTSSpeechOwner]) -> None:
+        if isinstance(speech_owner, _TTSSpeechOwner):
+            speech_owner.cancel()
+
+    def speak(
+        self,
+        text: str,
+        emotional_state: str = "neutral",
+        *,
+        speech_owner: Optional[_TTSSpeechOwner] = None,
+    ):
         """Sanitize text for TTS and enqueue. Non-blocking."""
+        if speech_owner is not None and speech_owner.is_cancelled:
+            return ""
         # Strip reasoning tags using shared helper
         text = strip_internal_reasoning(text)
 
@@ -1102,7 +1154,10 @@ class VoiceEngine:
             return ""
 
         if len(text) > _LONG_SENTENCE_CHARS:
-            self.stop_tts_event.clear()
+            if speech_owner is None:
+                self.stop_tts_event.clear()
+            elif speech_owner.is_cancelled or self.stop_tts_event.is_set():
+                return ""
             chunks = _SENTENCE_SPLIT_RE.split(text)
             trace = self._current_diagnostic_context()
             if trace is not None:
@@ -1113,18 +1168,25 @@ class VoiceEngine:
             for chunk in chunks:
                 chunk = chunk.strip()
                 if chunk and len(chunk) >= _MIN_TEXT_LEN:
-                    item = (chunk, emotional_state, trace) if trace is not None else (chunk, emotional_state)
+                    if speech_owner is not None and (
+                        speech_owner.is_cancelled or self.stop_tts_event.is_set()
+                    ):
+                        break
+                    item = (chunk, emotional_state, trace, speech_owner)
                     self.tts_queue.put(item)
             return
 
-        self.stop_tts_event.clear()
+        if speech_owner is None:
+            self.stop_tts_event.clear()
+        elif speech_owner.is_cancelled or self.stop_tts_event.is_set():
+            return ""
         trace = self._current_diagnostic_context()
         if trace is not None:
             trace.mark_once(
                 "tts_enqueue",
                 fields={"text_length": len(text), "emotional_state": emotional_state},
             )
-        item = (text, emotional_state, trace) if trace is not None else (text, emotional_state)
+        item = (text, emotional_state, trace, speech_owner)
         self.tts_queue.put(item)
 
     # -----------------------------------------------------------------------
@@ -1197,7 +1259,10 @@ class VoiceEngine:
 
                 item = self.tts_queue.get(timeout=0.01)
                 trace = item[2] if isinstance(item, tuple) and len(item) >= 3 else None
+                speech_owner = item[3] if isinstance(item, tuple) and len(item) >= 4 else None
                 text, emotional_state = item[:2]
+                if isinstance(speech_owner, _TTSSpeechOwner) and speech_owner.is_cancelled:
+                    continue
 
                 speed = 1.0
                 if emotional_state == "energetic":
@@ -1205,7 +1270,14 @@ class VoiceEngine:
                 elif emotional_state in ("sad", "calm"):
                     speed = 0.95
 
-                asyncio.run(self._run_tts_item(text, speed, trace=trace))
+                asyncio.run(
+                    self._run_tts_item(
+                        text,
+                        speed,
+                        trace=trace,
+                        speech_owner=speech_owner,
+                    )
+                )
             except queue.Empty:
                 continue
             except asyncio.CancelledError:
@@ -1220,16 +1292,26 @@ class VoiceEngine:
         speed: float,
         *,
         trace: Optional[VoiceDiagnosticTrace] = None,
+        speech_owner: Optional[_TTSSpeechOwner] = None,
     ) -> None:
         loop = asyncio.get_running_loop()
         task = asyncio.current_task()
         with self._tts_cancel_lock:
-            if self.stop_tts_event.is_set() or self.stop_event.is_set():
+            if (
+                self.stop_tts_event.is_set()
+                or self.stop_event.is_set()
+                or (speech_owner is not None and speech_owner.is_cancelled)
+            ):
                 return
             self._tts_loop = loop
             self._tts_task = task
         try:
-            await self._tts_stream_and_queue(text, speed, trace=trace)
+            await self._tts_stream_and_queue(
+                text,
+                speed,
+                trace=trace,
+                speech_owner=speech_owner,
+            )
         finally:
             with self._tts_cancel_lock:
                 if self._tts_task is task:
@@ -1242,6 +1324,7 @@ class VoiceEngine:
         speed: float,
         *,
         trace: Optional[VoiceDiagnosticTrace] = None,
+        speech_owner: Optional[_TTSSpeechOwner] = None,
     ):
         """Consume _synth_stream and push each chunk to playback_queue.
 
@@ -1258,13 +1341,19 @@ class VoiceEngine:
         synthesis_completed = False
         try:
             async for samples, sr in self._synth_stream(text, speed):
-                if self.stop_tts_event.is_set():
+                if self.stop_tts_event.is_set() or (
+                    speech_owner is not None and speech_owner.is_cancelled
+                ):
                     break
-                item = (samples, sr, [], trace, text)
+                item = (samples, sr, [], trace, text, speech_owner)
                 self.playback_queue.put(item)
-            synthesis_completed = not self.stop_tts_event.is_set()
-            if synthesis_completed:
-                self.playback_queue.put(_TTS_RUN_END)
+            synthesis_completed = not self.stop_tts_event.is_set() and not (
+                speech_owner is not None and speech_owner.is_cancelled
+            )
+            if not self.stop_tts_event.is_set():
+                # The owner-specific sentinel closes a partially played run
+                # after cancellation without affecting another TTS run.
+                self.playback_queue.put((_TTS_RUN_END, speech_owner))
         finally:
             if trace is not None and synthesis_completed:
                 trace.mark_once(
@@ -1276,6 +1365,7 @@ class VoiceEngine:
         """Dedicated playback thread."""
         tts_started_fired = False
         active_trace: Optional[VoiceDiagnosticTrace] = None
+        active_speech_owner: Optional[_TTSSpeechOwner] = None
         while not self.stop_event.is_set():
             try:
                 if self.stop_tts_event.is_set():
@@ -1301,6 +1391,7 @@ class VoiceEngine:
                     self.tts_active.clear()
                     tts_started_fired = False
                     active_trace = None
+                    active_speech_owner = None
                     continue
 
                 try:
@@ -1308,9 +1399,17 @@ class VoiceEngine:
                 except queue.Empty:
                     continue
 
-                # Sentinel marking the true end of a TTS run.
-                if item is _TTS_RUN_END:
-                    if tts_started_fired and self.stop_tts_event.is_set() is False:
+                # Sentinel marking the true end of a TTS run. Owned sentinels
+                # cannot close an unrelated answer or another turn's speech.
+                if item is _TTS_RUN_END or (
+                    isinstance(item, tuple) and item and item[0] is _TTS_RUN_END
+                ):
+                    run_owner = item[1] if isinstance(item, tuple) and len(item) > 1 else None
+                    if (
+                        tts_started_fired
+                        and active_speech_owner is run_owner
+                        and self.stop_tts_event.is_set() is False
+                    ):
                         if active_trace is not None:
                             active_trace.mark_once(
                                 "playback_complete",
@@ -1325,10 +1424,20 @@ class VoiceEngine:
                         self.tts_active.clear()
                         tts_started_fired = False
                         active_trace = None
+                        active_speech_owner = None
                     continue
 
                 trace = item[3] if isinstance(item, tuple) and len(item) >= 4 else None
                 speech_text = item[4] if isinstance(item, tuple) and len(item) >= 5 else ""
+                speech_owner = (
+                    item[5]
+                    if isinstance(item, tuple)
+                    and len(item) >= 6
+                    and isinstance(item[5], _TTSSpeechOwner)
+                    else None
+                )
+                if speech_owner is not None and speech_owner.is_cancelled:
+                    continue
                 samples, sample_rate, mouth_values = item[:3]
 
                 # Chime: gain already applied by caller, skip TTS state.
@@ -1346,20 +1455,27 @@ class VoiceEngine:
                 # Publish real TTS amplitude (drops to ~0.0 when muted).
                 self._emit_audio_level(self._rms(samples))
 
-                # First chunk of a new TTS run
-                if not tts_started_fired:
-                    self.current_speech_text = speech_text
-                    tts_started_fired = True
-                    active_trace = trace
-                    self.is_speaking.set()
-                    self.tts_active.set()
-                    if self._on_tts_start:
-                        try:
-                            self._on_tts_start()
-                        except Exception:
-                            pass
+                def start_playback() -> None:
+                    nonlocal tts_started_fired, active_trace, active_speech_owner
+                    if not tts_started_fired:
+                        self.current_speech_text = speech_text
+                        tts_started_fired = True
+                        active_trace = trace
+                        active_speech_owner = speech_owner
+                        self.is_speaking.set()
+                        self.tts_active.set()
+                        if self._on_tts_start:
+                            try:
+                                self._on_tts_start()
+                            except Exception:
+                                pass
+                    sd.play(samples, samplerate=sample_rate)
 
-                sd.play(samples, samplerate=sample_rate)
+                if speech_owner is not None:
+                    if not speech_owner.start_if_active(start_playback):
+                        continue
+                else:
+                    start_playback()
                 if trace is not None:
                     trace.mark_once(
                         "playback_first_sample",
@@ -1368,8 +1484,18 @@ class VoiceEngine:
                             "sample_count": len(samples),
                         },
                     )
-                while sd.get_stream() and sd.get_stream().active:
-                    if self.stop_tts_event.is_set():
+                # get_stream() raises RuntimeError when no play() is active;
+                # treat that as "nothing to poll" instead of a playback error.
+                try:
+                    stream = sd.get_stream()
+                except RuntimeError:
+                    stream = None
+                while stream is not None and stream.active:
+                    if self.stop_tts_event.is_set() or (
+                        speech_owner is not None and speech_owner.is_cancelled
+                    ):
+                        # sd.stop() is global: it stops every sounddevice stream,
+                        # not just this owner's.
                         sd.stop()
                         break
                     time.sleep(0.01)
@@ -2197,6 +2323,16 @@ class VoiceEngine:
         _silence_timeout = self.config.vad_silence_timeout
         _phrase_min_duration = self.config.phrase_min_duration
         _phrase_max_duration = self.config.phrase_max_duration
+        if not math.isfinite(_phrase_max_duration) or _phrase_max_duration <= 0:
+            _phrase_max_duration = block_size / samplerate
+            _phrase_max_samples = block_size
+            logger.warning("Invalid phrase_max_duration; limiting voice capture to one audio block")
+        else:
+            _phrase_max_samples = int(_phrase_max_duration * samplerate)
+            if _phrase_max_samples <= 0:
+                logger.warning(
+                    "phrase_max_duration is shorter than one sample; disabling VAD capture"
+                )
         _pre_roll_samples = int(samplerate * 0.8)  # 800ms pre-roll buffer
         _pre_roll_buffer: deque = deque(maxlen=_pre_roll_samples // block_size)
 
@@ -2204,6 +2340,7 @@ class VoiceEngine:
         speech_start_time = 0.0
         last_speech_time = 0.0
         speech_buffer = []
+        speech_buffer_sample_count = 0
         _frame_count = 0
         _rms_log_interval = int(3.0 * samplerate / block_size)  # log every ~3s
         # Require 2 consecutive loud frames (~128ms) before confirming onset, so a single
@@ -2375,8 +2512,9 @@ class VoiceEngine:
                     f"vad_rms | rms={rms:.4f} threshold={_vad_threshold} speech={is_speech}"
                 )
 
-            # Pre-roll: always keep a sliding window of recent audio
-            _pre_roll_buffer.append(data.copy())
+            # Retain pre-roll only when the configured sample budget permits capture.
+            if _phrase_max_samples > 0:
+                _pre_roll_buffer.append(data.copy())
 
             # Do not let startup noise become an utterance while the endpoint
             # baseline is still being measured.
@@ -2384,6 +2522,9 @@ class VoiceEngine:
                 continue
 
             if not is_speech:
+                if _phrase_max_samples <= 0:
+                    _consecutive_loud_frames = 0
+                    continue
                 if rms > _vad_threshold:
                     _consecutive_loud_frames += 1
                 else:
@@ -2422,25 +2563,48 @@ class VoiceEngine:
                         include_resource=self.voice_diagnostics.enabled,
                         asr_worker_pid=self.asr_process.pid if self.asr_process is not None else None,
                     )
-                    speech_pre_roll_samples = len(_pre_roll_buffer) * block_size
                     self._notify_speech_onset(speech_trace, rms, samplerate)
                     self._emit_vad_start()
                     # Prepend pre-roll buffer to prevent clipping first words
-                    speech_buffer = self._speech_buffer_from_pre_roll(_pre_roll_buffer)
+                    pre_roll_frames = self._speech_buffer_from_pre_roll(_pre_roll_buffer)
+                    pre_roll_audio = (
+                        np.concatenate(pre_roll_frames)[-_phrase_max_samples:]
+                        if pre_roll_frames
+                        else np.empty(0, dtype=np.float32)
+                    )
+                    speech_buffer = [pre_roll_audio] if pre_roll_audio.size else []
+                    speech_buffer_sample_count = len(pre_roll_audio)
+                    speech_pre_roll_samples = speech_buffer_sample_count
                 continue
 
             # During speech
-            speech_buffer.append(data.copy())
             now = time.time()
+            duration = now - speech_start_time
+            capture_limit_reached = (
+                speech_buffer_sample_count >= _phrase_max_samples
+                or duration >= _phrase_max_duration
+            )
+            remaining_samples = _phrase_max_samples - speech_buffer_sample_count
+            if not capture_limit_reached and remaining_samples > 0:
+                captured_frame = data[:remaining_samples].copy()
+                speech_buffer.append(captured_frame)
+                speech_buffer_sample_count += len(captured_frame)
+            buffer_limit_reached = (
+                capture_limit_reached
+                or speech_buffer_sample_count >= _phrase_max_samples
+                or duration >= _phrase_max_duration
+            )
 
-            if self._speech_continues(rms, _vad_threshold, _vad_noise_floor_rms):
+            if (
+                not capture_limit_reached
+                and self._speech_continues(rms, _vad_threshold, _vad_noise_floor_rms)
+            ):
                 last_speech_time = now
                 last_speech_monotonic = time.monotonic()
 
-            duration = now - speech_start_time
             silence_duration = now - last_speech_time
 
-            should_end = self._should_end_speech(
+            should_end = buffer_limit_reached or self._should_end_speech(
                 silence_duration,
                 duration,
                 _silence_timeout,
@@ -2451,12 +2615,29 @@ class VoiceEngine:
             if should_end:
                 self._partial_utterance_id = None
                 is_speech = False
+                if speech_buffer_sample_count <= 0:
+                    speech_buffer = []
+                    speech_buffer_sample_count = 0
+                    _consecutive_loud_frames = 0
+                    speech_trace = None
+                    speech_onset_rms = None
+                    speech_start_monotonic = None
+                    last_speech_monotonic = None
+                    speech_pre_roll_samples = 0
+                    _pre_roll_buffer.clear()
+                    continue
                 audio = np.concatenate(speech_buffer)
                 speech_buffer = []
+                speech_buffer_sample_count = 0
+                _consecutive_loud_frames = 0
                 duration_ms = duration * 1000
                 endpoint_monotonic = time.monotonic()
                 logger.info(
-                    f"vad_speech_offset | duration_ms={duration_ms:.0f} samples={len(audio)}"
+                    "vad_speech_offset | duration_ms=%.0f samples=%s endpoint_silence_ms=%.0f timeout_ms=%.0f",
+                    duration_ms,
+                    len(audio),
+                    silence_duration * 1000,
+                    _silence_timeout * 1000,
                 )
                 if speech_trace is not None:
                     capture_fields = {

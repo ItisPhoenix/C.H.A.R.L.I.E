@@ -82,7 +82,7 @@ def _extract(payload: dict) -> List[List[float]]:
 
 
 async def _embed(client: httpx.AsyncClient, url: str, model: str, texts: List[str]) -> List[List[float]]:
-    response = await client.post(url, json={"model": model, "input": texts}, timeout=15.0)
+    response = await client.post(url, json={"model": model, "input": texts})
     response.raise_for_status()
     return _extract(response.json())
 
@@ -159,7 +159,8 @@ async def gather_semantic_scores(
     """Single entry point so callers never block on a missing service."""
     try:
         return await asyncio.wait_for(
-            compute_semantic_relevance(query, documents, **kwargs), timeout=20.0
+            compute_semantic_relevance(query, documents, **kwargs),
+            timeout=float(kwargs.get("timeout_s", 15.0)),
         )
     except asyncio.TimeoutError:
         logger.warning("Semantic relevance timed out; falling back to token overlap.")

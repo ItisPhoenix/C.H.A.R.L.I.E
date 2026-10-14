@@ -378,3 +378,6 @@ class TestVolatileTierOperatorPersona:
         assert "[Helm MODE]" in tier
         assert "desktop_observe" in tier
         assert "desktop_observe" in tier
+        assert "Act immediately on short desktop requests" in tier
+        assert "verify the final requested postcondition once" in tier
+        assert "Narrate each step" not in tier

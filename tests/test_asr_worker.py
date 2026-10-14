@@ -82,6 +82,17 @@ def test_real_transcription_keeps_probability_threshold_separate_from_capture_rm
     assert kwargs["vad_parameters"]["threshold"] == 0.45
 
 
+def test_live_vad_capture_is_not_filtered_a_second_time():
+    kwargs = _build_transcribe_kwargs(
+        is_warmup=False,
+        flags={"capture": {"capture_mode": "vad"}},
+        default_language="en",
+        asr_config={"vad_threshold": 0.45},
+    )
+
+    assert kwargs["vad_filter"] is False
+
+
 def test_warmup_disables_vad_filter():
     kwargs = _build_transcribe_kwargs(
         is_warmup=True, flags={}, default_language="en", asr_config=None
@@ -760,7 +771,7 @@ def test_replay_current_resolves_effective_config_defaults(monkeypatch):
     assert resolved.beam_size == 1
     assert resolved.best_of == 1
     assert resolved.condition_on_previous_text is True
-    assert resolved.vad_filter is True
+    assert resolved.vad_filter is False
     assert resolved.vad_threshold == 0.05
     assert resolved.speech_pad_ms == 500
 

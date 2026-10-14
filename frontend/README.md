@@ -2,7 +2,7 @@
 
 React projection shell for Charlie's runtime. Python remains authoritative; this app renders `/api/scene`, lists received `/api/events` SSE envelopes, and posts text to `/api/commands`. It has no production fixtures.
 
-Run `npm install` and `npm run dev` from this directory. Vite proxies `/api` to `http://127.0.0.1:8001`. Production hosting must serve the UI and API on the same origin to retain the runtime session cookie.
+Run `npm install` and `npm run dev` from this directory. Vite proxies `/api` to `http://127.0.0.1:8000` by default; set `VITE_CHARLIE_GATEWAY_URL` when `CHARLIE_WEB_PORT` is changed. Production hosting must serve the UI and API on the same origin to retain the runtime session cookie.
 
 Expected payloads:
 

@@ -18,11 +18,17 @@ into Charlie's loop, which is what keeps a blocked loop from becoming a deadlock
 from __future__ import annotations
 
 import asyncio
+import inspect
 import threading
-from typing import Any, Callable, Coroutine, Optional, TypeVar
+import time
+from concurrent.futures import Future
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from typing import Any, Callable, Coroutine, Iterator, Optional, TypeVar
 
 __all__ = [
     "CuaBridgeError",
+    "CuaBridgeTakeover",
     "CuaBridgeTimeout",
     "CuaBridgeUnavailable",
     "CuaBridgeLoopThreadRefused",
@@ -31,6 +37,13 @@ __all__ = [
 
 T = TypeVar("T")
 
+
+@dataclass(eq=False)
+class _PendingCall:
+    exited: threading.Event = field(default_factory=threading.Event)
+    cancel_requested: bool = False
+    task: Optional[asyncio.Task[Any]] = None
+
 # Bounded by default: a UI action that has not answered within this many seconds is
 # treated as failed rather than allowed to block a Charlie tool indefinitely.
 DEFAULT_TIMEOUT_S = 15.0
@@ -38,6 +51,45 @@ DEFAULT_TIMEOUT_S = 15.0
 # Startup budget for the driver process itself. Kept separate from the per-call
 # timeout because this one is a cold-start cost, not an action latency.
 DEFAULT_STARTUP_TIMEOUT_S = 30.0
+
+# Takeover is sampled while an action is in flight. The bounded wait is sliced rather
+# than blocked, so detection cancels the action instead of being noticed only when the
+# call times out. One GetLastInputInfo per slice is cheap; a slice never elapses
+# without the wait itself blocking, so this is not a spin.
+TAKEOVER_POLL_INTERVAL_S = 0.05
+
+# Cua tool names that dispatch physical input or mutate the target window. Only these
+# arm takeover watching and are refused outright once takeover is latched.
+_NATIVE_MUTATION_TOOLS = frozenset(
+    {
+        "bring_to_front", "invoke_menu", "double_click", "move_cursor", "click",
+        "drag", "scroll", "set_window_frame", "set_value", "type_text",
+        "press_key", "hotkey",
+    }
+)
+
+
+@contextmanager
+def _charlie_input() -> Iterator[None]:
+    """Attribute every host input tick produced inside this block to Charlie.
+
+    Windows exposes one shared input tick for injected and physical input alike, so a
+    long type_text or drag would otherwise read back as the user seizing the mouse and
+    latch takeover for the life of the process.
+
+    This brackets the dispatch itself and must stay on the worker thread: the caller's
+    blocking wait is not dispatch, and closing the bracket only when the whole submit
+    returns would leave the post-dispatch takeover sample running while Charlie is
+    still marked as dispatching, which mutes the sample that exists to catch exactly
+    that.
+    """
+    from charlie.desktop.takeover import user_takeover_detector  # noqa: PLC0415
+
+    user_takeover_detector.begin_self_input()
+    try:
+        yield
+    finally:
+        user_takeover_detector.note_self_input()
 
 
 class CuaBridgeError(Exception):
@@ -50,6 +102,15 @@ class CuaBridgeUnavailable(CuaBridgeError):
 
 class CuaBridgeTimeout(CuaBridgeError):
     """A submitted action did not complete inside its bounded timeout."""
+
+
+class CuaBridgeTakeover(CuaBridgeTimeout):
+    """The user took physical input while the action was in flight.
+
+    A ``CuaBridgeTimeout`` because that is the truthful envelope for an action that
+    stopped without a confirmed end state: it may have partly applied, and callers
+    already report that as executed-but-not-verified rather than success.
+    """
 
 
 class CuaBridgeLoopThreadRefused(CuaBridgeError):
@@ -94,8 +155,13 @@ class CuaRuntimeBridge:
         self._thread: Optional[threading.Thread] = None
         self._driver: Any = None
         self._startup_error: Optional[BaseException] = None
+        self._shutdown_error: Optional[str] = None
         self._loop_ready = threading.Event()
         self._shutdown = False
+        self._last_activity_at: Optional[float] = None
+        self._pending_calls: set[_PendingCall] = set()
+        self._driver_close_future: Optional[Future[Any]] = None
+        self._driver_closed = False
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -104,6 +170,18 @@ class CuaRuntimeBridge:
         """True only when a live driver is reachable on the worker loop."""
         with self._lock:
             return bool(self._driver is not None and not self._shutdown)
+
+    @property
+    def is_idle_expired(self) -> bool:
+        from .manifest import IDLE_TIMEOUT_SECONDS
+
+        with self._lock:
+            return bool(
+                self._driver is not None
+                and not self._shutdown
+                and self._last_activity_at is not None
+                and time.monotonic() - self._last_activity_at >= IDLE_TIMEOUT_SECONDS
+            )
 
     @property
     def driver(self) -> Any:
@@ -120,25 +198,20 @@ class CuaRuntimeBridge:
         """
         with self._lock:
             if self._driver is not None:
-                return True
+                return not self._shutdown
             if self._shutdown:
                 raise CuaBridgeUnavailable("bridge has been shut down")
-            if self._thread is not None:
-                # A previous start attempt is still in flight.
-                started = self._loop_ready.wait(self._startup_timeout_s)
-                return bool(started and self._driver is not None)
-
-            self._loop = asyncio.new_event_loop()
-            self._thread = threading.Thread(
-                target=self._serve,
-                name="CuaRuntimeBridge",
-                daemon=True,
-            )
-            self._thread.start()
-
-        self._loop_ready.wait(self._startup_timeout_s)
+            if self._thread is None:
+                self._loop = asyncio.new_event_loop()
+                self._thread = threading.Thread(
+                    target=self._serve,
+                    name="CuaRuntimeBridge",
+                    daemon=True,
+                )
+                self._thread.start()
+        started = self._loop_ready.wait(self._startup_timeout_s)
         with self._lock:
-            return self._driver is not None
+            return bool(started and self._driver is not None and not self._shutdown)
 
     @property
     def startup_error(self) -> Optional[BaseException]:
@@ -155,24 +228,25 @@ class CuaRuntimeBridge:
         try:
             driver = loop.run_until_complete(self._create_driver())
             with self._lock:
-                if self._shutdown:
-                    # Shut down while we were starting: close it here and stop.
-                    self._startup_error = CuaBridgeUnavailable(
-                        "bridge was shut down during startup"
-                    )
-                else:
-                    self._driver = driver
+                self._driver = driver
+                self._last_activity_at = time.monotonic()
         except BaseException as exc:  # noqa: BLE001 - recorded, not raised
             with self._lock:
                 self._startup_error = exc
-        self._loop_ready.set()
+                if self._shutdown:
+                    self._shutdown_error = f"driver startup interrupted during shutdown: {type(exc).__name__}"
         if self._driver is None:
+            with self._lock:
+                if self._startup_error is not None and self._shutdown:
+                    self._shutdown_error = f"driver startup failed during shutdown: {type(self._startup_error).__name__}"
             try:
                 loop.run_until_complete(loop.shutdown_asyncgens())
             except Exception:
                 pass
             loop.close()
+            self._loop_ready.set()
             return
+        loop.call_soon(self._loop_ready.set)
         try:
             loop.run_forever()
         finally:
@@ -192,93 +266,285 @@ class CuaRuntimeBridge:
             except Exception:
                 pass
 
-    def shutdown(self, *, timeout_s: float = 10.0) -> None:
+    def shutdown(self, *, timeout_s: float = 10.0) -> bool:
         """Shut the driver down, stop the loop, and join the worker.
 
-        Safe to call more than once. Never raises: teardown must not mask the
-        shutdown reason.
+        Safe to call more than once. Returns false when driver close or worker join
+        cannot be confirmed within one shared deadline.
         """
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        current_thread = threading.current_thread()
         with self._lock:
-            if self._shutdown:
-                return
+            if self._thread is current_thread:
+                self._shutdown = True
+                self._shutdown_error = "shutdown requested from the Cua worker thread"
+                return False
+            if self._shutdown and self._thread is None and self._driver is None:
+                return self._shutdown_error is None
             self._shutdown = True
+            pending_calls = list(self._pending_calls)
             loop = self._loop
-            driver = self._driver
             thread = self._thread
-            self._driver = None
 
-        if loop is not None and driver is not None:
+        for pending in pending_calls:
+            self._cancel_pending(pending)
+        for pending in pending_calls:
+            if not pending.exited.wait(timeout=max(0.0, deadline - time.monotonic())):
+                with self._lock:
+                    self._shutdown_error = "admitted Cua calls did not exit before shutdown deadline"
+                return False
+
+        if thread is not None and not self._loop_ready.wait(timeout=max(0.0, deadline - time.monotonic())):
+            with self._lock:
+                self._shutdown_error = "driver startup did not finish before shutdown deadline"
+            return False
+
+        with self._lock:
+            loop = self._loop
+            thread = self._thread
+            driver = self._driver
+            if driver is None and self._startup_error is not None:
+                self._shutdown_error = f"driver startup failed without a close handle: {type(self._startup_error).__name__}"
+                return False
+            close_future = self._driver_close_future
+            if driver is not None and not self._driver_closed and (
+                close_future is None
+                or (close_future.done() and (close_future.cancelled() or close_future.exception() is not None))
+            ):
+                if loop is None or loop.is_closed():
+                    self._shutdown_error = "driver close loop is unavailable"
+                    return False
+                try:
+                    close_future = asyncio.run_coroutine_threadsafe(self._close_driver(driver), loop)
+                except RuntimeError as exc:
+                    self._shutdown_error = f"driver close scheduling failed: {type(exc).__name__}"
+                    return False
+                self._driver_close_future = close_future
+
+        if close_future is not None and not self._driver_closed:
             try:
-                asyncio.run_coroutine_threadsafe(
-                    self._close_driver(driver), loop
-                ).result(timeout=timeout_s)
-            except Exception:
-                pass
+                close_future.result(timeout=max(0.0, deadline - time.monotonic()))
+            except TimeoutError:
+                with self._lock:
+                    self._shutdown_error = "driver close did not finish before shutdown deadline"
+                return False
+            except Exception as exc:
+                with self._lock:
+                    self._shutdown_error = f"driver close failed: {type(exc).__name__}"
+                return False
+            with self._lock:
+                self._driver_closed = True
+                self._shutdown_error = None
 
+        with self._lock:
+            loop = self._loop
+            thread = self._thread
         if loop is not None:
             try:
                 loop.call_soon_threadsafe(loop.stop)
             except Exception:
                 pass
         if thread is not None:
-            thread.join(timeout=timeout_s)
-
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if thread is not None and thread.is_alive():
+            with self._lock:
+                self._shutdown_error = "Cua worker did not stop before shutdown deadline"
+            return False
         with self._lock:
+            if self._driver is not None and not self._driver_closed:
+                self._shutdown_error = "driver close was not confirmed"
+                return False
             self._loop = None
             self._thread = None
+            self._driver = None
+            self._driver_close_future = None
+            self._driver_closed = False
+            self._shutdown_error = None
+            return True
 
     @staticmethod
     async def _close_driver(driver: Any) -> None:
         closer = getattr(driver, "shutdown", None)
-        if closer is None:
-            return
+        if not callable(closer):
+            raise CuaBridgeUnavailable("Cua driver does not expose shutdown")
         result = closer()
-        if asyncio.iscoroutine(result):
+        if inspect.isawaitable(result):
             await result
 
     # --------------------------------------------------------------------- submit
+
+    def _schedule_locked(self, loop: asyncio.AbstractEventLoop, factory: Callable[[], Any]):
+        pending = _PendingCall()
+
+        async def execute() -> Any:
+            task = asyncio.current_task()
+            with self._lock:
+                pending.task = task
+                cancel_requested = pending.cancel_requested
+            try:
+                if cancel_requested:
+                    raise asyncio.CancelledError
+                with _charlie_input():
+                    result = factory()
+                    if inspect.isawaitable(result):
+                        result = await result
+                with self._lock:
+                    self._last_activity_at = time.monotonic()
+                return result
+            finally:
+                pending.exited.set()
+                with self._lock:
+                    self._pending_calls.discard(pending)
+
+        self._pending_calls.add(pending)
+        coroutine = execute()
+        try:
+            future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+        except Exception:
+            coroutine.close()
+            pending.exited.set()
+            self._pending_calls.discard(pending)
+            raise
+        return pending, future
+
+    def _cancel_pending(self, pending: _PendingCall) -> None:
+        with self._lock:
+            if pending.exited.is_set():
+                return
+            pending.cancel_requested = True
+            task = pending.task
+            loop = self._loop
+        if task is not None and loop is not None:
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                pass
 
     def submit(
         self,
         factory: Callable[[], Coroutine[Any, Any, T]],
         *,
         timeout_s: Optional[float] = None,
+        mutation: bool = False,
     ) -> T:
         """Run ``factory()``'s coroutine on the worker loop and await the result.
 
         ``factory`` rather than a coroutine object on purpose: the coroutine must be
-        created *inside* the worker loop, never on the caller's.
+        created *inside* the worker loop, never on the caller's. ``mutation`` asks for
+        physical-input takeover to be watched for the duration of the call.
         """
         if threading.current_thread() is self._thread:
             raise CuaBridgeLoopThreadRefused(
                 "a Cua call was submitted from the Cua worker thread; blocking it "
                 "would deadlock the loop that must run the call"
             )
-        with self._lock:
-            loop = self._loop
-            driver = self._driver
-            shutdown = self._shutdown
-        if shutdown:
-            raise CuaBridgeUnavailable("bridge has been shut down")
-        if driver is None:
-            raise CuaBridgeUnavailable(
-                "Cua runtime is not available; the deterministic adapter remains "
-                "authoritative for this action"
-            )
-        if loop is None or loop.is_closed() or not loop.is_running():
-            raise CuaBridgeUnavailable("Cua worker loop is not running")
-
         bound = self._timeout_s if timeout_s is None else float(timeout_s)
-        future = asyncio.run_coroutine_threadsafe(factory(), loop)
+        with self._lock:
+            if self._shutdown:
+                raise CuaBridgeUnavailable("bridge has been shut down")
+            loop = self._loop
+            if self._driver is None:
+                raise CuaBridgeUnavailable(
+                    "Cua runtime is not available; the deterministic adapter remains "
+                    "authoritative for this action"
+                )
+            if loop is None or loop.is_closed() or not loop.is_running():
+                raise CuaBridgeUnavailable("Cua worker loop is not running")
+            pending, future = self._schedule_locked(loop, factory)
+        return self._await_bounded(future, pending, bound, mutation=mutation)
+
+    def _await_bounded(
+        self, future: Future[Any], pending: _PendingCall, bound: float, *,
+        mutation: bool,
+    ) -> Any:
+        """Await ``future`` inside ``bound``, sampling takeover while it is in flight.
+
+        The wait is sliced so a takeover interrupts the action instead of surfacing
+        only at the bound. Detection cancels exactly like a timeout does, because an
+        abandoned coroutine can still be dispatching input after the caller gave up.
+        One more sample runs once dispatch has ended, while the session is still armed.
+        """
+        deadline = time.monotonic() + bound
+        detector = self._takeover_detector()
+        watching = self._arm_takeover_watch(detector, mutation)
         try:
-            return future.result(timeout=bound)
-        except asyncio.TimeoutError as exc:
-            # Abandon the coroutine rather than leave it running: an orphaned Cua
-            # action can still be dispatching input after the caller gave up.
-            future.cancel()
-            raise CuaBridgeTimeout(
-                f"Cua action did not complete within {bound:.1f}s"
-            ) from exc
+            while True:
+                slice_s = max(
+                    0.0, min(deadline - time.monotonic(), TAKEOVER_POLL_INTERVAL_S)
+                )
+                try:
+                    return future.result(timeout=slice_s)
+                except TimeoutError as exc:
+                    # A future that completed *with* a TimeoutError lands here too.
+                    if future.done():
+                        return future.result()
+                    # Takeover outranks expiry: sample before deciding it is a timeout.
+                    if self._takeover_observed(detector):
+                        self._cancel_pending(pending)
+                        raise CuaBridgeTakeover(
+                            "user took physical input while the Cua action was in "
+                            "flight; the action was cancelled and its effect is "
+                            "unconfirmed"
+                        ) from exc
+                    if time.monotonic() >= deadline:
+                        self._cancel_pending(pending)
+                        raise CuaBridgeTimeout(
+                            f"Cua action did not complete within {bound:.1f}s"
+                        ) from exc
+        finally:
+            if watching:
+                # Post-dispatch sample: the first moment Charlie is not dispatching, so
+                # the newest input tick is one a human cannot have overwritten. Recorded,
+                # never raised -- the action's own result is the truthful outcome here, and
+                # raising from a finally would replace a real timeout with a takeover.
+                self._takeover_observed(detector)
+                self._release_takeover_watch(detector)
+
+    @staticmethod
+    def _takeover_detector() -> Any:
+        """The shared detector, or None where this host has no takeover concept."""
+        try:
+            from charlie.desktop.takeover import user_takeover_detector  # noqa: PLC0415
+        except Exception:
+            return None
+        return user_takeover_detector
+
+    def _arm_takeover_watch(self, detector: Any, mutation: bool) -> bool:
+        """Arm the physical-input session when this call dispatches input.
+
+        core.py already brackets desktop tools, and an armed session there is left
+        untouched. Arming is skipped once takeover is latched so the pre-dispatch
+        refusal stays authoritative instead of being cleared by a new session.
+        """
+        if not mutation or self._scope != "native" or detector is None:
+            return False
+        try:
+            status = detector.status()
+            if status.active or status.takeover_detected:
+                return False
+            detector.start_session("cua_native_dispatch")
+        except Exception:
+            return False
+        return True
+
+    @staticmethod
+    def _release_takeover_watch(detector: Any) -> None:
+        if detector is None:
+            return
+        try:
+            detector.end_session()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _takeover_observed(detector: Any) -> bool:
+        """Sample the armed session. Real detection latches inside the detector."""
+        if detector is None:
+            return False
+        try:
+            return bool(detector.check_takeover())
+        except Exception:
+            return False
 
     async def call(self, name: str, arguments_json: str) -> Any:
         """Invoke a Cua tool by name on the warm driver.
@@ -298,42 +564,54 @@ class CuaRuntimeBridge:
         self, name: str, arguments_json: str, *, timeout_s: Optional[float] = None
     ) -> Any:
         """Synchronous entry point for :meth:`call`."""
+        mutation = name in _NATIVE_MUTATION_TOOLS
+        if mutation:
+            self._ensure_native_mutation_admitted()
         return self.submit(
-            lambda: self.call(name, arguments_json), timeout_s=timeout_s
+            lambda: self.call(name, arguments_json),
+            timeout_s=timeout_s,
+            mutation=mutation,
         )
 
+    def _ensure_native_mutation_admitted(self) -> None:
+        if self._scope != "native":
+            return
+        from charlie.desktop.takeover import user_takeover_detector
+
+        # Latched by _await_bounded when a takeover interrupts an in-flight action.
+        if user_takeover_detector.status().takeover_detected:
+            raise CuaBridgeUnavailable(
+                "native Cua dispatch refused after user takeover was detected"
+            )
+
     def call_typed(
-        self, factory: Callable[[Any], Coroutine[Any, Any, T]], *, timeout_s: float | None = None
+        self, factory: Callable[[Any], Coroutine[Any, Any, T]], *,
+        timeout_s: float | None = None, mutation: bool = False,
     ) -> T:
         """Run a *typed* Cua SDK method on the worker loop.
 
         ``factory`` receives the warm driver and must return the coroutine, so the
         typed ``Input`` object is constructed inside the loop.
         """
+        if mutation:
+            self._ensure_native_mutation_admitted()
         if threading.current_thread() is self._thread:
             raise CuaBridgeLoopThreadRefused(
                 "a Cua call was submitted from the Cua worker thread; blocking it "
                 "would deadlock the loop that must run the call"
             )
+        bound = self._timeout_s if timeout_s is None else float(timeout_s)
         with self._lock:
+            if self._shutdown:
+                raise CuaBridgeUnavailable("bridge has been shut down")
             driver = self._driver
             loop = self._loop
-            shutdown = self._shutdown
-        if shutdown:
-            raise CuaBridgeUnavailable("bridge has been shut down")
-        if driver is None:
-            raise CuaBridgeUnavailable("Cua runtime is not available")
-        if loop is None or loop.is_closed() or not loop.is_running():
-            raise CuaBridgeUnavailable("Cua worker loop is not running")
-        bound = self._timeout_s if timeout_s is None else float(timeout_s)
-        future = asyncio.run_coroutine_threadsafe(factory(driver), loop)
-        try:
-            return future.result(timeout=bound)
-        except asyncio.TimeoutError as exc:
-            future.cancel()
-            raise CuaBridgeTimeout(
-                f"Cua action did not complete within {bound:.1f}s"
-            ) from exc
+            if driver is None:
+                raise CuaBridgeUnavailable("Cua runtime is not available")
+            if loop is None or loop.is_closed() or not loop.is_running():
+                raise CuaBridgeUnavailable("Cua worker loop is not running")
+            pending, future = self._schedule_locked(loop, lambda: factory(driver))
+        return self._await_bounded(future, pending, bound, mutation=mutation)
 
     async def _create_driver(self) -> Any:
         factory = self._driver_factory

@@ -28,7 +28,6 @@ _OPERATIONAL_INFO_MARKERS: Final[dict[str, tuple[str, ...]]] = {
     "charlie.main": (
         "charlie is waking up",
         "loading ai models",
-        "plugin system active",
         "telegram bot started",
         "main_shutdown_begin",
         "auditstore closed",

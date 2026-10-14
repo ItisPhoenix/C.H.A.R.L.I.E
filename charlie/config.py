@@ -27,8 +27,6 @@ if os.getenv("CHARLIE_TEST_MODE", "").lower() != "true":
 # Restart tiers for editable-field metadata (see FieldMeta below):
 #   None      -- read fresh on every use; applying an update is instant, no reload.
 #   "voice"   -- baked into VoiceEngine/ASR-worker construction; needs a voice-engine respawn.
-#   "mcp"     -- needs the MCP client subprocess stopped/restarted.
-#   "plugins" -- needs plugin tools re-registered.
 #   "process" -- read once at process boot (e.g. into a DB connection or OS hotkey hook);
 #                only takes effect on a full app restart.
 
@@ -143,7 +141,7 @@ class Config:
         metadata=_meta("VAD_THRESHOLD", "VAD & ASR Tuning", restart="voice"),
     )
     vad_silence_timeout: float = field(
-        default=float(os.getenv("VAD_SILENCE_TIMEOUT", "1.3")),
+        default=float(os.getenv("VAD_SILENCE_TIMEOUT", "1.8")),
         metadata=_meta("VAD_SILENCE_TIMEOUT", "VAD & ASR Tuning", restart="voice"),
     )
     asr_vad_threshold: float = field(
@@ -339,7 +337,7 @@ class Config:
         metadata=_meta("RESEARCH_MAX_PAGES_PER_DOMAIN", "Research Advanced"),
     )
     research_crawl_enabled: bool = field(
-        default=os.getenv("RESEARCH_CRAWL_ENABLED", "false").lower() == "true",
+        default=os.getenv("RESEARCH_CRAWL_ENABLED", "true").lower() == "true",
         metadata=_meta("RESEARCH_CRAWL_ENABLED", "Web Research"),
     )
     research_ddg_enabled: bool = field(
@@ -463,37 +461,6 @@ class Config:
         default=os.getenv("MEMORY_GRAPH_DB", "charlie_memory_graph.db"),
         metadata=_meta("MEMORY_GRAPH_DB", "Vector Memory", restart="process"),
     )
-    # --- Agentic OS Toggles ---
-    mcp_enabled: bool = field(
-        default=os.getenv("MCP_ENABLED", "false").lower() == "true",
-        metadata=_meta("MCP_ENABLED", "Agentic OS", restart="mcp"),
-    )
-    # Comma-separated MCP server specs; each is "name|command|arg1,arg2,...".
-    # Empty means no servers are started even when mcp_enabled is true.
-    mcp_servers: List[str] = field(
-        default_factory=lambda: [
-            s.strip()
-            for s in os.getenv("MCP_SERVERS", "").split(",")
-            if s.strip()
-        ],
-        metadata=_meta("MCP_SERVERS", "Agentic OS", restart="mcp"),
-    )
-    # Optional standard "mcpServers" JSON config file (Claude Desktop / Cursor /
-    # VS Code format) -- an alternative to MCP_SERVERS for hand-editing servers.
-    # Both sources are merged; missing file is not an error.
-    mcp_config_path: str = field(
-        default=os.getenv("MCP_CONFIG_PATH", "mcp_config.json"),
-        metadata=_meta("MCP_CONFIG_PATH", "Agentic OS", restart="mcp"),
-    )
-    # Exact server:tool IDs allowed to be exposed as read-only operations.
-    mcp_read_only_tools: List[str] = field(
-        default_factory=lambda: [
-            tool.strip()
-            for tool in os.getenv("MCP_READ_ONLY_TOOLS", "").split(",")
-            if tool.strip()
-        ],
-        metadata=_meta("MCP_READ_ONLY_TOOLS", "Agentic OS", restart="mcp"),
-    )
     # --- Desktop control (UI Automation) ---
     desktop_control_enabled: bool = field(
         default=os.getenv("DESKTOP_CONTROL_ENABLED", "false").lower() == "true",
@@ -600,20 +567,6 @@ class Config:
     vision_llm_model: str = field(
         default=os.getenv("VISION_LLM_MODEL", ""),
         metadata=_meta("VISION_LLM_MODEL", "Vision"),
-    )
-    plugins_enabled: bool = field(
-        default=os.getenv("PLUGINS_ENABLED", "false").lower() == "true",
-        metadata=_meta("PLUGINS_ENABLED", "Plugins", restart="plugins"),
-    )
-    # Restrict plugin filesystem access to these directories (comma-separated).
-    # Empty means the plugins default to the current working directory only.
-    plugin_allow_dirs: List[str] = field(
-        default_factory=lambda: [
-            d.strip()
-            for d in os.getenv("PLUGIN_ALLOW_DIRS", "").split(",")
-            if d.strip()
-        ],
-        metadata=_meta("PLUGIN_ALLOW_DIRS", "Plugins", restart="plugins"),
     )
     # --- Proactive resource monitoring ---
     # CPU/RAM percent thresholds for proactive alerts (sustained 3 samples before alerting)
@@ -768,7 +721,7 @@ class Config:
 
 
 _LABEL_ACRONYMS = {
-    "llm", "url", "asr", "tts", "vad", "mcp", "gpu", "ocr", "id",
+    "llm", "url", "asr", "tts", "vad", "gpu", "ocr", "id",
 }
 
 

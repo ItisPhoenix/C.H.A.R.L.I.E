@@ -42,6 +42,7 @@ __all__ = [
     "BROWSER_SCOPE",
     "NATIVE_TOOLS",
     "BROWSER_TOOLS",
+    "IDLE_TIMEOUT_SECONDS",
     "resolve_browser_executable",
     "manifest_body",
     "scope_manifest_path",
@@ -90,7 +91,8 @@ BROWSER_TOOLS = (
 DEFAULT_ORIGINS = ("about:blank",)
 
 _EXPIRES_AFTER = "30m"
-_IDLE_TIMEOUT = "5m"
+IDLE_TIMEOUT_SECONDS = 5 * 60
+_IDLE_TIMEOUT = f"{IDLE_TIMEOUT_SECONDS // 60}m"
 
 # Browsers Charlie knows how to find, in preference order.
 _KNOWN_BROWSERS = (

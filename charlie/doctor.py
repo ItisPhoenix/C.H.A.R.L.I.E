@@ -18,8 +18,18 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from charlie.runtime_introspector import RuntimeIntrospector
+from charlie.subsystem_health import HealthState
 
 logger = logging.getLogger("charlie.doctor")
+
+# The authoritative aggregate health verdict is owned by
+# charlie.subsystem_health, which already carries the per-subsystem
+# (``HealthStatus``) and runtime (``RuntimeStatus``) vocabularies. Re-exporting
+# it under the doctor's historical name keeps existing importers working while
+# guaranteeing there is exactly one status vocabulary in the runtime: a
+# diagnostic report and a runtime-truth snapshot cannot disagree about what
+# "degraded" means because they are the same type.
+DoctorStatus = HealthState
 
 # LLM and vision probes are real network calls that can bill a completion.
 # Re-running diagnostics must not fan out one request per caller, so a verdict
@@ -187,6 +197,48 @@ def _probe_chat_endpoint(
     return ProbeResult(False, f"HTTP {code} from {base_url}/chat/completions", code)
 
 
+def _probe_searxng(base_url: str, timeout: float) -> Optional[ProbeResult]:
+    """Ask the configured SearXNG instance for a JSON search response.
+
+    Mirrors ``SearXNGProvider.search``'s request shape -- same endpoint, same
+    ``format=json`` -- so a 200 here means the instance is genuinely able to
+    serve discovery, not merely that something answered on the port. Returns
+    ``None`` when no HTTP transport is importable, so the caller can report
+    "unprobed" instead of guessing.
+
+    Read-only and bounded: one GET, no engine side effects, no state written.
+    A 200 with no results still proves the instance searched and answered,
+    which is the dependency this check owns; result relevance is a research
+    quality question, not a health question.
+    """
+    try:
+        import httpx
+    except Exception:
+        return None
+
+    url = f"{base_url.rstrip('/')}/search"
+    params = {"q": "charlie", "format": "json", "language": "en"}
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            response = client.get(url, params=params)
+    except Exception as exc:
+        return ProbeResult(False, f"{type(exc).__name__} contacting {url}")
+
+    code = response.status_code
+    if code >= 400:
+        return ProbeResult(False, f"HTTP {code} from {url}", code)
+    try:
+        payload = response.json()
+    except Exception:
+        return ProbeResult(False, f"HTTP {code} from {url} but the body is not JSON", code)
+    if not isinstance(payload, dict):
+        return ProbeResult(False, f"HTTP {code} from {url} but the JSON body is not an object", code)
+    if "results" not in payload:
+        return ProbeResult(False, f"HTTP {code} from {url} but the response carries no 'results' key", code)
+    count = len(payload.get("results") or [])
+    return ProbeResult(True, f"HTTP {code} from {url}, {count} result(s)", code)
+
+
 def _probe_tesseract(binary: str, timeout: float) -> ProbeResult:
     """Ask the tesseract binary to identify itself.
 
@@ -245,14 +297,67 @@ class DoctorReport:
     timestamp: float
     checks: List[DiagnosticCheck] = field(default_factory=list)
     total_checks: int = 0
-    is_healthy: bool = True
     warnings: List[DiagnosticCheck] = field(default_factory=list)
     errors: List[DiagnosticCheck] = field(default_factory=list)
+
+    @property
+    def status(self) -> DoctorStatus:
+        """The authoritative aggregate verdict for this report.
+
+        Evidence-first and deliberately unable to overclaim:
+
+        ``UNHEALTHY``
+            At least one check produced an ERROR.
+        ``DEGRADED``
+            No ERROR, but at least one WARNING. A subsystem is impaired while
+            the core still works.
+        ``UNKNOWN``
+            Nothing ran (empty report), or nothing was *proven*: the report
+            holds no check with status ``OK``, so there is no positive evidence
+            to base a healthy verdict on. Prior to this the report collapsed to
+            a boolean and reported HEALTHY off ``len(errors) == 0``, which
+            printed HEALTHY for a WARNING-level system and for a report that
+            proved nothing at all.
+        ``HEALTHY``
+            At least one check was positively proven ``OK``, and no check
+            produced an ERROR or a WARNING.
+
+        ``INFO`` is neutral here. It means "no fault to report" (something
+        deliberately disabled, or a plain observation) -- never "proven
+        working". Any check that wants to be credited as healthy must reach
+        ``OK``; a check that can only establish availability reports WARNING
+        instead, so it cannot silently promote the system.
+        """
+        if not self.checks:
+            # Nothing ran: an empty report is not evidence of health.
+            return DoctorStatus.UNKNOWN
+        if any(check.status == CheckStatus.ERROR for check in self.checks):
+            return DoctorStatus.UNHEALTHY
+        if any(check.status == CheckStatus.WARNING for check in self.checks):
+            return DoctorStatus.DEGRADED
+        if not any(check.status == CheckStatus.OK for check in self.checks):
+            # Only INFO: no fault, but also nothing proven.
+            return DoctorStatus.UNKNOWN
+        return DoctorStatus.HEALTHY
+
+    @property
+    def is_healthy(self) -> bool:
+        """Backward-compatible projection of :attr:`status`.
+
+        Retained because readers outside this module consume it, but it now
+        means exactly ``status is HEALTHY``. It deliberately no longer means
+        ``len(errors) == 0``: a report whose only evidence is WARNING-level
+        impairment is DEGRADED, and this must be False for it. Callers that
+        want to distinguish "impaired" from "broken" must read :attr:`status`
+        instead of collapsing the two.
+        """
+        return self.status == DoctorStatus.HEALTHY
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "timestamp": self.timestamp,
             "total_checks": len(self.checks),
+            "status": self.status.value,
             "is_healthy": self.is_healthy,
             "warnings_count": len(self.warnings),
             "errors_count": len(self.errors),
@@ -273,7 +378,6 @@ class CharlieDoctor:
         task_journal: Optional[Any] = None,
         lease_manager: Optional[Any] = None,
         health_registry: Optional[Any] = None,
-        mcp_client: Optional[Any] = None,
         memory_service: Optional[Any] = None,
         llm_probe: Optional[Callable[[], Optional[ProbeResult]]] = None,
         probe_timeout: float = _DEFAULT_PROBE_TIMEOUT_S,
@@ -298,14 +402,12 @@ class CharlieDoctor:
             health_registry=health_registry,
             task_journal=task_journal,
             lease_manager=lease_manager,
-            mcp_client=mcp_client,
             memory_service=memory_service,
         )
         self._capability_index = capability_index
         self._task_journal = task_journal
         self._lease_manager = lease_manager
         self._health_registry = health_registry
-        self._mcp_client = mcp_client
         self._memory_service = memory_service
         self._llm_probe = llm_probe
         self._probe_timeout = probe_timeout
@@ -395,14 +497,14 @@ class CharlieDoctor:
         checks.append(self._check_task_journal())
         # 7. Capability Leases
         checks.append(self._check_capability_leases())
-        # 8. MCP Subsystem
-        checks.append(self._check_mcp_subsystem())
-        # 9. Memory Subsystem
+        # 8. Memory Subsystem
         checks.append(self._check_memory_subsystem())
         # 10. Browser Subsystem
         checks.append(self._check_browser_subsystem())
         # 11. Desktop Subsystem
         checks.append(self._check_desktop_subsystem())
+        # 11a. Research provider readiness (no non-invasive provider health API exists)
+        checks.append(self._check_research_provider())
         # 12. Vision & OCR
         checks.append(self._check_vision_ocr())
         # 13. Voice Subsystem
@@ -418,13 +520,10 @@ class CharlieDoctor:
 
         warnings = [c for c in checks if c.status == CheckStatus.WARNING]
         errors = [c for c in checks if c.status == CheckStatus.ERROR]
-        is_healthy = len(errors) == 0
-
         return DoctorReport(
             timestamp=time.time(),
             checks=checks,
             total_checks=len(checks),
-            is_healthy=is_healthy,
             warnings=warnings,
             errors=errors,
         )
@@ -562,13 +661,15 @@ class CharlieDoctor:
 
         if cfg is None:
             # No config means no route to probe. config_validity owns the error;
-            # claiming a model verdict here would be invention.
+            # claiming a model verdict here would be invention. WARNING, not
+            # INFO: the primary dependency is unproven, and an unproven primary
+            # route must never be able to aggregate into HEALTHY.
             return DiagnosticCheck(
                 check_id="model_provider",
                 category="models",
-                status=CheckStatus.INFO,
-                severity=CheckSeverity.LOW,
-                summary="Model state unknown",
+                status=CheckStatus.WARNING,
+                severity=CheckSeverity.MEDIUM,
+                summary="Model state unverified",
                 evidence=(
                     f"{route} No configuration is available to this diagnostic instance, "
                     "so the LLM route was not probed."
@@ -591,12 +692,13 @@ class CharlieDoctor:
         result = self._run_llm_probe(cfg)
         if result is None:
             # No probe capability: unverified, not healthy. The endpoint may well
-            # be fine, but nothing observed it and the report must say so.
+            # be fine, but nothing observed it and the report must say so -- as a
+            # WARNING, because Charlie cannot answer anything without this route.
             return DiagnosticCheck(
                 check_id="model_provider",
                 category="models",
-                status=CheckStatus.INFO,
-                severity=CheckSeverity.LOW,
+                status=CheckStatus.WARNING,
+                severity=CheckSeverity.MEDIUM,
                 summary="Model configured; no live probe available",
                 evidence=(
                     f"{route} No live probe is available to this diagnostic instance "
@@ -661,27 +763,43 @@ class CharlieDoctor:
                 fix_hint="Ensure charlie.tools / charlie.capabilities are properly imported during bootstrap.",
             )
 
+        # Partial availability is not coherence. Reporting "OK (12/20 available)"
+        # let a runtime missing 8 capability domains aggregate to HEALTHY, which
+        # is exactly the false green this check exists to prevent: the index is
+        # only healthy when every registered domain can actually be invoked.
+        if avail < total:
+            missing = sorted(
+                str(cap_id)
+                for cap_id, record in (caps.get("by_id") or {}).items()
+                if isinstance(record, dict) and record.get("available") is not True
+            )
+            return DiagnosticCheck(
+                check_id="capability_registry",
+                category="capabilities",
+                status=CheckStatus.WARNING,
+                severity=CheckSeverity.MEDIUM,
+                summary=f"Capability index incomplete: {avail}/{total} available",
+                evidence=(
+                    f"{total} capability domains registered, {avail} currently available; "
+                    f"{total - avail} not invokable"
+                    + (f": {', '.join(missing[:12])}" + (" ..." if len(missing) > 12 else "") if missing else "")
+                    + "."
+                ),
+                probable_cause="A registered capability's dependency import or availability probe failed.",
+                fix_hint="Resolve the failing dependency for the unavailable capability domains listed above.",
+            )
+
         return DiagnosticCheck(
             check_id="capability_registry",
             category="capabilities",
             status=CheckStatus.OK,
             severity=CheckSeverity.LOW,
             summary=f"Capability index coherent ({avail}/{total} available)",
-            evidence=f"{total} total capability domains registered, {avail} currently available.",
+            evidence=f"All {total} registered capability domains report available.",
         )
 
     def _check_event_bus(self) -> DiagnosticCheck:
-        """Observe the ZeroMQ event transport instead of asserting a constant.
-
-        End-to-end delivery needs a live SUB socket bound to the runtime's PUB
-        endpoint, and this instance owns no bus -- injecting a subscriber, or
-        publishing a synthetic event, would mean either racing the real runtime
-        for the port or writing a fabricated telemetry event onto the canonical
-        stream. So the check reports what it can actually observe: whether the
-        ZeroMQ transport loads, and whether the configured port is held by a
-        live listener. It deliberately never returns WARNING-by-default, which
-        told the user something was wrong on every single run.
-        """
+        """Report only the local transport dependency; delivery readiness is unknown."""
         try:
             import zmq
 
@@ -706,68 +824,156 @@ class CharlieDoctor:
             return DiagnosticCheck(
                 check_id="event_bus",
                 category="health",
-                status=CheckStatus.INFO,
-                severity=CheckSeverity.LOW,
-                summary="EventBus state unknown",
+                status=CheckStatus.WARNING,
+                severity=CheckSeverity.MEDIUM,
+                summary="EventBus readiness unverified",
                 evidence=(
                     f"{transport}. No configuration is available to this diagnostic instance, "
-                    "so the event port could not be observed."
+                    "so runtime EventBus readiness could not be observed; no socket or delivery "
+                    "probe was performed."
                 ),
             )
 
-        port = _resolve_event_port()
-        if port == 0:
-            return DiagnosticCheck(
-                check_id="event_bus",
-                category="health",
-                status=CheckStatus.INFO,
-                severity=CheckSeverity.LOW,
-                summary="EventBus on an ephemeral port",
-                evidence=(
-                    f"{transport}. The runtime requested an ephemeral event port, which cannot be "
-                    "probed by an outside observer; delivery was not exercised."
-                ),
-            )
-
-        occupancy = _probe_event_port(port)
-        if not occupancy.occupied:
-            # A free port does not mean the bus is broken -- it means it is not
-            # bound right now. Claiming a fault here would be a guess.
-            return DiagnosticCheck(
-                check_id="event_bus",
-                category="health",
-                status=CheckStatus.INFO,
-                severity=CheckSeverity.LOW,
-                summary=f"No EventBus bound on 127.0.0.1:{port}",
-                evidence=(
-                    f"{transport}. Port {port} probe: {occupancy.detail}. No publisher is bound to the "
-                    "configured event port, so the runtime is not currently publishing. Event delivery "
-                    "was not exercised by this check."
-                ),
-            )
+        # What is actually proven here is narrow and must be labelled as such:
+        # the ZeroMQ transport imports, and nothing else. Publication is
+        # observable without shipping a real event, which is read-only and
+        # bounded; delivery is observable only by consuming from the live bus,
+        # which would inject into runtime state a diagnostic does not own. So
+        # this check reports transport availability and stops there -- as INFO,
+        # because nothing here is faulted and nothing here is proven.
+        observations = [
+            f"{transport} is importable",
+            "bus bind/publish state was not probed",
+            "no event was published or consumed, so delivery is unproven",
+        ]
 
         return DiagnosticCheck(
             check_id="event_bus",
             category="health",
-            status=CheckStatus.OK,
+            status=CheckStatus.INFO,
             severity=CheckSeverity.LOW,
-            summary=f"EventBus transport live on 127.0.0.1:{port}",
-            evidence=(
-                f"{transport}. Port {port} probe: {occupancy.detail}, so a publisher is bound to the "
-                "configured event port. Subscriber-side delivery was not exercised by this check."
+            summary="EventBus transport available; delivery unverified",
+            evidence=" ".join(observations) + ".",
+            fix_hint=(
+                "Start the runtime bus and confirm a subscriber receives a published event to clear "
+                "this warning; the doctor cannot prove delivery without injecting runtime events."
             ),
         )
 
     def _check_task_journal(self) -> DiagnosticCheck:
-        t_info = self._introspector.get_tasks_info()
-        running_cnt = t_info.get("counts", {}).get("running", 0)
+        """Assert that the journal can actually be read from and written to.
+
+        The previous version of this check asserted nothing: it read a
+        read-only snapshot and returned OK-shaped evidence for a journal that
+        may not exist, may be memory-only, and may be sitting on an unwritable
+        state path. A journal that cannot persist loses every task on restart,
+        so the check now proves both halves or reports which one failed.
+
+        READ is exercised against the live journal through the same accessor
+        the runtime uses. WRITE is proven against the journal's real
+        persistence target on this host (existence, parent-directory and file
+        permissions) rather than by inserting a throwaway record, because a
+        diagnostic must not write into the task history it is here to report on.
+        """
+        journal = self._task_journal
+        if journal is None:
+            return DiagnosticCheck(
+                check_id="task_journal",
+                category="tasks",
+                status=CheckStatus.WARNING,
+                severity=CheckSeverity.MEDIUM,
+                summary="Task journal unavailable",
+                evidence=(
+                    "No TaskJournal instance is wired into this diagnostic, so task history cannot be "
+                    "read or written. Task state would not survive a restart."
+                ),
+                fix_hint="Construct CharlieDoctor with the runtime's TaskJournal so its durability can be verified.",
+            )
+
+        # --- READ: exercise the live journal rather than trusting a cached count.
+        try:
+            records = journal.list()
+        except Exception as exc:
+            return DiagnosticCheck(
+                check_id="task_journal",
+                category="tasks",
+                status=CheckStatus.WARNING,
+                severity=CheckSeverity.MEDIUM,
+                summary="Task journal unreadable",
+                evidence=f"Reading the live TaskJournal raised {type(exc).__name__}: {exc}.",
+                probable_cause="The journal backing store is corrupt or unreadable.",
+                fix_hint="Inspect the journal state file and permissions.",
+            )
+        if not isinstance(records, list):
+            return DiagnosticCheck(
+                check_id="task_journal",
+                category="tasks",
+                status=CheckStatus.WARNING,
+                severity=CheckSeverity.MEDIUM,
+                summary="Task journal read returned an unexpected shape",
+                evidence=f"TaskJournal.list() returned {type(records).__name__}, expected list.",
+            )
+
+        # --- WRITE: prove the real persistence target accepts writes.
+        state_path = getattr(journal, "_state_path", None)
+        if state_path is None:
+            return DiagnosticCheck(
+                check_id="task_journal",
+                category="tasks",
+                status=CheckStatus.WARNING,
+                severity=CheckSeverity.MEDIUM,
+                summary=f"Task journal readable but not persisted ({len(records)} record(s))",
+                evidence=(
+                    f"Read of the live journal returned {len(records)} record(s), but the journal has no "
+                    "state_path: it is memory-only, so every task is lost on restart and a write cannot be "
+                    "proven."
+                ),
+                probable_cause="TaskJournal was constructed without a state_path.",
+                fix_hint="Construct the runtime TaskJournal with a state_path so task history is durable.",
+            )
+
+        path = Path(state_path)
+        observations = [f"read {len(records)} record(s) from the live journal", f"state_path={path}"]
+        if path.exists():
+            if not os.access(path, os.W_OK):
+                return DiagnosticCheck(
+                    check_id="task_journal",
+                    category="tasks",
+                    status=CheckStatus.WARNING,
+                    severity=CheckSeverity.HIGH,
+                    summary="Task journal state file is not writable",
+                    evidence="; ".join(observations) + "; the existing state file rejects writes.",
+                    probable_cause="File permissions or a lock prevent the journal from persisting updates.",
+                    fix_hint="Grant write access to the journal state file.",
+                )
+        else:
+            parent = path.parent
+            if not parent.exists() or not os.access(parent, os.W_OK):
+                return DiagnosticCheck(
+                    check_id="task_journal",
+                    category="tasks",
+                    status=CheckStatus.WARNING,
+                    severity=CheckSeverity.HIGH,
+                    summary="Task journal state directory is not writable",
+                    evidence=(
+                        "; ".join(observations)
+                        + f"; parent directory '{parent}' does not exist or rejects writes, so the journal "
+                        "cannot create its state file."
+                    ),
+                    probable_cause="The journal data directory is missing or read-only.",
+                    fix_hint="Create the journal data directory and grant write access.",
+                )
+
         return DiagnosticCheck(
             check_id="task_journal",
             category="tasks",
             status=CheckStatus.OK,
             severity=CheckSeverity.LOW,
-            summary="Task journal tracking active",
-            evidence=f"Total tasks tracked: {t_info.get('total_tasks', 0)}, active running: {running_cnt}.",
+            summary=f"Task journal readable and writable ({len(records)} record(s))",
+            evidence=(
+                "; ".join(observations)
+                + "; the persistence target accepts writes, so new tasks will survive a restart."
+            ),
         )
 
     def _check_capability_leases(self) -> DiagnosticCheck:
@@ -818,34 +1024,6 @@ class CharlieDoctor:
                 f"{len(active_leases)} active leases, no orphan locks detected. "
                 f"Live non-journal owners: {unjournaled or 'none'}."
             ),
-        )
-
-    def _check_mcp_subsystem(self) -> DiagnosticCheck:
-        mcp = self._introspector.get_mcp_info()
-        cfg_srv = mcp.get("configured_servers", 0)
-        conn_srv = mcp.get("connected_servers", 0)
-
-        if cfg_srv > conn_srv:
-            return DiagnosticCheck(
-                check_id="mcp_subsystem",
-                category="mcp",
-                status=CheckStatus.WARNING,
-                severity=CheckSeverity.MEDIUM,
-                summary=f"MCP connections incomplete ({conn_srv}/{cfg_srv})",
-                evidence=f"{cfg_srv} MCP server(s) configured; {conn_srv} currently connected.",
-                fix_hint="Check MCP server logs or trigger reconnect.",
-                repair_available=True,
-                repair_id="repair_mcp_reconnect",
-                requires_approval=False,
-            )
-
-        return DiagnosticCheck(
-            check_id="mcp_subsystem",
-            category="mcp",
-            status=CheckStatus.OK if conn_srv else CheckStatus.INFO,
-            severity=CheckSeverity.LOW,
-            summary=f"MCP servers connected ({conn_srv}/{cfg_srv})" if conn_srv else "No MCP connections reported",
-            evidence=f"{cfg_srv} configured server(s), {conn_srv} active connection(s).",
         )
 
     def _check_memory_subsystem(self) -> DiagnosticCheck:
@@ -975,13 +1153,42 @@ class CharlieDoctor:
         )
 
     def _check_browser_subsystem(self) -> DiagnosticCheck:
+        """Availability-only: prove the import, refuse to claim the launch.
+
+        ``get_subsystem_info()['browser']['available']`` is a module-level
+        import flag. It says the browser bindings loaded; it says nothing about
+        whether a browser can launch, reach the network, or execute an action.
+        Launching one is a heavyweight, host-visible side effect that a
+        diagnostic must not perform behind the user's back, so importable
+        bindings report INFO: no fault observed, function unproven. Bindings
+        that failed to import are a real fault and stay WARNING.
+        """
         subsys = self._introspector.get_subsystem_info()
-        b_info = subsys.get("browser", {})
+        b_info = subsys.get("browser") if isinstance(subsys, dict) else None
+        if not isinstance(b_info, dict) or not isinstance(b_info.get("available"), bool):
+            return DiagnosticCheck(
+                check_id="browser_subsystem",
+                category="browser",
+                status=CheckStatus.WARNING,
+                severity=CheckSeverity.MEDIUM,
+                summary="Browser readiness unverified",
+                evidence=(
+                    "No usable read-only browser dependency status was returned; no browser was launched. "
+                    "Browser function is unproven."
+                ),
+            )
         avail = b_info.get("available", False)
 
-        status = CheckStatus.OK if avail else CheckStatus.INFO
-        summary = "Browser dependencies available (Playwright)" if avail else "Browser dependencies unavailable"
-        evidence = f"Module available={avail}. Browser launch and actions not verified by this check."
+        status = CheckStatus.INFO if avail else CheckStatus.WARNING
+        summary = (
+            "Browser bindings importable; launch readiness unverified (availability-only)"
+            if avail
+            else "Browser dependencies unavailable"
+        )
+        evidence = (
+            f"AVAILABILITY-ONLY. Module available={avail}. This proves imports resolved and nothing more: "
+            "no browser was launched and no navigation, DOM, or screenshot action was exercised."
+        )
 
         return DiagnosticCheck(
             check_id="browser_subsystem",
@@ -994,18 +1201,183 @@ class CharlieDoctor:
         )
 
     def _check_desktop_subsystem(self) -> DiagnosticCheck:
+        """Availability-only: prove the import, refuse to claim host control.
+
+        Same contract as the browser check. ``DESKTOP_AVAILABLE`` is an import
+        flag; actually touching the host would move the user's mouse and
+        foreground windows, which a diagnostic has no business doing unasked.
+        """
         subsys = self._introspector.get_subsystem_info()
-        d_info = subsys.get("desktop", {})
+        d_info = subsys.get("desktop") if isinstance(subsys, dict) else None
+        if not isinstance(d_info, dict) or not isinstance(d_info.get("available"), bool):
+            return DiagnosticCheck(
+                check_id="desktop_subsystem",
+                category="desktop",
+                status=CheckStatus.WARNING,
+                severity=CheckSeverity.MEDIUM,
+                summary="Desktop readiness unverified",
+                evidence=(
+                    "No usable read-only desktop dependency status was returned; no host action was "
+                    "attempted. Desktop control is unproven."
+                ),
+            )
         avail = d_info.get("available", False)
 
-        status = CheckStatus.OK if avail else CheckStatus.INFO
         return DiagnosticCheck(
             check_id="desktop_subsystem",
             category="desktop",
-            status=status,
+            status=CheckStatus.INFO if avail else CheckStatus.WARNING,
             severity=CheckSeverity.LOW,
-            summary="Desktop dependencies available" if avail else "Desktop dependencies unavailable",
-            evidence=f"Module available={avail}, platform={d_info.get('platform')}. Desktop actions not verified.",
+            summary=(
+                "Desktop bindings importable; action readiness unverified (availability-only)"
+                if avail
+                else "Desktop dependencies unavailable"
+            ),
+            evidence=(
+                f"AVAILABILITY-ONLY. Module available={avail}, platform={d_info.get('platform')}. "
+                "This proves imports resolved and nothing more: no observation, focus, or input action "
+                "was performed against the host."
+            ),
+        )
+
+    def _check_research_provider(self) -> DiagnosticCheck:
+        """Prove search actually answers, or say exactly how far verification got.
+
+        Search is the substrate every research answer rests on, and it had no
+        check at all -- a system with no working search provider aggregated to
+        HEALTHY. This check inventories the configured providers from config
+        (data-driven: no provider name is hardcoded into the logic) and then
+        performs a real, bounded, read-only request against whichever one it can
+        prove.
+
+        A configured-but-unprobed provider is reported as a WARNING, never OK:
+        a key or URL sitting in config is presence, and presence is not a
+        working search backend.
+        """
+        cfg = self._runtime_config()
+        if cfg is None:
+            return DiagnosticCheck(
+                check_id="research_provider",
+                category="research",
+                status=CheckStatus.WARNING,
+                severity=CheckSeverity.MEDIUM,
+                summary="Search readiness unverified",
+                evidence=(
+                    "No configuration is available to this diagnostic instance, so no search provider "
+                    "could be identified and no request was made."
+                ),
+            )
+
+        if not bool(getattr(cfg, "research_enabled", True)):
+            # Deliberately switched off: not a fault, and not a claim of health.
+            return DiagnosticCheck(
+                check_id="research_provider",
+                category="research",
+                status=CheckStatus.INFO,
+                severity=CheckSeverity.LOW,
+                summary="Research disabled by configuration",
+                evidence="RESEARCH_ENABLED is false; no search provider was probed.",
+            )
+
+        # Inventory configured providers from config. Anything listed here is
+        # presence only -- acceptance is proven below, never assumed.
+        searxng_url = (getattr(cfg, "searxng_url", "") or "").strip()
+        unprobed: List[str] = []
+        if not searxng_url:
+            # A configured instance is probed for real below; only an absent one
+            # belongs in the presence-only inventory.
+            unprobed.append("searxng (SEARXNG_URL unset)")
+
+        for attr, label in (
+            ("exa_api_key", "exa"),
+            ("tavily_api_key", "tavily"),
+        ):
+            if (getattr(cfg, attr, "") or "").strip():
+                unprobed.append(f"{label} (key present, acceptance unverified)")
+
+        for enabled_attr, url_attr, label in (
+            ("research_bing_enabled", "research_bing_endpoint", "bing"),
+            ("research_yacy_enabled", "research_yacy_url", "yacy"),
+            ("research_ddg_enabled", "research_ddg_endpoint", "duckduckgo"),
+        ):
+            if bool(getattr(cfg, enabled_attr, False)):
+                if (getattr(cfg, url_attr, "") or "").strip():
+                    unprobed.append(f"{label} (enabled; endpoint reachable/unreachable not probed)")
+                else:
+                    unprobed.append(f"{label} (enabled but endpoint unset)")
+
+        # --- Real probe: a bounded GET against the self-hosted instance.
+        if searxng_url:
+            probe = _probe_searxng(searxng_url, self._probe_timeout)
+            if probe is None:
+                return DiagnosticCheck(
+                    check_id="research_provider",
+                    category="research",
+                    status=CheckStatus.WARNING,
+                    severity=CheckSeverity.MEDIUM,
+                    summary="SearXNG probe unavailable (availability-only)",
+                    evidence=(
+                        f"SEARXNG_URL={searxng_url} is configured, but no HTTP transport is available to "
+                        "this diagnostic, so the instance was never contacted."
+                    ),
+                )
+            if not probe.ok:
+                return DiagnosticCheck(
+                    check_id="research_provider",
+                    category="research",
+                    status=CheckStatus.WARNING,
+                    severity=CheckSeverity.MEDIUM,
+                    summary=f"SearXNG not answering: {probe.detail}",
+                    evidence=(
+                        f"Live probe of {searxng_url}/search failed: {probe.detail}. Search cannot "
+                        "currently return results, so research has no discovery stage."
+                    ),
+                    probable_cause="The SearXNG instance is down, unreachable, or no longer serving JSON.",
+                    fix_hint="Start the SearXNG instance and confirm /search responds with format=json.",
+                )
+            return DiagnosticCheck(
+                check_id="research_provider",
+                category="research",
+                status=CheckStatus.OK,
+                severity=CheckSeverity.LOW,
+                summary=f"Search provider reachable: {probe.detail}",
+                evidence=(
+                    f"Live probe of {searxng_url}/search returned HTTP {probe.status_code} with a valid "
+                    "JSON body. Search discovery is proven to work end to end."
+                    + (
+                        f" Other configured providers remain unprobed: {'; '.join(unprobed)}."
+                        if unprobed
+                        else ""
+                    )
+                ),
+            )
+
+        if not unprobed:
+            return DiagnosticCheck(
+                check_id="research_provider",
+                category="research",
+                status=CheckStatus.WARNING,
+                severity=CheckSeverity.HIGH,
+                summary="Research enabled but no search provider configured",
+                evidence=(
+                    "RESEARCH_ENABLED is true, yet no search backend is configured. Every research request "
+                    "would fail at the discovery stage with nothing to report."
+                ),
+                probable_cause="No search provider URL or key is set in .env.",
+                fix_hint="Set SEARXNG_URL, or configure a hosted search provider key.",
+            )
+
+        return DiagnosticCheck(
+            check_id="research_provider",
+            category="research",
+            status=CheckStatus.WARNING,
+            severity=CheckSeverity.MEDIUM,
+            summary="Search configured but unproven (availability-only)",
+            evidence=(
+                "AVAILABILITY-ONLY. Research is enabled and configured providers are present: "
+                f"{'; '.join(unprobed)}. No provider was contacted, so whether search actually returns "
+                "results is unproven."
+            ),
         )
 
     def _check_vision_ocr(self) -> DiagnosticCheck:
@@ -1107,22 +1479,39 @@ class CharlieDoctor:
         )
 
     def _check_voice_subsystem(self) -> DiagnosticCheck:
+        """Availability-only: report the startup string, claim nothing more.
+
+        Comparing a startup-state string proves that some supervisor reported a
+        state; it cannot prove a microphone captured audio or that TTS was
+        audible. charlie/AGENTS.md 8 requires real-host evidence for voice, so
+        this check is availability-only: a supervisor reporting no failure
+        emits INFO, since nothing is faulted and nothing is proven. A reported
+        failure is a real fault and stays WARNING.
+        """
         subsys = self._introspector.get_subsystem_info()
         v_info = subsys.get("voice", {})
         model_present = v_info.get("wake_word_model_present", False)
 
-        voice_health = self._introspector.get_health_info().get("voice", {})
-        voice_state = voice_health.get("status", "unknown")
-        status = CheckStatus.OK if voice_state == "running" else CheckStatus.WARNING
-        if voice_state == "disabled":
-            status = CheckStatus.INFO
+        health_info = self._introspector.get_health_info()
+        voice_health = health_info.get("voice", {}) if isinstance(health_info, dict) else {}
+        voice_state = voice_health.get("status", "unknown") if isinstance(voice_health, dict) else "unknown"
+        failed = voice_state in {"failed", "error", "degraded", "unavailable"}
+        status = CheckStatus.WARNING if failed else CheckStatus.INFO
+        summary = (
+            "Voice runtime reports failure"
+            if failed
+            else f"Voice runtime state {voice_state}; audio readiness unverified (availability-only)"
+        )
         return DiagnosticCheck(
             check_id="voice_subsystem",
             category="voice",
             status=status,
-            severity=CheckSeverity.LOW,
-            summary=f"Voice runtime: {voice_state}",
-            evidence=f"Runtime state: {voice_state}; wake model present: {model_present}. Live speech unverified.",
+            severity=CheckSeverity.HIGH if failed else CheckSeverity.LOW,
+            summary=summary,
+            evidence=(
+                f"AVAILABILITY-ONLY. Runtime state: {voice_state}; wake model present: {model_present}. "
+                "Microphone capture and audible playback were not verified, so voice function is unproven."
+            ),
         )
 
     def _check_data_directories(self) -> DiagnosticCheck:
@@ -1138,14 +1527,36 @@ class CharlieDoctor:
         )
 
     def _check_subsystem_health(self) -> DiagnosticCheck:
-        health = self._introspector.get_health_info()
-        if not health:
+        try:
+            health = self._introspector.get_health_info()
+        except Exception as exc:
             return DiagnosticCheck(
-                check_id="subsystem_health", category="health", status=CheckStatus.WARNING,
+                check_id="subsystem_health", category="health", status=CheckStatus.INFO,
                 severity=CheckSeverity.MEDIUM, summary="Runtime health unavailable",
-                evidence="No subsystem health observations are available in this process.",
+                evidence=f"Read-only runtime health snapshot unavailable: {type(exc).__name__}.",
             )
-        degraded = [k for k, v in health.items() if v.get("status") not in {"running", "disabled"}]
+        if not isinstance(health, dict) or not health:
+            return DiagnosticCheck(
+                check_id="subsystem_health",
+                category="health",
+                status=CheckStatus.INFO,
+                severity=CheckSeverity.LOW,
+                summary="Runtime health unknown",
+                evidence="No authoritative subsystem health observations are available.",
+            )
+
+        degraded = []
+        unknown = []
+        observed = {}
+        for name, value in health.items():
+            state = value.get("status") if isinstance(value, dict) else None
+            if not isinstance(state, str) or not state or state == "unknown":
+                unknown.append(name)
+            elif state in {"failed", "error", "degraded", "unavailable"}:
+                degraded.append(name)
+                observed[name] = state
+            elif state not in {"running", "disabled"}:
+                unknown.append(name)
 
         if degraded:
             return DiagnosticCheck(
@@ -1153,19 +1564,26 @@ class CharlieDoctor:
                 category="health",
                 status=CheckStatus.WARNING,
                 severity=CheckSeverity.MEDIUM,
-                summary=f"Subsystems not ready: {degraded}",
-                evidence=f"Non-running subsystem states: { {k: health[k].get('status') for k in degraded} }.",
-                probable_cause="One or more service background loops reported failure.",
-                fix_hint="Check developer logs for underlying stack traces.",
+                summary=f"Subsystem supervisors report degraded state: {degraded}",
+                evidence=f"Reported failure states: {observed}. Functional capability checks were not run.",
+                probable_cause="One or more subsystem health owners report a failed or degraded state.",
+                fix_hint="Check the affected subsystem's runtime diagnostics.",
             )
 
         return DiagnosticCheck(
             check_id="subsystem_health",
             category="health",
-            status=CheckStatus.OK,
+            status=CheckStatus.INFO,
             severity=CheckSeverity.LOW,
-            summary="All subsystem transitions healthy",
-            evidence=f"Tracked subsystems ({len(health)}) report normal operating status.",
+            summary=(
+                "Subsystem readiness unknown"
+                if unknown
+                else "Subsystem lifecycle states observed; capability readiness unknown"
+            ),
+            evidence=(
+                f"Tracked subsystem states: {len(health)}; unknown states: {unknown or 'none'}. "
+                "Running or disabled lifecycle state does not verify subsystem operations."
+            ),
         )
 
     def _check_recovery_state(self) -> DiagnosticCheck:
@@ -1186,13 +1604,103 @@ class CharlieDoctor:
             reg = ExtensionRegistry(capability_index=self._capability_index)
             entries = reg.list()
             enabled_cnt = sum(1 for e in entries if e.enabled)
+            enabled_capabilities = [
+                entry for entry in entries
+                if entry.enabled and getattr(entry.kind, "value", entry.kind) in {"skill", "code_small"}
+            ]
+            unsupported_enabled = [
+                entry.extension_id for entry in entries
+                if entry.enabled and getattr(entry.kind, "value", entry.kind) not in {"skill", "code_small"}
+            ]
+            if not enabled_capabilities:
+                if unsupported_enabled:
+                    return DiagnosticCheck(
+                        check_id="extensions_registry",
+                        category="extensions",
+                        status=CheckStatus.INFO,
+                        severity=CheckSeverity.LOW,
+                        summary="Enabled extension readiness unknown",
+                        evidence=(
+                            f"Manifest contains {len(entries)} entries; runtime capability mapping is not "
+                            f"defined for enabled kinds: {unsupported_enabled}."
+                        ),
+                    )
+                return DiagnosticCheck(
+                    check_id="extensions_registry",
+                    category="extensions",
+                    status=CheckStatus.OK,
+                    severity=CheckSeverity.LOW,
+                    summary=f"Extension manifest valid ({len(entries)} installed, {enabled_cnt} enabled)",
+                    evidence="No enabled skill/code capability entries require runtime availability checks.",
+                )
+
+            try:
+                capabilities = self._introspector.get_capabilities_info()
+            except Exception as exc:
+                capabilities = None
+                capability_error = type(exc).__name__
+            else:
+                capability_error = None
+            by_id = capabilities.get("by_id") if isinstance(capabilities, dict) else None
+            if not isinstance(by_id, dict):
+                # Enabled dependencies whose availability could not be read are
+                # unproven, not fine: WARNING keeps them out of HEALTHY.
+                return DiagnosticCheck(
+                    check_id="extensions_registry",
+                    category="extensions",
+                    status=CheckStatus.WARNING,
+                    severity=CheckSeverity.MEDIUM,
+                    summary="Enabled extension availability unverified",
+                    evidence=(
+                        f"{len(enabled_capabilities)} enabled skill/code entry/entries exist, but the "
+                        f"capability index could not be read{f' ({capability_error})' if capability_error else ''}. "
+                        "Their availability is unproven."
+                    ),
+                )
+
+            unavailable = []
+            unknown = []
+            for entry in enabled_capabilities:
+                capability = by_id.get(entry.extension_id)
+                if capability is None:
+                    unavailable.append(entry.extension_id)
+                    continue
+                if not isinstance(capability, dict) or not isinstance(capability.get("available"), bool):
+                    unknown.append(entry.extension_id)
+                elif not capability["available"]:
+                    unavailable.append(entry.extension_id)
+            if unavailable:
+                return DiagnosticCheck(
+                    check_id="extensions_registry",
+                    category="extensions",
+                    status=CheckStatus.WARNING,
+                    severity=CheckSeverity.MEDIUM,
+                    summary=f"Enabled extension capability unavailable: {unavailable}",
+                    evidence=(
+                        f"Manifest lists {len(enabled_capabilities)} enabled skill/code capability entries; "
+                        "one or more are missing from or unavailable in the runtime capability index."
+                    ),
+                )
+            if unknown or unsupported_enabled:
+                return DiagnosticCheck(
+                    check_id="extensions_registry",
+                    category="extensions",
+                    status=CheckStatus.WARNING,
+                    severity=CheckSeverity.MEDIUM,
+                    summary="Enabled extension availability partially unverified",
+                    evidence=(
+                        f"AVAILABILITY-ONLY. Capability state unknown for {unknown or 'none'}; unsupported "
+                        f"enabled kinds: {unsupported_enabled or 'none'}. At least one enabled extension is "
+                        "neither confirmed available nor confirmed broken."
+                    ),
+                )
             return DiagnosticCheck(
                 check_id="extensions_registry",
                 category="extensions",
                 status=CheckStatus.OK,
                 severity=CheckSeverity.LOW,
-                summary=f"Extension registry valid ({len(entries)} installed, {enabled_cnt} active)",
-                evidence=f"{len(entries)} registered extension entries in manifest.",
+                summary=f"Extension capabilities available ({len(enabled_capabilities)} enabled)",
+                evidence=f"All enabled skill/code entries have available capability records; {len(entries)} total manifest entries.",
             )
         except Exception as e:
             return DiagnosticCheck(
@@ -1284,29 +1792,14 @@ class CharlieDoctor:
                 self.record_repair_attempt(repair_id, success=True)
                 return {"success": True, "repair_id": repair_id, "message": f"Released {released} stale leases."}
 
-            # 2. MCP servers reconnect
-            elif repair_id == "repair_mcp_reconnect":
-                mcp = self._introspector._get_mcp_client()
-                if mcp is None or not callable(getattr(mcp, "enable_server", None)):
-                    raise RuntimeError("MCP reconnect requires the owning runtime client")
-                from charlie.tools import registry
-
-                for s in mcp.list_servers_detailed():
-                    if s.get("status") != "connected":
-                        mcp.enable_server(registry, s["name"])
-                if any(s.get("status") != "connected" for s in mcp.list_servers_detailed()):
-                    raise RuntimeError("One or more MCP servers remain disconnected")
-                self.record_repair_attempt(repair_id, success=True)
-                return {"success": True, "repair_id": repair_id, "message": "Triggered MCP server reconnection."}
-
-            # 3. Refresh code index
+            # 2. Refresh code index
             elif repair_id == "repair_refresh_code_index":
                 from charlie.code_index import CodeIndex
                 CodeIndex().refresh(force=True)
                 self.record_repair_attempt(repair_id, success=True)
                 return {"success": True, "repair_id": repair_id, "message": "CodeIndex refresh complete."}
 
-            # 4. Unknown / simulated failing repair
+            # 3. Unknown / simulated failing repair
             else:
                 self.record_repair_attempt(repair_id, success=False)
                 return {
@@ -1348,7 +1841,7 @@ class CharlieDoctor:
                 lines.append(f"     Fix Hint: {c.fix_hint}")
 
         lines.append("-" * 64)
-        status_text = "HEALTHY" if report.is_healthy else "ISSUES DETECTED"
+        status_text = report.status.value.upper()
         lines.append(
             f" Status: {status_text} | Total Checks: {report.total_checks} | "
             f"Warnings: {len(report.warnings)} | Errors: {len(report.errors)}"

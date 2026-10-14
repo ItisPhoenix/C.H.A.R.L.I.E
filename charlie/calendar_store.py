@@ -16,6 +16,18 @@ REMINDER_DELIVERING = "delivering"
 REMINDER_DELIVERED = "delivered"
 _AUTOMATION_KINDS = frozenset({"reminder", "task"})
 _AUTOMATION_RECURRENCES = frozenset({"once", "daily", "weekly"})
+_DELIVERY_CHANNELS = frozenset({"local", "voice", "web", "telegram", "console"})
+
+
+def normalize_delivery_channel(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("delivery_channel must be voice, web, telegram, console, or local")
+    channel = value.strip().casefold()
+    if channel == "dashboard":
+        channel = "web"
+    if channel not in _DELIVERY_CHANNELS:
+        raise ValueError("delivery_channel must be voice, web, telegram, console, or local")
+    return channel
 
 
 def normalize_calendar_timestamp(value: str, field_name: str) -> str:
@@ -58,6 +70,7 @@ def _normalize_automation_schedule(
     first_run_at: str,
     recurrence: str,
     timezone_name: str,
+    delivery_channel: str = "local",
 ) -> dict[str, str]:
     if not isinstance(kind, str) or kind not in _AUTOMATION_KINDS:
         raise ValueError("kind must be reminder or task")
@@ -99,6 +112,7 @@ def _normalize_automation_schedule(
         "first_run_at": normalized_first_run,
         "recurrence": recurrence,
         "timezone": zone.key,
+        "delivery_channel": normalize_delivery_channel(delivery_channel),
     }
 
 
@@ -221,7 +235,10 @@ class CalendarStore:
                         reminder_attempt_count INTEGER NOT NULL DEFAULT 0,
                         reminder_last_error TEXT,
                         reminder_alert_accepted_at TEXT,
-                        reminder_voice_accepted_at TEXT
+                        reminder_voice_accepted_at TEXT,
+                        reminder_telegram_accepted_at TEXT,
+                        reminder_console_accepted_at TEXT,
+                        delivery_channel TEXT NOT NULL DEFAULT 'local'
                     )"""
                 )
                 columns = {
@@ -237,6 +254,9 @@ class CalendarStore:
                     "reminder_last_error": "TEXT",
                     "reminder_alert_accepted_at": "TEXT",
                     "reminder_voice_accepted_at": "TEXT",
+                    "reminder_telegram_accepted_at": "TEXT",
+                    "reminder_console_accepted_at": "TEXT",
+                    "delivery_channel": "TEXT NOT NULL DEFAULT 'local'",
                 }
                 for name, declaration in additions.items():
                     if name not in columns:
@@ -308,7 +328,8 @@ class CalendarStore:
                         active_run_result TEXT,
                         active_run_error TEXT,
                         created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL
+                        updated_at TEXT NOT NULL,
+                        delivery_channel TEXT NOT NULL DEFAULT 'local'
                     )"""
                 )
                 automation_columns = {
@@ -325,6 +346,7 @@ class CalendarStore:
                     "active_run_result": "TEXT",
                     "active_run_error": "TEXT",
                     "last_run_status": "TEXT",
+                    "delivery_channel": "TEXT NOT NULL DEFAULT 'local'",
                 }
                 for name, declaration in automation_additions.items():
                     if name not in automation_columns:
@@ -364,6 +386,7 @@ class CalendarStore:
         *,
         end_at: Optional[str] = None,
         reminder_at: Optional[str] = None,
+        delivery_channel: str = "local",
     ) -> dict:
         if not isinstance(title, str) or not title.strip():
             raise ValueError("title must be non-empty")
@@ -371,6 +394,7 @@ class CalendarStore:
             {"start_at": start_at, "end_at": end_at, "reminder_at": reminder_at},
             require_start=True,
         )
+        delivery_channel = normalize_delivery_channel(delivery_channel)
         event_id = uuid.uuid4().hex
         reminder_state = REMINDER_PENDING if values["reminder_at"] else REMINDER_NONE
 
@@ -378,8 +402,8 @@ class CalendarStore:
             with self._connection:
                 self._connection.execute(
                     """INSERT INTO calendar_events
-                       (id, title, start_at, end_at, reminder_at, reminder_state, reminder_revision)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                       (id, title, start_at, end_at, reminder_at, reminder_state, reminder_revision, delivery_channel)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         event_id,
                         title.strip(),
@@ -388,6 +412,7 @@ class CalendarStore:
                         values.get("reminder_at"),
                         reminder_state,
                         1 if values.get("reminder_at") else 0,
+                        delivery_channel,
                     ),
                 )
             return self._row(event_id)
@@ -414,13 +439,15 @@ class CalendarStore:
         return self._run("list calendar events", list_rows)
 
     def update_event(self, event_id: str, values: dict) -> dict:
-        allowed_names = {"title", "start_at", "end_at", "reminder_at", "completed"}
+        allowed_names = {"title", "start_at", "end_at", "reminder_at", "completed", "delivery_channel"}
         allowed = {key: values[key] for key in allowed_names if key in values}
         if not allowed:
             return self.get_event(event_id)
         if "title" in allowed and (not isinstance(allowed["title"], str) or not allowed["title"].strip()):
             raise ValueError("title must be non-empty")
         normalized = self._normalize_event_values(allowed)
+        if "delivery_channel" in normalized:
+            normalized["delivery_channel"] = normalize_delivery_channel(normalized["delivery_channel"])
 
         def update() -> dict:
             current = self._row(event_id)
@@ -430,7 +457,7 @@ class CalendarStore:
             update_values = dict(normalized)
             schedule_changed = any(
                 key in normalized and normalized[key] != current.get(key)
-                for key in ("title", "start_at", "end_at", "reminder_at")
+                for key in ("title", "start_at", "end_at", "reminder_at", "delivery_channel")
             )
             if schedule_changed:
                 revision = int(current.get("reminder_revision") or 0) + 1
@@ -545,11 +572,13 @@ class CalendarStore:
         channel: str,
         accepted_at: str,
     ) -> bool:
-        if channel not in {"alert", "voice"}:
+        if channel not in {"alert", "voice", "telegram", "console"}:
             raise ValueError("unknown reminder delivery channel")
         column = {
             "alert": "reminder_alert_accepted_at",
             "voice": "reminder_voice_accepted_at",
+            "telegram": "reminder_telegram_accepted_at",
+            "console": "reminder_console_accepted_at",
         }[channel]
 
         def record() -> bool:
@@ -633,8 +662,12 @@ class CalendarStore:
         first_run_at: str,
         recurrence: str,
         timezone_name: str = "Asia/Kolkata",
+        *,
+        delivery_channel: str = "local",
     ) -> dict:
-        values = _normalize_automation_schedule(kind, text, first_run_at, recurrence, timezone_name)
+        values = _normalize_automation_schedule(
+            kind, text, first_run_at, recurrence, timezone_name, delivery_channel
+        )
         schedule_id = uuid.uuid4().hex
         now = self._now_iso()
 
@@ -643,8 +676,8 @@ class CalendarStore:
                 self._connection.execute(
                     """INSERT INTO automation_schedules
                        (id, kind, text, first_run_at, recurrence, timezone, next_run_at,
-                        status, revision, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?)""",
+                        status, revision, created_at, updated_at, delivery_channel)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?)""",
                     (
                         schedule_id,
                         values["kind"],
@@ -655,6 +688,7 @@ class CalendarStore:
                         values["first_run_at"],
                         now,
                         now,
+                        values["delivery_channel"],
                     ),
                 )
             return self._automation_row(schedule_id)
@@ -676,7 +710,7 @@ class CalendarStore:
         )
 
     def update_automation(self, schedule_id: str, values: dict[str, Any]) -> dict:
-        allowed_names = {"kind", "text", "first_run_at", "recurrence", "timezone"}
+        allowed_names = {"kind", "text", "first_run_at", "recurrence", "timezone", "delivery_channel"}
         if not isinstance(values, dict):
             raise ValueError("automation update must be an object")
         unknown = set(values) - allowed_names
@@ -698,6 +732,7 @@ class CalendarStore:
                     merged["first_run_at"],
                     merged["recurrence"],
                     merged["timezone"],
+                    merged["delivery_channel"],
                 )
                 changed = {key: value for key, value in normalized.items() if value != current[key]}
                 if not changed:

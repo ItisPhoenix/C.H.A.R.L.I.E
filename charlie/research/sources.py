@@ -2,165 +2,51 @@
 
 from __future__ import annotations
 
+import json
 import re
-from typing import Dict, List, Optional, Set
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set
 from urllib.parse import urlparse
 
 from charlie.research.credibility import organisational_domain
 from charlie.research.models import ResearchBrief, SourceClass
 
-# Brand -> Primary registrable domains and official store URL hints
-# Keys are lower-case brand tokens.
-OFFICIAL_REGISTRY: Dict[str, Dict[str, any]] = {
-    "lenovo": {
-        "domains": {"lenovo.com"},
-        "store_paths": ["/in/en/p/", "/in/en/laptops/", "/in/en/d/"],
-        "aliases": ["loq", "legion", "thinkpad", "ideapad", "yoga"],
-    },
-    "asus": {
-        "domains": {"asus.com", "rog.asus.com"},
-        "store_paths": ["/in/store/", "/in/displays-desktops/", "/in/laptops/"],
-        "aliases": ["tuf", "rog", "zenbook", "vivobook"],
-    },
-    "hp": {
-        "domains": {"hp.com"},
-        "store_paths": ["/in-en/shop/", "/in-en/products/"],
-        "aliases": ["victus", "omen", "pavilion", "envy", "spectre"],
-    },
-    "dell": {
-        "domains": {"dell.com"},
-        "store_paths": ["/en-in/shop/"],
-        "aliases": ["alienware", "g15", "g16", "xps", "inspiron"],
-    },
-    "acer": {
-        "domains": {"acer.com"},
-        "store_paths": ["/in-en/store/"],
-        "aliases": ["predator", "nitro", "aspire", "swift"],
-    },
-    "msi": {
-        "domains": {"msi.com"},
-        "store_paths": ["/store/"],
-        "aliases": ["katana", "cyborg", "bravo", "thin", "stealth", "raider"],
-    },
-    "apple": {
-        "domains": {"apple.com"},
-        "store_paths": ["/in/shop/"],
-        "aliases": ["macbook", "mac", "iphone", "ipad"],
-    },
-    "samsung": {
-        "domains": {"samsung.com"},
-        "store_paths": ["/in/"],
-        "aliases": ["galaxy"],
-    },
-    "google": {
-        "domains": {"google.com"},
-        "store_paths": ["store.google.com"],
-        "aliases": ["pixel"],
-    },
-    "oneplus": {
-        "domains": {"oneplus.in", "oneplus.com"},
-        "store_paths": ["/in/"],
-        "aliases": [],
-    },
-    "xiaomi": {
-        "domains": {"mi.com"},
-        "store_paths": ["/in/"],
-        "aliases": ["redmi"],
-    },
-    "microsoft": {
-        "domains": {"microsoft.com"},
-        "store_paths": ["/en-in/store/"],
-        "aliases": ["surface"],
-    },
-    "razer": {
-        "domains": {"razer.com"},
-        "store_paths": ["/razerstore/"],
-        "aliases": ["blade"],
-    },
-    "gigabyte": {
-        "domains": {"gigabyte.com", "aorus.com"},
-        "store_paths": [],
-        "aliases": ["aorus"],
-    },
-    # Software & Standards
-    "python": {
-        "domains": {"python.org"},
-        "canonical_paths": ["/downloads/", "/downloads/release/"],
-        "aliases": [],
-    },
-    "nodejs": {
-        "domains": {"nodejs.org"},
-        "canonical_paths": ["/en/about/previous-releases"],
-        "aliases": ["node"],
-    },
-    "rust": {
-        "domains": {"rust-lang.org"},
-        "canonical_paths": [],
-        "aliases": [],
-    },
-    "httpx": {
-        "domains": {"python-httpx.org"},
-        "canonical_paths": [],
-        "documentation_urls": [
-            "https://www.python-httpx.org/async/",
-            "https://www.python-httpx.org/quickstart/",
-            "https://www.python-httpx.org/compatibility/",
-            "https://www.python-httpx.org/advanced/clients/",
-        ],
-        "aliases": [],
-    },
-    "aiohttp": {
-        "domains": {"aiohttp.org"},
-        "canonical_paths": [],
-        "documentation_urls": [
-            "https://docs.aiohttp.org/en/stable/client_quickstart.html",
-            "https://docs.aiohttp.org/en/stable/client_advanced.html",
-            "https://docs.aiohttp.org/en/stable/client_reference.html",
-        ],
-        "aliases": [],
-    },
-    "owasp": {
-        "domains": {"owasp.org"},
-        "canonical_paths": [],
-        "documentation_urls": [
-            "https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html",
-        ],
-        "aliases": [],
-    },
-    "portswigger": {
-        "domains": {"portswigger.net"},
-        "canonical_paths": [],
-        "documentation_urls": ["https://portswigger.net/web-security/ssrf"],
-        "aliases": [],
-    },
-    "searxng": {
-        "domains": {"searxng.org"},
-        "canonical_paths": [],
-        "documentation_urls": [
-            "https://docs.searxng.org/",
-            "https://docs.searxng.org/admin/settings/settings_search.html",
-            "https://docs.searxng.org/admin/settings/settings_engines.html",
-        ],
-        "aliases": [],
-    },
-    "crawl4ai": {
-        "domains": {"crawl4ai.com"},
-        "canonical_paths": [],
-        "documentation_urls": [
-            "https://docs.crawl4ai.com/",
-            "https://docs.crawl4ai.com/core/installation/",
-        ],
-        "aliases": [],
-    },
-    "scrapling": {
-        "domains": {"scrapling.readthedocs.io"},
-        "canonical_paths": [],
-        "documentation_urls": ["https://scrapling.readthedocs.io/en/latest/"],
-        "aliases": [],
-    },
-}
+# Brand -> primary registrable domains and official store URL hints.
+# Data lives in shared/official_sources.json; "tld" is shorthand for "<brand>.<tld>".
+_REGISTRY_PATH = Path(__file__).resolve().parents[2] / "shared" / "official_sources.json"
+
+
+def _load_official_registry() -> Dict[str, Dict[str, Any]]:
+    with _REGISTRY_PATH.open(encoding="utf-8") as registry_file:
+        payload = json.load(registry_file)
+    registry: Dict[str, Dict[str, Any]] = {}
+    for raw_brand, raw_info in payload.get("official_sources", {}).items():
+        brand = str(raw_brand).strip().lower()
+        domains = {str(item).strip().lower() for item in raw_info.get("domains") or []}
+        tld = str(raw_info.get("tld") or "").strip().lstrip(".")
+        if tld:
+            domains.add(f"{brand}.{tld}")
+        registry[brand] = {
+            "domains": domains,
+            "store_paths": list(raw_info.get("store_paths") or []),
+            "aliases": list(raw_info.get("aliases") or []),
+        }
+    return registry
+
+
+OFFICIAL_REGISTRY: Dict[str, Dict[str, Any]] = _load_official_registry()
 
 # Major Indian retailers
+PUBLIC_AUTHORITY_DOMAINS: Set[str] = {
+    "w3.org",
+    "ietf.org",
+    "iso.org",
+    "ecma-international.org",
+}
+GOVERNMENT_DOMAIN_SUFFIXES = (
+    ".gov", ".gov.uk", ".gc.ca", ".gov.au", ".gov.in", ".govt.nz", ".gouv.fr", ".go.jp",
+)
+
 RETAILERS_IN: Set[str] = {
     "amazon.in",
     "flipkart.com",
@@ -205,16 +91,20 @@ _FORUM_PATH_PATTERNS = [
 ]
 
 
-def resolve_brand(query_or_candidate: str) -> Optional[str]:
-    """Find known brand from text."""
+def resolve_brands(query_or_candidate: str) -> List[str]:
+    """Find every known publisher or brand named in text."""
     lower = query_or_candidate.lower()
+    matches: List[str] = []
     for brand, info in OFFICIAL_REGISTRY.items():
-        if re.search(rf"\b{re.escape(brand)}\b", lower):
-            return brand
-        for alias in info.get("aliases", []):
-            if re.search(rf"\b{re.escape(alias)}\b", lower):
-                return brand
-    return None
+        terms = [brand, *info.get("aliases", [])]
+        if any(re.search(rf"\b{re.escape(term)}\b", lower) for term in terms):
+            matches.append(brand)
+    return matches
+
+
+def resolve_brand(query_or_candidate: str) -> Optional[str]:
+    """Find the first known publisher or brand named in text."""
+    return next(iter(resolve_brands(query_or_candidate)), None)
 
 
 def get_official_domains(brand: str) -> List[str]:
@@ -223,11 +113,6 @@ def get_official_domains(brand: str) -> List[str]:
     if info:
         return sorted(list(info.get("domains", set())))
     return []
-
-
-def get_official_document_urls(brand: str) -> List[str]:
-    info = OFFICIAL_REGISTRY.get(brand.lower())
-    return list(info.get("documentation_urls", [])) if info else []
 
 
 def classify(
@@ -244,12 +129,23 @@ def classify(
     if not org_domain:
         return SourceClass.UNKNOWN
 
+    if org_domain in PUBLIC_AUTHORITY_DOMAINS or any(
+        host.endswith(suffix) for suffix in GOVERNMENT_DOMAIN_SUFFIXES
+    ):
+        return SourceClass.OFFICIAL
+
     # Check social / forum / community
     if org_domain in FORUM_SOCIAL_DOMAINS:
         return SourceClass.FORUM_SOCIAL
     if org_domain == "huggingface.co" and path.startswith("/blog/") and len(path.strip("/").split("/")) > 2:
         # Community user blog post
         return SourceClass.FORUM_SOCIAL
+
+    # A requested retailer or review site keeps its publisher identity.
+    if org_domain in RETAILERS_IN or host in RETAILERS_IN:
+        return SourceClass.RETAILER
+    if org_domain in REVIEW_SITES or host in REVIEW_SITES:
+        return SourceClass.REVIEW
 
     # Check explicit domains requested by user
     if brief and brief.explicit_domains:
@@ -289,13 +185,16 @@ def classify(
     if org_domain in REVIEW_SITES or host in REVIEW_SITES:
         return SourceClass.REVIEW
 
-    # Mark a publisher unverified-official when its registrable host matches the discovered developer name.
+    # Match the discovered publisher against the registrable host.
     if target_brand:
         generic_brand_terms = {"ai", "lab", "labs", "research", "the", "inc", "llc", "ltd", "company"}
         brand_terms = set(re.findall(r"[a-z0-9]+", target_brand.casefold())) - generic_brand_terms
         domain_terms = set(re.findall(r"[a-z0-9]+", org_domain.casefold())) - {
             "com", "org", "net", "co", "io", "ai", "dev", "app", "tech"
         }
+        if brand_terms and brand_terms == domain_terms:
+            # The registrable host is the vendor itself, so no registry row is needed.
+            return SourceClass.OFFICIAL
         if brand_terms and brand_terms.issubset(domain_terms):
             return SourceClass.OFFICIAL_UNVERIFIED
         compact_brand = "".join(sorted(brand_terms))
@@ -306,27 +205,27 @@ def classify(
     return SourceClass.UNKNOWN
 
 
-def citable_for(aspect: str, source_class: SourceClass | str, policy: str = "official_required") -> bool:
-    """Determine if a source class is allowed to ground a claim for a given aspect.
+def citation_source_class(
+    source_class: Optional[str],
+    url: str,
+    brief: Optional[ResearchBrief] = None,
+) -> str:
+    if source_class and source_class != SourceClass.UNKNOWN.value:
+        return source_class
+    return classify(url, brief=brief).value
 
-    Policy rules (Decision 2):
-    - Specs must come from OFFICIAL or OFFICIAL_STORE.
-    - Prices can come from OFFICIAL_STORE, or RETAILER (labelled as retailer price).
-    - FORUM_SOCIAL is NEVER citable for facts.
-    """
+
+def citable_for(aspect: str, source_class: SourceClass | str, policy: str = "official_required") -> bool:
+    """Apply the requested authority policy uniformly to model-selected evidence fields."""
     s_class = SourceClass(source_class) if isinstance(source_class, str) else source_class
 
     if s_class == SourceClass.FORUM_SOCIAL:
         return False
 
     if policy == "any_reputable":
-        return s_class not in (SourceClass.FORUM_SOCIAL, SourceClass.UNKNOWN)
+        return True
 
     # official_required or official_preferred
-    if aspect == "price":
-        # Official store is preferred; retailer allowed
-        return s_class in (SourceClass.OFFICIAL, SourceClass.OFFICIAL_STORE, SourceClass.RETAILER)
-
     # For specs, versions, release dates, hardware facts
     if policy == "official_required":
         return s_class in (SourceClass.OFFICIAL, SourceClass.OFFICIAL_STORE)

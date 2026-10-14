@@ -4,7 +4,7 @@ Defines:
 - CapabilityOperation: metadata, schema, risk, required leases, timeout, and verifier contract.
 - CapabilityDescriptor: domain ownership, provenance, operations, availability, and health checks.
 - CapabilityIndex: centralized discovery, registration, lookup, availability, and schema filtering
-  for all built-in, MCP, and extension capabilities.
+  for all built-in and extension capabilities.
 """
 
 from __future__ import annotations
@@ -38,7 +38,6 @@ _VALID_RISK_CLASSES = frozenset({
 
 _VALID_PROVENANCES = frozenset({
     "builtin",
-    "mcp",
     "extension",
 })
 
@@ -48,13 +47,13 @@ _OWNER_LABELS: Dict[str, str] = {
     "desktop": "Desktop control",
     "browser": "Controlled browser",
     "extensions": "Extensions",
-    "mcp": "MCP servers",
     "system": "System control & diagnostics",
     "research": "Web research",
     "terminal": "Terminal execution",
     "file": "File operations",
     "media": "Media control",
     "calendar": "Calendar",
+    "weather": "Weather",
     "vision": "Vision",
     "task": "Task management",
 }
@@ -68,12 +67,12 @@ _DEFAULT_DOMAIN_OWNERS: Dict[str, str] = {
     "file": "charlie.tools",
     "media": "main.media_authority",
     "calendar": "main.calendar_authority",
+    "weather": "charlie.weather_service",
     "vision": "charlie.desktop",
     "memory": "charlie.memory_store",
     "task": "charlie.task_journal",
     "tools": "charlie.tools",
     "extensions": "charlie.extensions",
-    "mcp": "charlie.mcp_client",
 }
 
 _DOMAIN_NAMES: Dict[str, str] = {
@@ -85,12 +84,12 @@ _DOMAIN_NAMES: Dict[str, str] = {
     "file": "FileCapability",
     "media": "MediaCapability",
     "calendar": "CalendarCapability",
+    "weather": "WeatherCapability",
     "vision": "VisionCapability",
     "memory": "MemoryCapability",
     "task": "TaskCapability",
     "tools": "GeneralToolsCapability",
     "extensions": "ExtensionsCapability",
-    "mcp": "MCPCapability",
 }
 
 _DOMAIN_DESCRIPTIONS: Dict[str, str] = {
@@ -102,12 +101,12 @@ _DOMAIN_DESCRIPTIONS: Dict[str, str] = {
     "file": "Local filesystem reading, writing, and workspace inspection",
     "media": "Volume and audio playback adapters",
     "calendar": "Calendar events and durable automation schedules",
+    "weather": "Current weather for resolved locations",
     "vision": "Screen capture, visual perception, and OCR grounding",
     "memory": "Persistent conversation memory, vector store, and knowledge graph",
     "task": "Task lifecycle, background tasks, and capability lease coordination",
     "tools": "General utility tools",
     "extensions": "Imported skills and OpenAPI extension tools",
-    "mcp": "Model Context Protocol external tools",
 }
 
 _DOMAIN_AVAILABILITY: Dict[str, Callable[[], bool]] = {
@@ -136,7 +135,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "id": "system.tool.propose",
         "domain": "system",
         "tool_registry_owner": "tools",
-        "risk_class": "safe",
+        "risk_class": "destructive",
         "timeout_sec": 15.0,
     },
     "system_control": {
@@ -147,6 +146,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "required_leases": ("media",),
         "timeout_sec": 15.0,
         "executor_type": "com_thread",
+        "verifier": "verify_volume",
     },
     "media_control": {
         "id": "media.control.execute",
@@ -156,6 +156,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "required_leases": ("media",),
         "timeout_sec": 15.0,
         "executor_type": "com_thread",
+        "verifier": "verify_volume",
     },
     "media_snapshot": {
         "id": "media.snapshot.read",
@@ -202,7 +203,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "id": "calendar.events.delete",
         "domain": "calendar",
         "tool_registry_owner": "calendar",
-        "risk_class": "reversible",
+        "risk_class": "destructive",
         "required_leases": ("calendar",),
         "timeout_sec": 15.0,
     },
@@ -214,6 +215,51 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "required_leases": ("calendar",),
         "timeout_sec": 15.0,
     },
+    "timer_create": {
+        "id": "calendar.timer.create",
+        "domain": "calendar",
+        "tool_registry_owner": "calendar",
+        "risk_class": "reversible",
+        "required_leases": ("calendar",),
+        "timeout_sec": 15.0,
+        "cacheable": False,
+        "verifier": "verify_automation_readback",
+    },
+    "timer_cancel": {
+        "id": "calendar.timer.cancel",
+        "domain": "calendar",
+        "tool_registry_owner": "calendar",
+        "risk_class": "reversible",
+        "required_leases": ("calendar",),
+        "timeout_sec": 15.0,
+        "cacheable": False,
+        "verifier": "verify_automation_readback",
+    },
+    "stopwatch_control": {
+        "id": "time.stopwatch.control",
+        "domain": "tools",
+        "tool_registry_owner": "tools",
+        "risk_class": "safe",
+        "timeout_sec": 5.0,
+        "cacheable": False,
+    },
+    "dashboard_widget_control": {
+        "id": "dashboard.widget.visibility",
+        "domain": "tools",
+        "tool_registry_owner": "tools",
+        "risk_class": "safe",
+        "timeout_sec": 5.0,
+        "cacheable": False,
+    },
+    "weather_get": {
+        "id": "weather.current.read",
+        "domain": "weather",
+        "tool_registry_owner": "weather",
+        "risk_class": "safe",
+        "timeout_sec": 12.0,
+        "cacheable": False,
+        "freshness_sec": 0.0,
+    },
     "automation_create": {
         "id": "automation.schedule.create",
         "domain": "calendar",
@@ -221,6 +267,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "risk_class": "reversible",
         "required_leases": ("calendar",),
         "timeout_sec": 15.0,
+        "verifier": "verify_automation_readback",
     },
     "automation_update": {
         "id": "automation.schedule.update",
@@ -229,6 +276,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "risk_class": "reversible",
         "required_leases": ("calendar",),
         "timeout_sec": 15.0,
+        "verifier": "verify_automation_readback",
     },
     "automation_get": {
         "id": "automation.schedule.get",
@@ -253,6 +301,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "risk_class": "reversible",
         "required_leases": ("calendar",),
         "timeout_sec": 15.0,
+        "verifier": "verify_automation_readback",
     },
     "capabilities": {
         "id": "system.capabilities.roster",
@@ -277,6 +326,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "risk_class": "destructive",
         "required_leases": ("desktop",),
         "timeout_sec": 15.0,
+        "verifier": "verify_app_close",
     },
     "desktop_open_url": {
         "id": "desktop.browser.open_url",
@@ -461,6 +511,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "risk_class": "reversible",
         "required_leases": ("terminal",),
         "timeout_sec": 30.0,
+        "verifier": "verify_terminal_command",
     },
     # File
     "file_read": {
@@ -475,7 +526,9 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "domain": "file",
         "tool_registry_owner": "tools",
         "risk_class": "reversible",
+        "required_leases": ("file",),
         "timeout_sec": 10.0,
+        "verifier": "verify_file_write",
     },
     "download_public_pdf": {
         "id": "file.public_pdf.download",
@@ -532,7 +585,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "id": "memory.graph.consolidate",
         "domain": "memory",
         "tool_registry_owner": "memory",
-        "risk_class": "reversible",
+        "risk_class": "destructive",
         "timeout_sec": 15.0,
     },
     # Task
@@ -566,6 +619,18 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# Every mutating builtin declares a verifier policy. Unsupported readback stays
+# explicit so the shared execution boundary can report it as unavailable.
+_SEMANTIC_ACTIONS = frozenset({
+    "cancel", "click", "close", "compatibility", "control", "create", "delete", "drag", "execute",
+    "focus", "invoke", "manage", "move", "navigate", "open", "press", "scroll", "type", "update",
+    "visibility", "add_fact", "consolidate", "start",
+})
+for _builtin_metadata in BUILTIN_TOOL_METADATA.values():
+    semantic_action = _builtin_metadata.get("id", "").rsplit(".", 1)[-1] in _SEMANTIC_ACTIONS
+    if _builtin_metadata.get("risk_class") != "safe" or semantic_action:
+        _builtin_metadata.setdefault("verifier", "unavailable")
+
 # Non-cacheable operations must execute through the current capability owner.
 _NON_CACHEABLE_TOOLS = frozenset({
     "system_diagnostics",
@@ -595,12 +660,17 @@ _NON_CACHEABLE_TOOLS = frozenset({
     "calendar_get",
     "automation_get",
     "automation_list",
+    "timer_create",
+    "timer_cancel",
+    "stopwatch_control",
+    "dashboard_widget_control",
     "vector_memory",
     "session_search",
     "recall_results",
     "graph_query",
     "web_search",
     "web_research",
+    "weather_get",
 })
 _POLLABLE_OBSERVATION_TOOLS = frozenset({
     "system_diagnostics",
@@ -938,6 +1008,7 @@ def register_tool_in_index(
     cacheable: Optional[bool] = None,
     freshness_sec: Optional[float] = None,
     poll_interval_sec: Optional[float] = None,
+    required_leases: Optional[Tuple[str, ...]] = None,
 ) -> CapabilityOperation:
     """Register a tool into CapabilityIndex, creating domain descriptor on-demand if needed."""
     if index is None:
@@ -952,19 +1023,24 @@ def register_tool_in_index(
         timeout_sec = meta.get("timeout_sec", 15.0)
         executor_type = meta.get("executor_type")
         verifier = meta.get("verifier")
+        if verifier is not None:
+            from charlie.verifiers import is_registered_verifier
+
+            if not is_registered_verifier(verifier):
+                raise ValueError(
+                    f"Tool '{name}' declares unregistered verifier '{verifier}'"
+                )
         eff_cacheable = meta.get("cacheable", executor_type != "com_thread")
         eff_freshness_sec = meta.get("freshness_sec", freshness_sec)
         eff_poll_interval_sec = meta.get("poll_interval_sec", poll_interval_sec)
     else:
         domain = owner or "tools"
-        if owner.startswith("mcp"):
-            domain = owner
-        elif owner == "extensions":
+        if owner == "extensions":
             domain = "extensions"
 
         op_id = f"{domain}.{name}"
         eff_risk = risk_class or "security_sensitive"
-        required_leases = ()
+        required_leases = required_leases or ()
         timeout_sec = 15.0
         executor_type = None
         verifier = None
@@ -993,10 +1069,7 @@ def register_tool_in_index(
     if cap_desc is None:
         provenance = "builtin"
         source = None
-        if domain.startswith("mcp"):
-            provenance = "mcp"
-            source = domain.split(".", 1)[1] if "." in domain else "mcp"
-        elif domain == "extensions" or domain.startswith("extension"):
+        if domain == "extensions" or domain.startswith("extension"):
             provenance = "extension"
 
         owner_module = _DEFAULT_DOMAIN_OWNERS.get(domain, f"charlie.{domain}")

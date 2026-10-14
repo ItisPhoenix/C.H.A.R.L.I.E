@@ -363,25 +363,96 @@ class WorldModel:
         char_budget. Not semantic search -- active state is relevant on
         every turn.
         """
+        if char_budget <= 0:
+            return ""
+
+        def _read():
+            threads = self.conn.execute(
+                "SELECT substr(id, 1, 65), length(id) > 64, "
+                "substr(title, 1, ?), substr(summary, 1, ?), "
+                "substr(session_id, 1, 129), length(session_id) > 129 FROM threads "
+                "WHERE status = 'open' ORDER BY updated_at DESC LIMIT 5",
+                (char_budget, char_budget),
+            ).fetchall()
+            rules = self.conn.execute(
+                "SELECT substr(id, 1, 65), length(id) > 64, "
+                "substr(rule_text, 1, ?), substr(source, 1, 129), "
+                "length(source) > 129 FROM rules "
+                "WHERE status = 'active' ORDER BY confidence DESC LIMIT 5",
+                (char_budget,),
+            ).fetchall()
+            errors = self.conn.execute(
+                "SELECT event_type, substr(detail, 1, 200), substr(created_at, 1, 41), "
+                "length(created_at) > 41 FROM machine_events "
+                "WHERE event_type = 'tool_error' ORDER BY created_at DESC LIMIT 3"
+            ).fetchall()
+            return threads, rules, errors
+
+        rows = self._with_retry(_read, "context_slice", reraise=False)
+        if not rows:
+            return ""
+
+        threads, rules, errors = rows
+        sections = [
+            (
+                "Open threads:",
+                [
+                    (
+                        f"- [source=threads; thread_id={thread_id}; "
+                        f"session_id={json.dumps(session_id, ensure_ascii=False)}"
+                        f"{' (truncated)' if session_truncated else ''}; trust=untrusted] ",
+                        title + (f": {summary}" if summary else ""),
+                    )
+                    for thread_id, id_truncated, title, summary, session_id, session_truncated in threads
+                    if not id_truncated
+                ],
+            ),
+            (
+                "Learned rules:",
+                [
+                    (
+                        f"- [source=rules; signal={json.dumps(source, ensure_ascii=False)}"
+                        f"{' (truncated)' if source_truncated else ''}; rule_id={rule_id}; trust=untrusted] ",
+                        rule_text,
+                    )
+                    for rule_id, id_truncated, rule_text, source, source_truncated in rules
+                    if not id_truncated
+                ],
+            ),
+            (
+                "Recent errors:",
+                [
+                    (
+                        f"- [source=machine_events; type={event_type}; "
+                        f"recorded_at={json.dumps(created_at, ensure_ascii=False)}"
+                        f"{' (truncated)' if timestamp_truncated else ''}; trust=untrusted] ",
+                        detail,
+                    )
+                    for event_type, detail, created_at, timestamp_truncated in errors
+                ],
+            ),
+        ]
+
         parts: List[str] = []
-        threads = self.list_open_threads(limit=5)
-        if threads:
-            parts.append("Open threads:")
-            for _id, title, summary in threads:
-                line = f"- {title}" + (f": {summary}" if summary else "")
-                parts.append(line)
+        used = 0
+        for heading, records in sections:
+            heading_cost = len(heading) + (1 if parts else 0)
+            if not any(
+                payload and char_budget - used - heading_cost - 1 - len(prefix) > 0
+                for prefix, payload in records
+            ):
+                continue
+            if parts:
+                used += 1
+            parts.append(heading)
+            used += len(heading)
+            for prefix, payload in records:
+                available = char_budget - used - 1
+                if available <= len(prefix):
+                    continue
+                text = payload[:available - len(prefix)]
+                if text:
+                    parts.append(prefix + text)
+                    used += 1 + len(prefix) + len(text)
 
-        rules = self.active_rules(limit=5)
-        if rules:
-            parts.append("Learned rules:")
-            for _id, rule_text in rules:
-                parts.append(f"- {rule_text}")
-
-        errors = self.recent_events(limit=3, event_type="tool_error")
-        if errors:
-            parts.append("Recent errors:")
-            for _etype, detail, _created in errors:
-                parts.append(f"- {detail}")
-
-        text = "\n".join(parts)
-        return text[:char_budget]
+        return "\n".join(parts)

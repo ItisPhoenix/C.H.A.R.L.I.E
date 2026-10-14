@@ -6,8 +6,9 @@ export type SceneSnapshot = {
   sessionId?: string;
   summary?: string;
   details: Array<{ label: string; value: string }>;
-  conversationHistory?: Array<{ id: string; role: "you" | "charlie"; text: string }>;
+  conversationHistory?: Array<{ id: string; role: "you" | "charlie"; text: string; turnId?: string }>;
   activity?: RuntimeEvent[];
+  widgets?: DashboardWidgets;
   tasks?: RuntimeTask[];
   conversationState?: "working" | "ready";
   activeTurnId?: string | null;
@@ -73,15 +74,31 @@ export type ResearchFact = {
   url: string;
 };
 
+export type ResearchResource = {
+  title: string;
+  url: string;
+  domain: string;
+};
+
+export type ResearchProviderOutcome = {
+  status: "ok" | "empty" | "failed" | "unavailable" | "challenge";
+  resultCount: number;
+};
+
 export type ResearchResultData = {
   id: string;
   text: string;
   query: string;
+  turnId?: string;
+  channel?: "voice" | "telegram" | "web" | "console";
+  mode?: "quick" | "standard" | "deep";
   answer?: string;
   partial?: boolean;
   synthesis?: string;
   gaps?: string[];
   sources?: ResearchSource[];
+  searchResults?: ResearchResource[];
+  readPages?: ResearchResource[];
   sourceUrls?: string[];
   searchResultCount?: number;
   documentCount?: number;
@@ -89,6 +106,7 @@ export type ResearchResultData = {
   passageCount?: number;
   factCount?: number;
   durationMs?: number;
+  providerOutcomes?: ResearchProviderOutcome[];
   stopReason?: string;
   completeness?: "complete" | "partial" | "none";
   terminationReason?: "completed" | "deadline" | "cancelled" | "provider_exhausted" | "error";
@@ -119,12 +137,45 @@ export type RuntimeTask = {
   updatedAt?: string;
 };
 
+export type DashboardWidgets = {
+  clockVisible: boolean;
+  hiddenWidgets?: string[];
+  timers: Array<{ id: string; text: string; dueAt: string; timezone?: string; deliveryChannel?: "web" | "voice" }>;
+  systemStatus?: DashboardSystemStatus;
+  weather?: {
+    location: string;
+    temperature: number;
+    temperatureUnit: string;
+    feelsLike?: number;
+    humidity?: number;
+    windSpeed?: number;
+    windSpeedUnit?: string;
+    weatherCode?: number;
+    observedAt?: string;
+    sunset?: string;
+  };
+  stopwatch?: { state: "running" | "stopped"; elapsedSeconds: number; sampledAt: string };
+  media?: { available: boolean; adapterAvailable: boolean; title: string; artist: string; app?: string; artUri?: string; status: string; positionSeconds: number; durationSeconds: number };
+};
+
+export type DashboardSystemStatus = {
+  cpuPercent: number;
+  memoryPercent: number;
+  gpuPercent?: number;
+  diskPercent?: number;
+  networkKBPerSecond?: number;
+  uptimeSeconds?: number;
+  batteryPercent?: number;
+  sampledAtMs?: number;
+};
+
 export function orbStateForEvent(event: string | Pick<RuntimeEvent, "type" | "stage">): OrbState | null {
   const { type, stage } = typeof event === "string" ? { type: event, stage: undefined } : event;
   if (["transcript", "vad_start", "ptt_start"].includes(type)) return "listening";
   if (type === "research_progress") {
     if (stage === "planning") return "weaving";
     if (stage === "found") return "shaping";
+    if (stage === "synthesizing") return "composing";
     if (["searching", "reading"].includes(stage ?? "")) return "searching";
     if (["iterating", "done"].includes(stage ?? "")) return "solving";
     return "searching";
@@ -138,6 +189,9 @@ export function orbStateForEvent(event: string | Pick<RuntimeEvent, "type" | "st
 }
 
 export type RuntimeEvent = {
+  sourceCount?: number;
+  evidenceCount?: number;
+  findingCount?: number;
   id?: string;
   type: string;
   source?: string;
@@ -148,11 +202,17 @@ export type RuntimeEvent = {
   level?: number;
   summary?: string;
   stage?: string;
+  query?: string;
+  taskId?: string;
+  turnId?: string;
+  sessionId?: string;
   resultId?: string;
   requestId?: string;
   channel?: "voice" | "telegram" | "web" | "console";
   operationPreview?: string;
   researchResult?: ResearchResultData;
+  widgets?: DashboardWidgets;
+  systemStatus?: DashboardSystemStatus;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -163,6 +223,25 @@ function stringList(value: unknown, limit = 240): string[] | undefined {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string").slice(0, limit)
     : undefined;
+}
+
+function parseSystemStatus(value: unknown): DashboardSystemStatus | undefined {
+  if (!isRecord(value)
+    || !finiteNumber(value.cpu) || value.cpu < 0 || value.cpu > 100
+    || !finiteNumber(value.ram) || value.ram < 0 || value.ram > 100) return undefined;
+  return {
+    cpuPercent: value.cpu,
+    memoryPercent: value.ram,
+    ...(finiteNumber(value.gpu) && value.gpu >= 0 && value.gpu <= 100 ? { gpuPercent: value.gpu } : {}),
+    ...(finiteNumber(value.disk_percent) && value.disk_percent >= 0 && value.disk_percent <= 100
+      ? { diskPercent: value.disk_percent } : {}),
+    ...(finiteNumber(value.net_kbps) && value.net_kbps >= 0 ? { networkKBPerSecond: value.net_kbps } : {}),
+    ...(finiteNumber(value.uptime_seconds) && value.uptime_seconds >= 0 ? { uptimeSeconds: value.uptime_seconds } : {}),
+    ...(finiteNumber(value.battery_percent) && value.battery_percent >= 0 && value.battery_percent <= 100
+      ? { batteryPercent: value.battery_percent } : {}),
+    ...(Number.isSafeInteger(value.sampled_at_ms) && Number(value.sampled_at_ms) >= 0
+      ? { sampledAtMs: Number(value.sampled_at_ms) } : {}),
+  };
 }
 
 function webUrl(value: unknown): value is string {
@@ -184,6 +263,28 @@ function parseResearchResult(value: unknown): ResearchResultData | undefined {
       return [{ id: item.id, title: item.title, url: item.url, ...(typeof item.class === "string" ? { class: item.class } : {}) }];
     }).slice(0, 80)
     : [];
+  const sourceUrls = Array.isArray(value.source_urls)
+    ? value.source_urls.filter(webUrl).slice(0, 80)
+    : undefined;
+  const resources = (key: "search_results" | "read_pages"): ResearchResource[] => Array.isArray(value[key])
+    ? value[key].flatMap((item) => {
+      if (!isRecord(item)) return [];
+      const url = webUrl(item.url) ? item.url : item.canonical_url;
+      if (!webUrl(url)) return [];
+      const domain = typeof item.domain === "string" && item.domain ? item.domain : new URL(url).hostname;
+      return [{
+        title: typeof item.title === "string" && item.title.trim() ? item.title : domain,
+        url,
+        domain,
+      }];
+    }).slice(0, 80)
+    : [];
+  const searchResults = resources("search_results");
+  const fetchedPages = resources("read_pages");
+  const readPages = fetchedPages.length ? fetchedPages : (sourceUrls ?? []).map((url) => {
+    const domain = new URL(url).hostname;
+    return { title: sources.find((source) => source.url === url)?.title || domain, url, domain };
+  });
   const coverage: ResearchCoverage[] = Array.isArray(value.coverage)
     ? value.coverage.flatMap((item) => {
       if (!isRecord(item) || typeof item.id !== "string" || typeof item.question !== "string") return [];
@@ -247,22 +348,36 @@ function parseResearchResult(value: unknown): ResearchResultData | undefined {
       return [{ candidate: typeof item.candidate === "string" ? item.candidate : null, aspect: item.aspect, value: item.value, quote: item.quote, sourceId: item.source_id, url: item.url }];
     }).slice(0, 240)
     : [];
-  const sourceUrls = Array.isArray(value.source_urls)
-    ? value.source_urls.filter(webUrl).slice(0, 80)
-    : undefined;
+  const providerOutcomes: ResearchProviderOutcome[] = Array.isArray(value.provider_outcomes)
+    ? value.provider_outcomes.flatMap((item) => {
+      if (!isRecord(item)) return [];
+      if (!(["ok", "empty", "failed", "unavailable", "challenge"] as const).includes(item.status as ResearchProviderOutcome["status"])) return [];
+      if (typeof item.result_count !== "number" || !Number.isSafeInteger(item.result_count) || item.result_count < 0) return [];
+      const status = item.status as ResearchProviderOutcome["status"];
+      const countMatchesStatus = status === "ok" ? item.result_count > 0 : item.result_count === 0;
+      if (!countMatchesStatus) return [];
+      return [{ status, resultCount: item.result_count }];
+    }).slice(0, 240)
+    : [];
   const count = (key: string) => typeof value[key] === "number" && Number.isSafeInteger(value[key]) && value[key] >= 0 ? value[key] as number : undefined;
   const durationMs = typeof value.duration_ms === "number" && Number.isFinite(value.duration_ms) && value.duration_ms >= 0 ? value.duration_ms : undefined;
   const completeness = ["complete", "partial", "none"].includes(String(value.completeness)) ? value.completeness as ResearchResultData["completeness"] : undefined;
   const terminationReason = ["completed", "deadline", "cancelled", "provider_exhausted", "error"].includes(String(value.termination_reason)) ? value.termination_reason as ResearchResultData["terminationReason"] : undefined;
+  const mode = ["quick", "standard", "deep"].includes(String(value.mode)) ? value.mode as ResearchResultData["mode"] : undefined;
   return {
     id,
     text: value.text,
     query: value.query,
+    ...(typeof value.turn_id === "string" ? { turnId: value.turn_id } : {}),
+    ...(["voice", "telegram", "web", "console"].includes(String(value.channel)) ? { channel: value.channel as ResearchResultData["channel"] } : {}),
+    ...(mode ? { mode } : {}),
     ...(typeof value.answer === "string" ? { answer: value.answer } : {}),
     ...(typeof value.partial === "boolean" ? { partial: value.partial } : {}),
     ...(typeof value.synthesis === "string" ? { synthesis: value.synthesis } : {}),
     ...(stringList(value.gaps, 80) ? { gaps: stringList(value.gaps, 80) } : {}),
-    ...(sources.length ? { sources } : {}),
+    ...(Array.isArray(value.sources) ? { sources } : {}),
+    ...(Array.isArray(value.search_results) ? { searchResults } : {}),
+    ...(Array.isArray(value.read_pages) || sourceUrls?.length ? { readPages } : {}),
     ...(sourceUrls ? { sourceUrls } : {}),
     ...(count("search_result_count") !== undefined ? { searchResultCount: count("search_result_count") } : {}),
     ...(count("document_count") !== undefined ? { documentCount: count("document_count") } : {}),
@@ -270,6 +385,7 @@ function parseResearchResult(value: unknown): ResearchResultData | undefined {
     ...(count("passage_count") !== undefined ? { passageCount: count("passage_count") } : {}),
     ...(count("fact_count") !== undefined ? { factCount: count("fact_count") } : {}),
     ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(providerOutcomes.length ? { providerOutcomes } : {}),
     ...(typeof value.stop_reason === "string" ? { stopReason: value.stop_reason } : {}),
     ...(completeness ? { completeness } : {}),
     ...(terminationReason ? { terminationReason } : {}),
@@ -278,6 +394,83 @@ function parseResearchResult(value: unknown): ResearchResultData | undefined {
     ...(claims.length ? { claims } : {}),
     ...(verifiedFacts.length ? { verifiedFacts } : {}),
     ...(typeof value.completed_at === "string" ? { completedAt: value.completed_at } : {}),
+  };
+}
+
+function finiteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function parseDashboardWidgets(value: unknown): DashboardWidgets | undefined {
+  if (!isRecord(value)) return undefined;
+  const timers = Array.isArray(value.timers)
+    ? value.timers.flatMap((item) => {
+      if (!isRecord(item) || typeof item.id !== "string" || typeof item.text !== "string" || typeof item.due_at !== "string" || !Number.isFinite(Date.parse(item.due_at))) return [];
+      return [{
+        id: item.id,
+        text: item.text,
+        dueAt: item.due_at,
+        ...(typeof item.timezone === "string" ? { timezone: item.timezone } : {}),
+        ...(item.delivery_channel === "web" || item.delivery_channel === "voice"
+          ? { deliveryChannel: item.delivery_channel as "web" | "voice" }
+          : {}),
+      }];
+    }).slice(0, 8)
+    : [];
+  const weatherRaw = isRecord(value.weather) ? value.weather : null;
+  const weather = weatherRaw
+    && typeof weatherRaw.location === "string"
+    && finiteNumber(weatherRaw.temperature)
+    && typeof weatherRaw.temperature_unit === "string"
+    ? {
+      location: weatherRaw.location,
+      temperature: weatherRaw.temperature,
+      temperatureUnit: weatherRaw.temperature_unit,
+      ...(finiteNumber(weatherRaw.feels_like) ? { feelsLike: weatherRaw.feels_like } : {}),
+      ...(finiteNumber(weatherRaw.humidity) ? { humidity: weatherRaw.humidity } : {}),
+      ...(finiteNumber(weatherRaw.wind_speed) ? { windSpeed: weatherRaw.wind_speed } : {}),
+      ...(typeof weatherRaw.wind_speed_unit === "string" ? { windSpeedUnit: weatherRaw.wind_speed_unit } : {}),
+      ...(Number.isInteger(weatherRaw.weather_code) ? { weatherCode: weatherRaw.weather_code as number } : {}),
+      ...(typeof weatherRaw.observed_at === "string" ? { observedAt: weatherRaw.observed_at } : {}),
+      ...(typeof weatherRaw.sunset === "string" ? { sunset: weatherRaw.sunset } : {}),
+    }
+    : undefined;
+  const stopwatchRaw = isRecord(value.stopwatch) ? value.stopwatch : null;
+  const stopwatch = stopwatchRaw
+    && (stopwatchRaw.state === "running" || stopwatchRaw.state === "stopped")
+    && finiteNumber(stopwatchRaw.elapsed_seconds)
+    && stopwatchRaw.elapsed_seconds >= 0
+    && typeof stopwatchRaw.sampled_at === "string"
+    && Number.isFinite(Date.parse(stopwatchRaw.sampled_at))
+    ? { state: stopwatchRaw.state as "running" | "stopped", elapsedSeconds: stopwatchRaw.elapsed_seconds, sampledAt: stopwatchRaw.sampled_at }
+    : undefined;
+  const mediaRaw = isRecord(value.media) ? value.media : null;
+  const mediaArtwork = typeof mediaRaw?.art_uri === "string"
+    && mediaRaw.art_uri.length <= 2_000_000
+    && /^data:image\/jpeg;base64,[A-Za-z0-9+/]+={0,2}$/.test(mediaRaw.art_uri)
+    ? mediaRaw.art_uri
+    : undefined;
+  const media = mediaRaw
+    && typeof mediaRaw.available === "boolean"
+    && typeof mediaRaw.adapter_available === "boolean"
+    && typeof mediaRaw.title === "string"
+    && typeof mediaRaw.artist === "string"
+    && typeof mediaRaw.status === "string"
+    && finiteNumber(mediaRaw.position_seconds) && mediaRaw.position_seconds >= 0
+    && finiteNumber(mediaRaw.duration_seconds) && mediaRaw.duration_seconds >= 0
+    ? { available: mediaRaw.available, adapterAvailable: mediaRaw.adapter_available, title: mediaRaw.title, artist: mediaRaw.artist, ...(typeof mediaRaw.app === "string" ? { app: mediaRaw.app } : {}), ...(mediaArtwork ? { artUri: mediaArtwork } : {}), status: mediaRaw.status, positionSeconds: mediaRaw.position_seconds, durationSeconds: mediaRaw.duration_seconds }
+    : undefined;
+  const systemStatus = parseSystemStatus(value.system_status);
+  return {
+    clockVisible: value.clock_visible !== false,
+    hiddenWidgets: Array.isArray(value.hidden_widgets)
+      ? value.hidden_widgets.filter((id): id is string => typeof id === "string" && id.length <= 128 && /^(?:weather|stopwatch|music|system_status|timer|timer:.+)$/.test(id)).slice(0, 64)
+      : [],
+    timers,
+    ...(systemStatus ? { systemStatus } : {}),
+    ...(weather ? { weather } : {}),
+    ...(stopwatch ? { stopwatch } : {}),
+    ...(media ? { media } : {}),
   };
 }
 
@@ -297,7 +490,7 @@ export function parseSnapshot(value: unknown): SceneSnapshot | null {
       if (!item || typeof item !== "object") return [];
       const message = item as Record<string, unknown>;
       if (typeof message.id !== "string" || !["you", "charlie"].includes(String(message.role)) || typeof message.text !== "string") return [];
-      return [{ id: message.id, role: message.role as "you" | "charlie", text: message.text }];
+      return [{ id: message.id, role: message.role as "you" | "charlie", text: message.text, ...(typeof message.turn_id === "string" ? { turnId: message.turn_id } : {}) }];
     })
     : undefined;
   const activity = Array.isArray(raw.activity)
@@ -306,6 +499,7 @@ export function parseSnapshot(value: unknown): SceneSnapshot | null {
       return event ? [event] : [];
     })
     : undefined;
+  const widgets = parseDashboardWidgets(raw.widgets);
   const voice = raw.voice && typeof raw.voice === "object" ? raw.voice as Record<string, unknown> : null;
   const conversation = raw.conversation && typeof raw.conversation === "object" ? raw.conversation as Record<string, unknown> : null;
   if (raw.research_results !== undefined && !Array.isArray(raw.research_results)) return null;
@@ -349,6 +543,7 @@ export function parseSnapshot(value: unknown): SceneSnapshot | null {
     details: (raw.details as SceneSnapshot["details"] | undefined) ?? [],
     ...(conversationHistory ? { conversationHistory } : {}),
     ...(activity ? { activity } : {}),
+    ...(widgets ? { widgets } : {}),
     ...(conversation && (conversation.state === "working" || conversation.state === "ready") ? { conversationState: conversation.state } : {}),
     ...(typeof raw.active_turn_id === "string" || raw.active_turn_id === null ? { activeTurnId: raw.active_turn_id as string | null } : {}),
     ...(typeof raw.active_task_id === "string" || raw.active_task_id === null ? { activeTaskId: raw.active_task_id as string | null } : {}),
@@ -381,9 +576,17 @@ export function parseRuntimeEvent(value: unknown): RuntimeEvent | null {
   const eventLevel = typeof payload.level === "number" && Number.isFinite(payload.level) ? Math.max(0, Math.min(1, payload.level)) : undefined;
   const eventSummary = [payload.title, payload.current_action, payload.action, payload.message, payload.name, payload.text]
     .find((value): value is string => typeof value === "string" && value.trim().length > 0);
+  const taskId = typeof raw.task_id === "string" ? raw.task_id : typeof payload.task_id === "string" ? payload.task_id : undefined;
+  const turnId = typeof raw.turn_id === "string" ? raw.turn_id : typeof payload.turn_id === "string" ? payload.turn_id : undefined;
   const researchResult = raw.type === "research_result" ? parseResearchResult(payload) : undefined;
+  const widgets = raw.type === "dashboard_widgets" ? parseDashboardWidgets(payload.widgets) : undefined;
+  const systemStatus = raw.type === "system_status" ? parseSystemStatus(payload) : undefined;
+  const count = (key: string) => typeof payload[key] === "number" && Number.isSafeInteger(payload[key]) && Number(payload[key]) >= 0 ? Number(payload[key]) : undefined;
   return {
     type: raw.type,
+    ...(count("source_count") !== undefined ? { sourceCount: count("source_count") } : {}),
+    ...(count("evidence_count") !== undefined ? { evidenceCount: count("evidence_count") } : {}),
+    ...(count("finding_count") !== undefined ? { findingCount: count("finding_count") } : {}),
     ...(typeof raw.id === "string" ? { id: raw.id } : {}),
     ...(typeof raw.source === "string" ? { source: raw.source } : {}),
     ...(typeof raw.timestamp === "string" ? { timestamp: raw.timestamp } : {}),
@@ -393,13 +596,19 @@ export function parseRuntimeEvent(value: unknown): RuntimeEvent | null {
     ...(eventLevel !== undefined ? { level: eventLevel } : {}),
     ...(eventSummary ? { summary: eventSummary } : {}),
     ...(typeof payload.stage === "string" ? { stage: payload.stage } : {}),
+    ...(typeof payload.query === "string" ? { query: payload.query } : {}),
+    ...(taskId !== undefined ? { taskId } : {}),
+    ...(turnId !== undefined ? { turnId } : {}),
+    ...(typeof raw.session_id === "string" ? { sessionId: raw.session_id } : typeof payload.session_id === "string" ? { sessionId: payload.session_id } : {}),
     ...(typeof payload.result_id === "string" ? { resultId: payload.result_id } : {}),
     ...(typeof payload.request_id === "string" ? { requestId: payload.request_id } : {}),
     ...(["voice", "telegram", "web", "console"].includes(String(payload.channel)) ? {
       channel: payload.channel as RuntimeEvent["channel"],
     } : {}),
     ...(typeof payload.operation_preview === "string" ? { operationPreview: payload.operation_preview } : {}),
-    ...(researchResult ? { researchResult } : {}),
+    ...(researchResult ? { researchResult: turnId !== undefined ? { ...researchResult, turnId } : researchResult } : {}),
+    ...(widgets ? { widgets } : {}),
+    ...(systemStatus ? { systemStatus } : {}),
   };
 }
 
@@ -438,6 +647,28 @@ export async function postRuntimeCommand(command: Record<string, unknown>, fetch
   return ack.accepted === true || ack.status === "accepted";
 }
 
-export function postCommand(text: string, fetcher: typeof fetch = fetch): Promise<boolean> {
-  return postRuntimeCommand({ type: "submit_text", text }, fetcher);
+const pendingTextCommands = new Map<string, string>();
+
+export function pendingTextCommandId(text: string, sessionId: string): string {
+  const key = `${sessionId}\0${text.trim()}`;
+  const existing = pendingTextCommands.get(key);
+  if (existing) {
+    pendingTextCommands.delete(key);
+    pendingTextCommands.set(key, existing);
+    return existing;
+  }
+  const requestId = crypto.randomUUID();
+  pendingTextCommands.set(key, requestId);
+  if (pendingTextCommands.size > 32) pendingTextCommands.delete(pendingTextCommands.keys().next().value!);
+  return requestId;
+}
+
+export async function postCommand(text: string, fetcher: typeof fetch = fetch, sessionId = ""): Promise<boolean> {
+  const cleanText = text.trim();
+  const requestId = pendingTextCommandId(cleanText, sessionId);
+  const accepted = await postRuntimeCommand({
+    type: "submit_text", text: cleanText, session_id: sessionId, request_id: requestId,
+  }, fetcher);
+  if (accepted) pendingTextCommands.delete(`${sessionId}\0${cleanText}`);
+  return accepted;
 }

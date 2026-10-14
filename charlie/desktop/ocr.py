@@ -110,7 +110,7 @@ def ocr_marks(png_bytes: bytes, min_conf: int = _MIN_CONF_DEFAULT) -> List[Eleme
         pytesseract.pytesseract.tesseract_cmd = config.tesseract_cmd
     try:
         img = Image.open(io.BytesIO(png_bytes))
-        data = pytesseract.image_to_data(img, output_type=Output.DICT)
+        data = pytesseract.image_to_data(img, output_type=Output.DICT, timeout=8)
     except Exception:
         logger.warning("OCR pass failed", exc_info=True)
         return []

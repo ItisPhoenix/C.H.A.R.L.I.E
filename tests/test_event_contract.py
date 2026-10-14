@@ -48,6 +48,20 @@ def test_registry_exposes_category_and_replay_policy():
     assert spec.version == 1
 
 
+def test_dashboard_widget_updates_are_web_session_scoped_and_not_replayed():
+    spec = event_spec(EventType.DASHBOARD_WIDGETS.value)
+
+    assert spec.category is EventCategory.SNAPSHOT
+    assert spec.replay is False
+    event = build_event(
+        EventType.DASHBOARD_WIDGETS.value,
+        {"channel": "web", "session_id": "session-1", "widgets": {"timers": []}},
+    )
+    assert event["session_id"] == "session-1"
+    with pytest.raises(EventValidationError):
+        build_event(EventType.DASHBOARD_WIDGETS.value, {"widgets": {"timers": []}})
+
+
 def test_extension_operation_result_contract_requires_request_fingerprint():
     spec = event_spec("extension_operation_result")
     assert "request_fingerprint" in spec.required_payload

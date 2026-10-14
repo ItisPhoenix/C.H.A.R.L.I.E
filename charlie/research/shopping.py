@@ -11,7 +11,7 @@ from charlie.research.models import ProductResult, ResearchPlan, SourceDocument
 logger = logging.getLogger("charlie.research.shopping")
 
 _COMMERCIAL_KEYWORDS = re.compile(
-    r"\b(buy|purchase|shopping|shop|order|price|prices|cost|costs|deal|deals|discount|discounts|cheap|affordable)\b",
+    r"\b(buy|purchase|shopping|shop|order|deal|deals|discount|discounts|cheap|affordable)\b",
     re.IGNORECASE,
 )
 
@@ -73,6 +73,10 @@ def is_shopping_query(query: str, plan: Optional[ResearchPlan] = None) -> bool:
 
     # Direct shopping/commercial keywords
     if _COMMERCIAL_KEYWORDS.search(text):
+        return True
+
+    # A price lookup alone is not a request to compare product specifications.
+    if re.search(r"\b(?:prices?|costs?)\b", text, re.I) and _PRODUCT_CATEGORIES.search(text):
         return True
 
     # Product category combined with recommendation/comparison

@@ -7,7 +7,6 @@ import re
 from typing import Callable, List, Optional
 
 from charlie.research.models import (
-    Candidate,
     ResearchBrief,
     ResearchMode,
     ResearchPlan,
@@ -15,8 +14,7 @@ from charlie.research.models import (
     SearchResult,
 )
 from charlie.research.providers import SearchProvider, search_with_fallback
-from charlie.research.shopping import is_shopping_query
-from charlie.research.sources import get_official_domains, resolve_brand
+from charlie.text_utils import normalize_rupee_amounts
 
 _INSTRUCTION_RE = re.compile(
     r"\b(?:do\s+a\s+web\s+search|search\s+the\s+web|please|could\s+you|can\s+you|"
@@ -77,7 +75,7 @@ def clean_query(query: str) -> str:
     cleaned = _ASSISTANT_PREFIX_RE.sub("", cleaned).strip()
     cleaned = _RESEARCH_PREFIX_RE.sub("", cleaned).strip()
     cleaned = re.sub(r"\b(?:the\s+)?best\s+(?:current\s+)?", "", cleaned, flags=re.I)
-    cleaned = re.sub(r"₹\s*(\d+(?:,\d+)*)", lambda match: match.group(1).replace(",", "") + " rupees", cleaned)
+    cleaned = normalize_rupee_amounts(cleaned)
     for match in re.finditer(r"[.!?;,]", cleaned):
         if _FORMAT_INSTRUCTION_RE.match(cleaned[match.end() :]):
             cleaned = cleaned[: match.start()].rstrip()
@@ -89,9 +87,6 @@ def clean_query(query: str) -> str:
     cleaned = re.sub(r"[?!.,;:]+$", "", cleaned).strip()
     cleaned = re.sub(r"[?!.,;:]+$", "", cleaned).strip()
     cleaned = _SPACE_RE.sub(" ", cleaned)
-    if re.search(r"\bllms?\b", cleaned, re.I):
-        cleaned = re.sub(r"\bclose\s+source\b", "closed-source", cleaned, count=1, flags=re.I)
-        cleaned = re.sub(r"\bopen\s+source\b", "open-source", cleaned, count=1, flags=re.I)
     return _restore_quoted_phrases(cleaned or query.strip(), phrases)
 
 
@@ -101,202 +96,30 @@ def _budget_constraint(query: str) -> Optional[str]:
 
 
 def parse_brief(query: str) -> ResearchBrief:
-    """Parse user query into structured requirements (ResearchBrief)."""
-    cleaned = clean_query(query)
-    lower = query.lower()
-    specific_release = re.search(
-        r"\b(?:on\s+what\s+date|what\s+date|when)\s+(?:was|did)\s+(.+?)\s+(\d+(?:\.\d+){1,2})\s+released\b",
-        query,
-        re.I,
+    """Keep request scope and explicit source constraints without topic taxonomies."""
+    lower = query.casefold()
+    excludes = bool(re.search(r"\b(?:without|exclude|excluding|avoid|not|no)\b[^.!?]{0,80}\bofficial\b", lower))
+    prefers = bool(re.search(r"\b(?:prefer|preferably|if possible|if available)\b[^.!?]{0,80}\bofficial\b", lower))
+    policy = (
+        "any_reputable" if excludes or "official" not in lower
+        else "official_preferred" if prefers else "official_required"
     )
-
-    # 1. Entity kind
-    if specific_release or re.search(r"\b(?:releases?|released|versions?|latest\s+stable)\b", lower):
-        entity_kind = "release"
-    elif is_shopping_query(query) or any(k in lower for k in ["laptop", "phone", "galaxy", "pixel", "macbook"]):
-        entity_kind = "product"
-    else:
-        entity_kind = "general"
-
-    # 2. Option count
-    option_count = None
-    count_m = re.search(
-        r"\b(?:compare\s+)?(\d+|two|three|four|five)\s+(?:options?|products?|models?|alternatives?)\b",
-        lower,
-    )
-    if count_m:
-        val = count_m.group(1)
-        word_map = {"two": 2, "three": 3, "four": 4, "five": 5}
-        option_count = word_map.get(val, int(val) if val.isdigit() else None)
-    elif "compare" in lower:
-        option_count = 3
-
-    # 3. Budget & Currency
-    budget = None
-    currency = None
-    from charlie.research.facts import parse_inr_price
-    parsed_price = parse_inr_price(query)
-    if parsed_price is not None:
-        budget = parsed_price
-        currency = "INR"
-    elif "₹" in query or "rupee" in lower:
-        currency = "INR"
-
-    # 4. Market
-    market = (
-        "IN"
-        if ("india" in lower or "₹" in query or "rupee" in lower or "inr" in lower or "lakh" in lower)
-        else None
-    )
-
-    # 5. Source policy
-    if (
-        re.search(r"\bofficial\b.{0,40}\b(?:sources?|documentation|docs|manufacturer)\b", lower)
-        or "official sources" in lower
-        or "official source" in lower
-    ):
-        source_policy = "official_required"
-    elif "official" in lower:
-        source_policy = "official_preferred"
-    else:
-        source_policy = "any_reputable"
-
-    # 6. Stable only
-    stable_only = bool(re.search(r"\b(latest\s+stable|stable\s+release|stable\s+version|final\s+release)\b", lower))
-
-    # 7. Explicit domains
-    exp_domains = explicit_domain_filters(query)
-
-    # 8. Aspects & Priority
-    aspects = []
-    priority = []
-    if entity_kind == "product":
-        if "laptop" in lower or "local ai" in lower or "llm" in lower:
-            aspects = ["price", "gpu", "vram", "ram", "ram_upgradeable", "variant"]
-            priority = ["vram", "gpu", "ram", "price"]
-        elif "phone" in lower or "pixel" in lower or "galaxy" in lower:
-            aspects = ["price", "processor", "ram", "camera", "display"]
-            priority = ["processor", "ram", "price"]
-        else:
-            aspects = ["price", "specifications"]
-            priority = ["price"]
-    topic = cleaned
-    requested_version = specific_release.group(2) if specific_release else None
-    if specific_release:
-        topic = f"{specific_release.group(1).strip()} {requested_version}"
-    if entity_kind == "release":
-        aspects = ["version", "release_date"]
-        priority = ["version", "release_date"]
-        cleaned_topic = re.sub(r"\busing\s+official\s+[\w.-]+\s+sources?\b", "", topic, flags=re.I).strip(" .:,")
-        cleaned_topic = re.sub(r"\b(?:give|state|tell)\s+.*", "", cleaned_topic, flags=re.I).strip(" .:,")
-        if cleaned_topic:
-            topic = cleaned_topic
-
     return ResearchBrief(
-        topic=topic,
-        entity_kind=entity_kind,
-        option_count=option_count,
-        budget=budget,
-        currency=currency,
-        market=market,
-        source_policy=source_policy,
-        aspects=aspects,
-        priority=priority,
-        stable_only=stable_only,
-        explicit_domains=exp_domains,
-        requested_version=requested_version,
+        topic=query.strip(), original_request=query, objective=query,
+        source_policy=policy, explicit_domains=explicit_domain_filters(query),
     )
 
 
 def discovery_queries(brief: ResearchBrief) -> List[str]:
-    """Generate search queries to discover candidate options from user requirements without invented models."""
-    queries: List[str] = []
-    topic = brief.topic
-    lower = topic.lower()
-
-    queries.append(topic)
-
-    if brief.entity_kind == "product":
-        market_suffix = "India" if brief.market == "IN" else ""
-        budget_str = f"under {int(brief.budget)} {brief.currency or ''}" if brief.budget else ""
-
-        if "local ai" in lower or "llm" in lower:
-            queries.append(f"best laptops for local AI models RTX {budget_str} {market_suffix}".strip())
-            queries.append(f"laptop RTX 4060 8GB {budget_str} {market_suffix}".strip())
-        elif "laptop" in lower:
-            queries.append(f"best gaming laptops {budget_str} {market_suffix}".strip())
-        elif "pixel" in lower and "galaxy" in lower:
-            queries.append(f"Google Pixel vs Samsung Galaxy flagship comparison {market_suffix}".strip())
-            queries.append("Google Pixel official specifications India")
-            queries.append("Samsung Galaxy official specifications India")
-
-    elif brief.entity_kind == "release":
-        if "python" in lower:
-            queries.append("site:python.org latest stable release")
-            queries.append("python.org latest stable release")
-            queries.append("site:python.org Python downloads release")
-            queries.append("python.org Python downloads release")
-        else:
-            queries.append(f"{topic} official release notes")
-            if "llm" in lower and "closed-source" in lower and "open-source" in lower:
-                queries.append("latest closed-source proprietary LLM model release announcement")
-                queries.append("latest open-source LLM open-weight model release announcement")
-
-    # Deduplicate while preserving order
-    return list(dict.fromkeys(q.strip() for q in queries if q.strip()))
+    """Use the request itself as the search seed; the planner adds query variants when needed."""
+    query = (getattr(brief, "original_request", None) or brief.topic).strip()
+    return [query] if query else []
 
 
 def is_llm_release_brief(brief: ResearchBrief) -> bool:
     return brief.entity_kind == "release" and bool(
         re.search(r"\b(?:llms?|large\s+language\s+models?)\b", brief.topic, re.I)
     )
-
-
-def verification_queries(candidate: Candidate, brief: ResearchBrief) -> List[str]:
-    """Generate targeted verification queries on official and store domains for a candidate."""
-    cand_name = candidate.name
-    brand = candidate.brand or resolve_brand(cand_name)
-    official_domains = get_official_domains(brand) if brand else []
-
-    if is_llm_release_brief(brief):
-        subject = cand_name if brand and cand_name.casefold().startswith(brand.casefold()) else " ".join(
-            part for part in (brand, cand_name) if part
-        )
-        queries = [
-            f"{subject} official model release announcement",
-            f"{subject} official release date",
-        ]
-        if candidate.release_date:
-            queries.append(f"{subject} release {candidate.release_date}")
-        queries.extend(
-            f"{subject} release announcement site:{domain}"
-            for domain in official_domains
-        )
-        return list(dict.fromkeys(q.strip() for q in queries if q.strip()))
-
-    queries: List[str] = []
-    # A bare exact-name query is the stable bridge to general web indexes.
-    # Domain-scoped specification queries are retained below for provenance,
-    # but some engines return no result when both the model and site: filter
-    # are present.
-    queries.append(cand_name)
-
-    if official_domains:
-        primary_domain = official_domains[0]
-        # One query per evidence need; duplicated site/plain queries exhausted engines.
-        queries.append(f"{cand_name} specifications site:{primary_domain}")
-        # 2. Official price query
-        queries.append(f"{cand_name} price site:{primary_domain}")
-    else:
-        queries.append(f"{cand_name} official specifications")
-        queries.append(f"{cand_name} official price")
-
-    # 3. Labelled retailer query for price verification in India
-    if brief.market == "IN":
-        queries.append(f"{cand_name} price amazon.in")
-        queries.append(f"{cand_name} price flipkart.com")
-
-    return list(dict.fromkeys(q.strip() for q in queries if q.strip()))
 
 
 def build_plan(
@@ -309,57 +132,23 @@ def build_plan(
     domain_filters: Optional[List[str]] = None,
 ) -> ResearchPlan:
     cleaned = clean_query(query)
+    scoped_domains = domain_filters or explicit_domain_filters(query)
+    if not scoped_domains:
+        from charlie.research.agent_reach import platform_domains_in_query
+
+        scoped_domains = platform_domains_in_query(query)
     requested_domains = list(
         dict.fromkeys(
             domain.strip()
-            for domain in (domain_filters or explicit_domain_filters(query))
+            for domain in scoped_domains
             if domain.strip()
         )
     )
     constraints: List[str] = []
-    budget = _budget_constraint(query)
-    if budget:
-        constraints.append(budget)
-    if re.search(r"\b(price|shopping|product|buy|iem|keyboard|laptop|phone)\b", query, re.I):
-        constraints.extend([f"market={market}", f"locale={locale}"])
 
+    # Keep the user's wording as the search seed; the model planner adds only
+    # queries justified by this request instead of applying fixed templates.
     queries = [ResearchQuery(cleaned, "primary")]
-    lower = cleaned.lower()
-    if mode in (ResearchMode.STANDARD, ResearchMode.DEEP):
-        if "trend" in lower or "twitter" in lower or re.search(r"\bon\s+x\b", lower):
-            queries.extend(
-                [
-                    ResearchQuery(
-                        cleaned if requested_domains else f"{cleaned} site:x.com",
-                        "platform evidence",
-                        requested_domains or ["x.com", "twitter.com"],
-                    ),
-                    ResearchQuery(f"{cleaned} news", "independent corroboration"),
-                ]
-            )
-        elif constraints and any(item.startswith("price") for item in constraints):
-            queries.extend(
-                [
-                    ResearchQuery(f"{cleaned} {market} price", "market prices"),
-                    ResearchQuery(
-                        f"{cleaned} official specifications"
-                        if re.search(r"\bofficial\s+sources?\b", query, re.I)
-                        else f"{cleaned} reviews",
-                        "product specifications"
-                        if re.search(r"\bofficial\s+sources?\b", query, re.I)
-                        else "independent reviews",
-                    ),
-                ]
-            )
-        else:
-            queries.extend(
-                [
-                    ResearchQuery(f"{cleaned} official source", "primary source"),
-                    ResearchQuery(f"{cleaned} independent reporting", "corroboration"),
-                ]
-            )
-    if mode is ResearchMode.DEEP:
-        queries.append(ResearchQuery(f"{cleaned} latest developments", "freshness check"))
     unique: List[ResearchQuery] = []
     seen = set()
     for item in queries:

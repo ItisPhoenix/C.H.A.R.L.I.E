@@ -47,6 +47,7 @@ def test_calendar_legacy_rows_migrate_reminder_state(tmp_path):
     rows = {row["id"]: row for row in store.list_events()}
     assert rows["pending"]["reminder_state"] == "pending"
     assert rows["delivered"]["reminder_state"] == "delivered"
+    assert rows["pending"]["delivery_channel"] == "local"
     store.close()
 
 
@@ -478,13 +479,120 @@ async def test_automation_reminder_channels_record_acceptance_without_claiming_h
             voice_callback=speech, telegram_callback=telegram,
         ) == 1
         row = await runtime.execute("get_automation", schedule["id"])
-        assert callbacks == ["alert", "speech", "telegram"]
+        assert callbacks == ["alert"]
         assert row["active_run_status"] == "succeeded"
-        assert row["active_run_result"] == "alert accepted; speech queued; Telegram message accepted"
+        assert row["active_run_result"] == "alert accepted"
         assert "heard" not in row["active_run_result"]
         assert "delivered" not in row["active_run_result"]
     finally:
         runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_voice_automation_reminder_fails_when_tts_did_not_queue(tmp_path):
+    runtime = CalendarRuntime(str(tmp_path / "calendar.sqlite3"))
+    try:
+        schedule = await runtime.execute(
+            "create_automation", "reminder", "Water", "2026-09-24T09:00:00Z", "once", "UTC",
+            delivery_channel="voice",
+        )
+
+        async def speech_not_queued(_schedule):
+            return False
+
+        assert await deliver_due_automation_reminders(
+            runtime,
+            "2026-09-24T09:00:00Z",
+            alert_callback=lambda _schedule: None,
+            voice_callback=speech_not_queued,
+        ) == 1
+        row = await runtime.execute("get_automation", schedule["id"])
+        assert row["active_run_status"] == "failed"
+        assert "did not accept" in row["active_run_error"]
+    finally:
+        runtime.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("channel", "expected"),
+    [
+        ("voice", ["voice"]),
+        ("web", ["alert"]),
+        ("telegram", ["telegram"]),
+        ("console", ["console"]),
+        ("local", ["alert"]),
+    ],
+)
+async def test_automation_reminder_only_uses_its_delivery_channel(tmp_path, channel, expected):
+    runtime = CalendarRuntime(str(tmp_path / "calendar.sqlite3"))
+    callbacks = []
+    try:
+        schedule = await runtime.execute(
+            "create_automation", "reminder", "origin test", "2026-09-24T09:00:00Z", "once", "UTC",
+            delivery_channel=channel,
+        )
+
+        async def record(name):
+            async def callback(_schedule):
+                callbacks.append(name)
+            return callback
+
+        assert await deliver_due_automation_reminders(
+            runtime,
+            "2026-09-24T09:00:00Z",
+            alert_callback=await record("alert"),
+            voice_callback=await record("voice"),
+            telegram_callback=await record("telegram"),
+            console_callback=await record("console"),
+        ) == 1
+        row = await runtime.execute("get_automation", schedule["id"])
+        assert callbacks == expected
+        assert row["delivery_channel"] == channel
+    finally:
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_voice_automation_without_voice_callback_never_falls_back_to_alert(tmp_path):
+    runtime = CalendarRuntime(str(tmp_path / "calendar.sqlite3"))
+    calls = []
+    try:
+        schedule = await runtime.execute(
+            "create_automation", "reminder", "voice origin", "2026-09-24T09:00:00Z", "once", "UTC",
+            delivery_channel="voice",
+        )
+
+        async def alert(_schedule):
+            calls.append("alert")
+
+        assert await deliver_due_automation_reminders(
+            runtime, "2026-09-24T09:00:00Z", alert_callback=alert
+        ) == 1
+        row = await runtime.execute("get_automation", schedule["id"])
+        assert calls == []
+        assert row["active_run_status"] == "failed"
+        assert "callback unavailable for voice" in row["active_run_error"]
+    finally:
+        runtime.close()
+
+
+def test_legacy_automation_rows_migrate_to_local_delivery(tmp_path):
+    path = str(tmp_path / "automation-legacy.sqlite3")
+    store = CalendarStore(path)
+    row = store.create_automation("reminder", "legacy", "2026-09-24T09:00:00Z", "once", "UTC")
+    store.close()
+
+    connection = sqlite3.connect(path)
+    connection.execute("ALTER TABLE automation_schedules DROP COLUMN delivery_channel")
+    connection.commit()
+    connection.close()
+
+    migrated = CalendarStore(path)
+    try:
+        assert migrated.get_automation(row["id"])["delivery_channel"] == "local"
+    finally:
+        migrated.close()
 
 
 @pytest.mark.asyncio

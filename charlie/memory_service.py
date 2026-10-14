@@ -16,6 +16,12 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from charlie.memory_graph import MemoryGraph
+from charlie.memory_store import (
+    MEMORY_FENCE_CLOSE,
+    MEMORY_FENCE_OPEN,
+    MEMORY_FENCE_RULE,
+    _neutralise_fence_delimiters,
+)
 from charlie.utils import make_id, utc_now_iso
 
 logger = logging.getLogger("charlie.memory_service")
@@ -125,11 +131,19 @@ class MemoryService:
             return self._memory_store.search(query, n_results=n_results)
         return self._memory_store.search(query, n_results=n_results, threshold=threshold)
 
-    def format_semantic_for_prompt(self, results: List[Dict[str, Any]]) -> str:
-        """Format semantic results without applying prompt policy."""
-        if not self._semantic_available():
+    def format_recall_for_prompt(self, results: List[Dict[str, Any]]) -> str:
+        """Format recalled memories as untrusted data for normal-turn context."""
+        if not results:
             return ""
-        return self._memory_store.format_for_prompt(results)
+        lines = [MEMORY_FENCE_OPEN, MEMORY_FENCE_RULE]
+        for item in results:
+            text = item.get("content") or item.get("text") if isinstance(item, dict) else item
+            if text:
+                lines.append(f"- {_neutralise_fence_delimiters(str(text))}")
+        if len(lines) == 2:
+            return ""
+        lines.append(MEMORY_FENCE_CLOSE)
+        return "\n".join(lines)
 
     def add_fact(self, subject: str, predicate: str, obj: str) -> Optional[str]:
         """Add one graph-only relational fact and return its edge ID."""
@@ -379,6 +393,57 @@ class MemoryService:
             "metadata": item_metadata,
         }
 
+    def get_preference(self, key: str) -> Optional[str]:
+        """Read one named durable preference from structured memory."""
+        key = str(key or "").strip()
+        if not key:
+            return None
+        for item in self.list_items(category="preference", limit=300):
+            metadata = item.get("metadata") or {}
+            value = metadata.get("value") if metadata.get("preference_key") == key else None
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    def set_preference(self, key: str, value: str, *, provenance: str) -> bool:
+        """Create or correct one durable preference while retaining update history."""
+        key = str(key or "").strip()
+        value = str(value or "").strip()
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key):
+            raise ValueError("preference key must be a lowercase identifier")
+        if not value:
+            raise ValueError("preference value must not be empty")
+        if not isinstance(provenance, str) or not provenance.strip():
+            raise ValueError("provenance must be a non-empty string")
+
+        metadata = {"preference_key": key, "value": value}
+        content = f"{key.replace('_', ' ')}: {value}"
+        existing = next(
+            (
+                item
+                for item in self.list_items(category="preference", limit=300)
+                if (item.get("metadata") or {}).get("preference_key") == key
+            ),
+            None,
+        )
+        if existing is not None:
+            if (existing.get("metadata") or {}).get("value") == value:
+                return True
+            return self.update_item(
+                existing["id"],
+                content=content,
+                category="preference",
+                metadata=metadata,
+                provenance=provenance,
+            ) is not None
+        saved = self.add_item(
+            category="preference",
+            content=content,
+            metadata=metadata,
+            provenance=provenance,
+        )
+        return bool(saved.get("id"))
+
     def list_items(self, category: Optional[str] = None, limit: int = 300) -> List[Dict[str, Any]]:
         """List managed graph items and graph-only relational projections."""
         graph = self._get_graph()
@@ -467,26 +532,35 @@ class MemoryService:
         return [item for _score, _position, item in ranked[:limit]]
 
     def recall(self, query: str, n_results: int = 5) -> Optional[List[Dict[str, Any]]]:
-        """Recall matching managed facts first, then semantic memories."""
-        if not _search_terms(query):
+        """Combine ranked managed and semantic memories without suppressing either source."""
+        if n_results <= 0 or not _search_terms(query):
             return []
 
         structured = self.search_items(query, limit=n_results)
-        if structured:
-            return [{**item, "source": "structured"} for item in structured]
-
         semantic = self.search_semantic(query, n_results=n_results)
-        if semantic is None:
+        if semantic is None and not structured:
             return None
 
         results = []
         seen = set()
-        for item in semantic or []:
-            text = str(item.get("text") or "").strip()
-            if not text or text.casefold() in seen:
-                continue
-            results.append({**item, "content": text, "source": "semantic"})
-            seen.add(text.casefold())
+        semantic_items = [
+            {**item, "content": str(item.get("text") or "").strip(), "source": "semantic"}
+            for item in semantic or [] if str(item.get("text") or "").strip()
+        ]
+        managed_items = [{**item, "source": "structured"} for item in structured]
+        for index in range(max(len(managed_items), len(semantic_items))):
+            for ranked in (managed_items, semantic_items):
+                if index >= len(ranked):
+                    continue
+                item = ranked[index]
+                text = str(item.get("content") or " ".join(
+                    str(item.get(key) or "") for key in ("subject", "predicate", "object")
+                )).strip()
+                identity = " ".join(text.split()).casefold()
+                if not identity or identity in seen:
+                    continue
+                results.append(item)
+                seen.add(identity)
         return results[:n_results]
 
     @staticmethod

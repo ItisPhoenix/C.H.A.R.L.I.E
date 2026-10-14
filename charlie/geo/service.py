@@ -11,7 +11,6 @@ from charlie.geo.intelligence import (
     CyberThreatProvider,
     IntelligenceProvider,
     NASAEONETProvider,
-    OpenMeteoProvider,
     USGSEarthquakesProvider,
 )
 from charlie.geo.models import GeocodingResult, LayerDataResult, RouteResult
@@ -36,7 +35,6 @@ class GeoService:
         self._layers: Dict[str, IntelligenceProvider] = {
             "earthquakes": USGSEarthquakesProvider(),
             "wildfires": NASAEONETProvider(),
-            "weather": OpenMeteoProvider(),
             "cyber_threats": CyberThreatProvider(),
         }
 
@@ -130,13 +128,6 @@ class GeoService:
                 "name": "Active Global Wildfires & Hotspots",
                 "category": "Environmental Hazards",
                 "attribution": "NASA Earth Observatory (EONET)",
-                "defaultEnabled": False,
-            },
-            {
-                "id": "weather",
-                "name": "Major Meteorological Stations",
-                "category": "Atmospheric",
-                "attribution": "Open-Meteo Weather API",
                 "defaultEnabled": False,
             },
             {

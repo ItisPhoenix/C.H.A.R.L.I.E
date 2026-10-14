@@ -4,6 +4,17 @@ import re
 
 from charlie.known_apps import KNOWN_APP_NAMES as KNOWN_APPS
 
+
+def normalize_rupee_amounts(text: str) -> str:
+    """Keep amount, scale, and currency in their spoken grammatical order."""
+    return re.sub(
+        r"₹\s*(\d[\d,]*(?:\.\d+)?)(?:\s*(lakh|lac|crore|million|billion)\b)?",
+        lambda match: " ".join(filter(None, (
+            match.group(1).replace(",", ""), match.group(2), "rupees",
+        ))),
+        text, flags=re.I,
+    )
+
 # --- Text normalization for multi-app commands ---
 # When user says "Open Chrome calculator notepad", insert "and" between items
 # so the model treats them as separate commands

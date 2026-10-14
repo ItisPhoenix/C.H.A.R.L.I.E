@@ -6,9 +6,28 @@ import hashlib
 import re
 from typing import Any, Iterable, List, Set
 
-from charlie.research.models import Claim, Citation, SearchResult
+from charlie.research.models import Citation, Claim, SearchResult
 
 _CITATION_RE = re.compile(r"\[(S\d+)\]")
+_CLAIM_TERM_FAMILIES = {
+    "retry": "retry",
+    "retries": "retry",
+    "retried": "retry",
+    "attempt": "retry",
+    "attempts": "retry",
+    "repeated": "retry",
+    "fail": "failure",
+    "failed": "failure",
+    "failure": "failure",
+    "error": "failure",
+    "temporary": "temporary",
+    "transient": "temporary",
+    "intermittent": "temporary",
+}
+_CLAIM_NEGATION_RE = re.compile(
+    r"\b(?:no|not|never|without|cannot|can't|isn't|aren't|wasn't|weren't|doesn't|don't|won't)\b",
+    re.I,
+)
 
 
 def assign_citations(documents) -> List[Citation]:
@@ -39,6 +58,27 @@ def validate_citations(text: str, citations: Iterable[Citation]) -> bool:
 def strip_invalid_citations(text: str, citations: Iterable[Citation]) -> str:
     valid = {item.source_id for item in citations}
     return _CITATION_RE.sub(lambda match: match.group(0) if match.group(1) in valid else "", text or "")
+
+
+def _without_runtime_gap_lines(text: str, report: Any) -> str:
+    def normalized_gap(value: str) -> str:
+        value = value.strip().removeprefix("- ")
+        if value.casefold().startswith("unresolved:"):
+            value = value[len("unresolved:"):].strip()
+        return value.rstrip(".").casefold()
+
+    known_gaps = {normalized_gap(str(gap)) for gap in getattr(report, "gaps", [])}
+    known_gaps.update(
+        normalized_gap(question.question)
+        for question in getattr(report, "coverage", []) if question.status == "unresolved"
+    )
+    return "\n".join(
+        line for line in text.splitlines()
+        if not (
+            line.strip().removeprefix("- ").casefold().startswith("unresolved:")
+            and normalized_gap(line) in known_gaps
+        )
+    )
 
 
 def validate_numeric_grounding(text: str, facts_or_report: Any) -> bool:
@@ -90,7 +130,8 @@ def validate_numeric_grounding(text: str, facts_or_report: Any) -> bool:
             for passage_id in question.refuting_claim_ids
             if passage_id in passages_by_id
         )
-    for sentence in re.split(r"(?<=[!?])\s+(?!\[S\d+\])|(?<=\.)\s+(?!\[S\d+\])|\n+", text):
+    factual_text = _without_runtime_gap_lines(text, report)
+    for sentence in re.split(r"(?<=[!?])\s+(?!\[S\d+\])|(?<=\.)\s+(?!\[S\d+\])|\n+", factual_text):
         sentence_numbers = numbers(re.sub(r"\[S\d+\]", "", sentence))
         if not sentence_numbers:
             continue
@@ -118,7 +159,7 @@ def validate_claim_support(text: str, report: Any) -> bool:
         "a", "an", "and", "are", "as", "at", "be", "by", "can", "does", "for", "from",
         "has", "have", "how", "in", "is", "it", "its", "of", "on", "or", "that", "the",
         "their", "this", "to", "use", "used", "uses", "was", "were", "what", "when", "which",
-        "with", "according", "documentation", "docs", "project", "source",
+        "with", "according", "documentation", "docs", "project", "request", "source",
     }
     evidence_by_source: dict[str, list[str]] = {}
     for item in getattr(report, "evidence", []):
@@ -167,11 +208,21 @@ def validate_claim_support(text: str, report: Any) -> bool:
                 return False
 
     def terms(value: str) -> set[str]:
-        return {
-            token.casefold()
-            for token in re.findall(r"[A-Za-z0-9]+", value)
-            if token.casefold() not in stopwords
-        }
+        normalized_terms = set()
+        for raw in re.findall(r"[A-Za-z0-9]+", value):
+            token = raw.casefold()
+            if token.endswith("ies") and len(token) > 4:
+                token = token[:-3] + "y"
+            elif token.endswith("s") and len(token) > 3 and not token.endswith("ss"):
+                token = token[:-1]
+            if token not in stopwords:
+                normalized_terms.add(_CLAIM_TERM_FAMILIES.get(token, token))
+        return normalized_terms
+
+    def compatible_polarity(claim: str, passage: str, relationship: str) -> bool:
+        return relationship == "refutes" or (
+            bool(_CLAIM_NEGATION_RE.search(claim)) == bool(_CLAIM_NEGATION_RE.search(passage))
+        )
 
     number_re = re.compile(r"(?<![A-Za-z0-9_])\d[\d,]*(?:\.\d+)*(?![A-Za-z0-9_])")
 
@@ -193,7 +244,7 @@ def validate_claim_support(text: str, report: Any) -> bool:
     protected_text = re.sub(
         r"\b(Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.\s",
         r"\1<MONTH_DOT> ",
-        text or "",
+        _without_runtime_gap_lines(text or "", report),
         flags=re.I,
     )
     answer_claims: list[Claim] = []
@@ -270,7 +321,8 @@ def validate_claim_support(text: str, report: Any) -> bool:
             fact_matches = [
                 passage.passage_id
                 for passage in passages_by_source.get(source_id, [])
-                if any(value in normalized(passage.text) for value in values)
+                if compatible_polarity(claim_text, passage.text, relationship)
+                and any(value in normalized(passage.text) for value in values)
             ]
             if not fact_matches:
                 return False
@@ -294,7 +346,8 @@ def validate_claim_support(text: str, report: Any) -> bool:
                 supported = [
                     passage
                     for passage in source_passages
-                    if len(claim_terms & terms(passage.text)) >= minimum_overlap
+                    if compatible_polarity(claim_text, passage.text, relationship)
+                    and len(claim_terms & terms(passage.text)) >= minimum_overlap
                     and (not claim_numbers or claim_numbers.intersection(numbers(passage.text)))
                 ]
                 if not supported:

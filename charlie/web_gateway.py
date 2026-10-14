@@ -1,12 +1,10 @@
 """Small loopback web gateway for Charlie's live browser projection.
 
-Security posture (all of it refuses rather than allows):
+Authentication is required by default. The canonical local runtime disables it
+only for a loopback listener, allowing the dashboard to connect without a
+bootstrap token while keeping its command endpoint same-origin checked.
 
-* The session cookie is the only thing that mints authority. ``/api/scene`` and
-  every other API route require it; serving the static app shell does not,
-  because a shell is not a session. A page load or top-level navigation by any
-  local page therefore never produces a usable session.
-* The bootstrap token is single-use. ``/api/scene`` and the command route are
+* When authentication is enabled, the bootstrap token is single-use. ``/api/scene`` and the command route are
   reached by opening ``http://127.0.0.1:<port>/?token=<token>`` exactly once;
   the gateway answers with a 303 to the clean path so the token does not linger
   in history or leak via Referer. The gateway answers with 401 for every later
@@ -53,6 +51,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import ipaddress
 import json
 import logging
 import mimetypes
@@ -125,6 +124,13 @@ _MAX_SHAPE_TYPE_CHARS = 64
 _UNSET = object()
 
 
+def _is_loopback_host(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 class _SseClient:
     """One subscribed SSE reader, with an overflow latch."""
 
@@ -144,18 +150,24 @@ class RuntimeWebGateway:
         host: str = "127.0.0.1",
         port: int = 8001,
         bootstrap_token_file: Optional[Path] = None,
+        require_auth: bool = True,
     ) -> None:
+        if not require_auth and not _is_loopback_host(host):
+            raise ValueError("Unauthenticated web gateway must bind to loopback.")
         self._loop = loop
         self._command_handler = command_handler
         self._snapshot_getter = snapshot_getter
         self._static_dir = Path(static_dir) if static_dir is not None else None
         self.host = host
         self.port = port
+        self.require_auth = require_auth
         # One lock guards the bootstrap token, the live session secret, and its
         # issue time together: minting and consuming are one atomic step, so a
         # replayed bootstrap can never win a race against the first use.
         self._session_lock = threading.Lock()
-        self._bootstrap_token: Optional[str] = secrets.token_urlsafe(24)
+        self._bootstrap_token: Optional[str] = (
+            secrets.token_urlsafe(24) if self.require_auth else None
+        )
         self._session_issued_at: Optional[float] = None
         # ``token`` is the *live* session secret. Before the first bootstrap it
         # holds the bootstrap token, so the documented ``gateway.token`` still
@@ -182,7 +194,7 @@ class RuntimeWebGateway:
     # ------------------------------------------------------------------
     @property
     def bootstrap_url(self) -> str:
-        """The one URL an operator opens to create a session.
+        """The one URL an operator opens to create a session, if enabled.
 
         Empty once the token has been spent. There is no second URL, and the
         live session secret must never be advertised here.
@@ -346,6 +358,8 @@ class RuntimeWebGateway:
 
             # -- auth ---------------------------------------------------
             def _authorized(self) -> bool:
+                if not gateway.require_auth:
+                    return True
                 raw = self.headers.get("Cookie")
                 if not raw:
                     return False
@@ -527,6 +541,8 @@ class RuntimeWebGateway:
 
             def _bootstrap(self, parsed) -> bool:
                 """Exchange a correct ``?token=`` for a session cookie."""
+                if not gateway.require_auth:
+                    return False
                 supplied = parse_qs(parsed.query).get(_TOKEN_PARAM, [])
                 if not supplied:
                     return False
@@ -700,6 +716,8 @@ class RuntimeWebGateway:
         left alone. The URL is handed over on a side channel the operator
         controls instead, preferring a file and falling back to the console.
         """
+        if not self.require_auth:
+            return
         url = self.bootstrap_url
         if not url:
             return

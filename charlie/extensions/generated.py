@@ -1,16 +1,10 @@
-"""Tier-3 self-extension adapter: Charlie authoring and registering a brand
-new runtime tool. Reuses the existing SkillCard/propose/confirm gate in
-charlie/extensions/__init__.py -- no new approval mechanism. Generated code
-runs same-process, same trust model as today's plugin/MCP tools; the
-approval gate (a human reads the code before confirming) is the control,
-not process isolation.
-"""
+"""Inert parsing and schema extraction for owner-reviewed generated tools."""
 
 from __future__ import annotations
 
 import ast
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List
+from typing import Any, Dict, List
 
 
 @dataclass
@@ -18,7 +12,6 @@ class GeneratedToolSpec:
     name: str
     description: str
     schema: Dict[str, Any]
-    func: Callable[..., Any]
 
 
 def parse_generated_tool(name: str, raw_text: str) -> GeneratedToolSpec:
@@ -44,19 +37,10 @@ def parse_generated_tool(name: str, raw_text: str) -> GeneratedToolSpec:
         "required": params,
     }
 
-    namespace: Dict[str, Any] = {}
-    exec(compile(tree, filename=f"<generated:{name}>", mode="exec"), namespace)
-    return GeneratedToolSpec(name=name, description=docstring, schema=schema, func=namespace[name])
+    return GeneratedToolSpec(name=name, description=docstring, schema=schema)
 
 
 def register_generated_tool(registry: Any, spec: GeneratedToolSpec) -> List[str]:
-    registry.register_tool(
-        spec.name,
-        spec.description,
-        spec.schema,
-        owner="extensions",
-        risk_class="security_sensitive",
-    )(
-        spec.func
+    raise RuntimeError(
+        f"Generated tool '{spec.name}' cannot be activated: no OS-isolated worker is available."
     )
-    return [spec.name]

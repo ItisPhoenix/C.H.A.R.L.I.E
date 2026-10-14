@@ -117,22 +117,6 @@ def cpu_ram_watcher(
     return Watcher(name="cpu_ram", interval_s=interval_s, check=_check)
 
 
-def mcp_health_watcher(get_status: Callable[[], Dict[str, bool]], interval_s: float = 60.0) -> Watcher:
-    """get_status() maps server name -> is_running. Edge-triggered: alerts once per newly-down server."""
-    known_down: set = set()
-
-    def _check() -> Optional[dict]:
-        down_now = {name for name, up in get_status().items() if not up}
-        newly_down = down_now - known_down
-        known_down.clear()
-        known_down.update(down_now)
-        if newly_down:
-            return _alert_event(f"MCP server(s) down: {', '.join(sorted(newly_down))}")
-        return None
-
-    return Watcher(name="mcp_health", interval_s=interval_s, check=_check)
-
-
 def stalled_task_watcher(
     get_tasks: Callable[[], List[Any]],
     sustained_polls: int = _STALL_SUSTAINED_POLLS,

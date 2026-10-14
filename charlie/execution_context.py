@@ -141,10 +141,23 @@ def terminate_process_tree(owned_root: OwnedProcess, *, timeout: float = 0.25) -
 class ExecutionContext:
     """Internal cancellation and process ownership scope for one worker call."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        channel: str = "local",
+        user_request: str = "",
+        request_source: str = "user",
+        session_id: Optional[str] = None,
+    ) -> None:
         self._cancel_event = threading.Event()
         self._lock = threading.Lock()
         self._process: Optional[OwnedProcess] = None
+        self.research_progress_callback = None
+        self.research_callbacks = {}
+        self.channel = channel
+        self.user_request = user_request
+        self.request_source = request_source
+        self.session_id = session_id
 
     @property
     def cancellation_requested(self) -> bool:

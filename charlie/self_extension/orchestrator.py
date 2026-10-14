@@ -1,9 +1,12 @@
+import ast
 import asyncio
 import hashlib
 import json
 import logging
 import os
 import re
+import shutil
+import tempfile
 import time
 import unicodedata
 import uuid
@@ -15,10 +18,10 @@ from charlie.config import Config
 from charlie.events import EventMeta, EventSource, EventType
 from charlie.self_extension.adapters.code_adapter import CodeAdapter
 from charlie.self_extension.adapters.config_adapter import ConfigAdapter
-from charlie.self_extension.adapters.mcp_adapter import MCPAdapter
 from charlie.self_extension.adapters.skill_adapter import SkillAdapter
 from charlie.self_extension.checkpoint import CheckpointManager
 from charlie.self_extension.classifier import ExtensionClassifier
+from charlie.self_extension.code_worker import run_worker, validate_ast_allow_list
 from charlie.self_extension.guard import AuthorizationGuard
 from charlie.self_extension.models import (
     ExtensionCheckpoint,
@@ -36,6 +39,40 @@ from charlie.settings_service import SettingsService
 logger = logging.getLogger("charlie.self_extension.orchestrator")
 
 _DEFAULT_TX_STORE = Path("data/extension_transactions.json")
+
+# Requests that need capabilities the CODE_SMALL pure-function subset never grants.
+_CODE_RESTRICTED_TERMS = (
+    "filesystem", "file system", "read file", "write file", "network",
+    "socket", "http", "process", "os command",
+)
+
+_CODE_GENERATION_ATTEMPTS = 2
+_CODE_GENERATION_TIMEOUT_S = 20.0
+_CODE_GENERATION_MAX_CHARS = 8000
+
+_CODE_GENERATION_PROMPT = """You write one small, self-contained Python module that satisfies a \
+user's request.
+
+Request:
+<request>
+{prompt}
+</request>
+
+The module must:
+- define exactly one top-level function and any imports it needs, and nothing else;
+- give every parameter a default, so it is callable with no arguments;
+- carry a docstring, which becomes the capability's description;
+- be pure computation: only standard-library maths, text, date, and collection
+  modules. No filesystem, network, process, environment, or clock-independent
+  side effects, and no print, input, eval, exec, open, or reflection;
+- be deterministic: the same inputs always return the same value.
+
+Reply with one JSON object and nothing else:
+{{"name": "<function name>", "source": "<the module source>", "test_inputs": {{}}}}
+`test_inputs` is a JSON object of keyword arguments using JSON-serialisable values,
+covering the function's parameters, chosen so one call demonstrates the requested
+behaviour. Do not state the expected output; it is observed by running the function.
+"""
 
 
 def repeated_success_signature(request: str, capability: str, operation: str) -> Optional[str]:
@@ -135,7 +172,6 @@ class SelfExtensionOrchestrator:
         capability_index: Optional[CapabilityIndex] = None,
         event_bus: Optional[Any] = None,
         event_loop: Optional[Any] = None,
-        mcp_client: Optional[Any] = None,
         tool_registry: Optional[Any] = None,
         doctor: Optional[Any] = None,
         code_index: Optional[Any] = None,
@@ -143,7 +179,6 @@ class SelfExtensionOrchestrator:
         introspector: Optional[Any] = None,
         tx_store_path: Optional[Path] = None,
         settings_snapshot_callback: Optional[Callable[[str], None]] = None,
-        runtime_extension_operation: Optional[Callable[..., Dict[str, Any]]] = None,
     ) -> None:
         self._repo_root = (repo_root or Path(os.getcwd())).resolve()
         self._config = config or Config()
@@ -151,11 +186,9 @@ class SelfExtensionOrchestrator:
             raise ValueError("SelfExtensionOrchestrator requires main-owned SettingsService")
         self._settings_service = settings_service
         self._settings_snapshot_callback = settings_snapshot_callback
-        self._runtime_extension_operation = runtime_extension_operation
         self._capability_index = capability_index if capability_index is not None else get_capability_index()
         self._event_bus = event_bus
         self._event_loop = event_loop
-        self._mcp_client = mcp_client
         self._tool_registry = tool_registry
         self._doctor = doctor
         self._code_index = code_index
@@ -182,13 +215,6 @@ class SelfExtensionOrchestrator:
             registry=self._registry,
             capability_index=self._capability_index,
         )
-        self._mcp_adapter = MCPAdapter(
-            registry=self._registry,
-            capability_index=self._capability_index,
-            mcp_client=self._mcp_client,
-            tool_registry=self._tool_registry,
-            runtime_extension_operation=runtime_extension_operation,
-        )
         self._code_adapter = CodeAdapter(
             repo_root=self._repo_root,
             tools_dir=tools_dir,
@@ -203,17 +229,10 @@ class SelfExtensionOrchestrator:
         # Rehydrate capabilities from durable manifest (new process startup)
         self._registry.rehydrate(
             capability_index=self._capability_index,
-            mcp_client=self._mcp_client,
-            tool_registry=self._tool_registry,
-            activate_mcp=False,
         )
 
         # Resume any transactions left in RESTARTING state
         self._resume_restarting_transactions()
-
-    def rehydrate_mcp_runtime(self):
-        """Restore durable MCP records through main EXT-1 authority."""
-        return self._registry.rehydrate_mcp_runtime(self._runtime_extension_operation)
 
     def _notify_settings_snapshot(self, rationale: str) -> None:
         if self._settings_snapshot_callback is None:
@@ -266,68 +285,30 @@ class SelfExtensionOrchestrator:
                 ),
             )
             request.affected_capabilities = [f"skill_{name}"]
-        elif kind == ExtensionKind.MCP_TOOL:
-            name = self._plan_name(prompt, "requested_mcp")
-            command_match = re.search(r"\bcommand\s*[:=]?\s*([\w./-]+)", prompt, re.IGNORECASE)
-            if command_match is None:
-                request.requires_approval = True
-                request.planning_error = (
-                    "NEEDS_INPUT: MCP command is required. Provide explicit command, args, and env; "
-                    "Charlie will not guess a server package or transport."
-                )
-                return request
-            command = command_match.group(1)
-            args_match = re.search(r"\bargs\s*[:=]\s*([^;]+)", prompt, re.IGNORECASE)
-            args = (
-                [item.strip(" '\"") for item in args_match.group(1).strip(" []").split(",") if item.strip()]
-                if args_match
-                else []
-            )
-            env_match = re.search(r"\benv\s*[:=]\s*([^;]+)", prompt, re.IGNORECASE)
-            env = {}
-            if env_match:
-                for item in env_match.group(1).strip(" []").split(","):
-                    if "=" in item:
-                        key, value = item.split("=", 1)
-                        env[key.strip()] = value.strip(" '\"")
-            request.plan = ExtensionPlan(
-                plan_id=f"plan-{uuid.uuid4().hex[:8]}",
-                kind=kind,
-                description=f"Connect MCP server '{name}' through MCPClient.",
-                steps=["add_server", "enable_server", "discover tools", "verify health"],
-                mcp_name=name,
-                mcp_command=command,
-                mcp_args=args,
-                mcp_env=env,
-                launch_argv=[command, *args],
-            )
-            request.affected_capabilities = [f"mcp_{name}"]
-            # The launcher is a new external executable on this host, so the
-            # request declares it as a dependency. This is what makes guard
-            # Rule 3 (external dependency additions) live for MCP requests.
-            request.required_dependencies = [command]
         elif kind == ExtensionKind.CODE_SMALL:
-            code_plan = self._build_code_plan(prompt)
-            if code_plan is None:
+            try:
+                name, source, inputs, expected = self._build_code_plan(prompt)
+            except ValueError as exc:
                 request.requires_approval = True
-                request.planning_error = (
-                    "APPROVAL_REQUIRED: requested semantics cannot be translated confidently into "
-                    "the restricted pure-function CODE_SMALL subset."
-                )
+                request.planning_error = f"APPROVAL_REQUIRED: {exc}"
                 return request
-            name, source, inputs, expected = code_plan
             request.plan = ExtensionPlan(
                 plan_id=f"plan-{uuid.uuid4().hex[:8]}",
                 kind=kind,
                 description=f"Add bounded pure function '{name}'.",
-                steps=["validate AST", "checkpoint", "write", "worker test", "verify capability"],
+                steps=["validate AST", "worker test", "owner approval", "checkpoint", "write", "register"],
                 tests_to_run=[f"{name}({inputs!r}) == {expected!r}"],
                 code_source=source,
                 tool_name=name,
                 test_inputs=inputs,
                 expected_output=expected,
+                launch_argv=[
+                    f"code:{name}",
+                    f"sha256:{hashlib.sha256(source.encode('utf-8')).hexdigest()[:16]}",
+                ],
             )
             request.affected_capabilities = [f"code_{name}"]
+            request.requires_approval = True
         elif kind == ExtensionKind.CONFIG:
             request.plan = ExtensionPlan(
                 plan_id=f"plan-{uuid.uuid4().hex[:8]}",
@@ -375,29 +356,178 @@ class SelfExtensionOrchestrator:
             return fallback
         return candidate[:48]
 
-    @staticmethod
-    def _build_code_plan(prompt: str) -> Optional[tuple[str, str, Dict[str, Any], Any]]:
-        explicit = re.search(r"\b(?:called|named)\s+([A-Za-z_]\w*)", prompt, re.IGNORECASE)
+    def _build_code_plan(self, prompt: str) -> tuple[str, str, Dict[str, Any], Any]:
+        """Propose, statically validate, and worker-test source for this exact request.
+
+        Raises ValueError with a truthful reason when policy, the model, or the
+        worker's own containment boundary rejects the proposal.  Nothing here
+        executes in this process: the only execution is the contained subprocess
+        in ``code_worker.run_worker``.
+        """
         lower = prompt.lower()
-        if "celsius" in lower and "fahrenheit" in lower:
-            name = explicit.group(1) if explicit else "celsius_to_fahrenheit"
-            return name, f"def {name}(celsius=0):\n    return celsius * 9 / 5 + 32\n", {"celsius": 100}, 212
-        if "double" in lower:
-            name = explicit.group(1) if explicit else "double_value"
-            return name, f"def {name}(value=0):\n    return value * 2\n", {"value": 2}, 4
-        if any(term in lower for term in ("add two", "sum", "addition")):
-            name = explicit.group(1) if explicit else "add_numbers"
-            return name, f"def {name}(a=0, b=0):\n    return a + b\n", {"a": 2, "b": 3}, 5
-        if "uppercase" in lower or "upper case" in lower:
-            name = explicit.group(1) if explicit else "uppercase_text"
-            return name, f"def {name}(value=''):\n    return value.upper()\n", {"value": "charlie"}, "CHARLIE"
-        restricted_terms = (
-            "filesystem", "file system", "read file", "write file", "network",
-            "socket", "http", "process", "os command",
+        if any(term in lower for term in _CODE_RESTRICTED_TERMS):
+            raise ValueError(
+                "requested behaviour needs filesystem, network, or process access, which the "
+                "CODE_SMALL pure-function subset never grants; use a policy-controlled capability."
+            )
+
+        explicit = re.search(r"\b(?:called|named)\s+([A-Za-z_]\w*)", prompt, re.IGNORECASE)
+        requested_name = explicit.group(1) if explicit else ""
+
+        rejection = ""
+        for attempt in range(_CODE_GENERATION_ATTEMPTS):
+            source_text = self._request_code_generation(prompt, requested_name, rejection)
+            try:
+                name, source, inputs = self._parse_code_proposal(source_text, requested_name)
+                self._check_code_contract(source, name, inputs)
+                observed = self._probe_generated_function(source, name, inputs)
+            except ValueError as exc:
+                rejection = str(exc)
+                logger.info("CODE_SMALL proposal rejected (attempt %s): %s", attempt + 1, rejection)
+                continue
+            return name, source, inputs, observed
+
+        raise ValueError(
+            f"the model did not produce a policy-clean, worker-verified pure function: {rejection}"
         )
-        if any(term in lower for term in restricted_terms):
-            return None
-        return None
+
+    def _request_code_generation(
+        self,
+        prompt: str,
+        requested_name: str,
+        rejection: str = "",
+    ) -> str:
+        """One non-streaming completion on the configured LLM route.
+
+        Same endpoint, model, and auth-header helper as Brain.probe_primary_llm
+        and CharlieDoctor._probe_chat_endpoint.
+        """
+        if not self._config.llm_url or not self._config.llm_model:
+            raise ValueError("code generation needs a configured LLM_URL and LLM_MODEL.")
+
+        instruction = _CODE_GENERATION_PROMPT.format(prompt=prompt[:_CODE_GENERATION_MAX_CHARS])
+        if requested_name:
+            instruction += f'\nThe function must be named "{requested_name}".'
+        if rejection:
+            instruction += (
+                f"\n\nYour previous attempt was rejected: {rejection}\n"
+                "Return a corrected JSON object only."
+            )
+
+        payload = {
+            "model": self._config.llm_model,
+            "messages": [{"role": "user", "content": instruction}],
+            "stream": False,
+        }
+        if getattr(self._config, "llm_reasoning_enabled", False):
+            payload["reasoning"] = {"enabled": True}
+
+        try:
+            import httpx
+
+            from charlie.utils import build_auth_headers
+        except Exception as exc:  # pragma: no cover - transport is a hard dependency
+            raise ValueError(f"no HTTP transport available for code generation: {exc}") from exc
+
+        try:
+            with httpx.Client(
+                base_url=self._config.llm_url,
+                headers=build_auth_headers(self._config.llm_key),
+                timeout=_CODE_GENERATION_TIMEOUT_S,
+                trust_env=self._config.llm_trust_env,
+            ) as client:
+                response = client.post("chat/completions", json=payload)
+        except Exception as exc:
+            raise ValueError(f"code generation request failed: {type(exc).__name__}") from exc
+
+        if response.status_code >= 400:
+            raise ValueError(f"code generation request failed: HTTP {response.status_code}")
+        try:
+            content = response.json()["choices"][0]["message"]["content"]
+        except Exception as exc:
+            raise ValueError("code generation returned no readable completion.") from exc
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("code generation returned an empty completion.")
+        return content
+
+    @staticmethod
+    def _parse_code_proposal(
+        raw: str,
+        requested_name: str,
+    ) -> tuple[str, str, Dict[str, Any]]:
+        """Read the proposed name, module source, and worker test inputs."""
+        text = raw.strip()
+        fenced = re.search(r"```(?:json|python)?\s*(.+?)```", text, re.DOTALL)
+        if fenced:
+            text = fenced.group(1).strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            raise ValueError("the completion contained no JSON object.")
+        try:
+            payload = json.loads(text[start:end + 1])
+        except ValueError as exc:
+            raise ValueError(f"the completion's JSON did not parse: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("the completion's JSON was not an object.")
+
+        name = requested_name or str(payload.get("name") or "").strip()
+        source = payload.get("source") or payload.get("code")
+        inputs = payload.get("test_inputs")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,47}", name):
+            raise ValueError(f"the proposed function name {name!r} is not a usable identifier.")
+        if not isinstance(source, str) or not source.strip():
+            raise ValueError("the completion carried no source.")
+        if not isinstance(inputs, dict):
+            raise ValueError("the completion carried no test_inputs object.")
+        return name, source.strip(), inputs
+
+    @staticmethod
+    def _check_code_contract(source: str, name: str, inputs: Dict[str, Any]) -> None:
+        """Enforce the function contract the worker and the capability registry need."""
+        tree = validate_ast_allow_list(source, name)
+        defs = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
+        if len(defs) != 1 or any(
+            not isinstance(n, (ast.FunctionDef, ast.Import, ast.ImportFrom)) for n in tree.body
+        ):
+            raise ValueError("the module must contain exactly one top-level function and its imports.")
+
+        func = defs[0]
+        if func.name != name:
+            raise ValueError(f"the module defines '{func.name}', not the requested '{name}'.")
+        if not ast.get_docstring(func):
+            raise ValueError("the function needs a docstring; it becomes the capability description.")
+
+        positional = {a.arg for a in func.args.args}
+        if not set(inputs).issubset(positional):
+            raise ValueError(
+                f"test_inputs {sorted(inputs)} are not all parameters of '{name}' {sorted(positional)}."
+            )
+        required = [a.arg for a in func.args.args if a.default is None and a.arg not in inputs]
+        if required:
+            raise ValueError(f"test_inputs omit required parameter(s) {required}.")
+
+    @staticmethod
+    def _probe_generated_function(source: str, name: str, inputs: Dict[str, Any]) -> Any:
+        """Run the proposal once in the contained worker and return its observed result.
+
+        The observed value becomes the plan's expected output, so verification
+        never rests on a model-stated result.
+        """
+        workdir = Path(tempfile.mkdtemp(prefix="charlie-code-plan-"))
+        try:
+            module_path = workdir / f"{name}.py"
+            module_path.write_text(source, encoding="utf-8")
+            ok, observed, error = run_worker(
+                module_path=module_path,
+                func_name=name,
+                test_inputs=inputs,
+                expected_output=None,
+            )
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+        if not ok:
+            raise ValueError(f"the function failed worker execution: {error}")
+        return observed
 
     # ─────────────────────────────────────────────────────────────────────────
     # Event emission (canonical EventType)
@@ -479,8 +609,6 @@ class SelfExtensionOrchestrator:
             kind = tx.request.classification.kind if tx.request.classification else plan.kind
             if kind == ExtensionKind.CODE_SMALL and plan.tool_name:
                 ids.append(f"code_{plan.tool_name}")
-            elif kind == ExtensionKind.MCP_TOOL and plan.mcp_name:
-                ids.append(f"mcp_{plan.mcp_name}")
         return list(dict.fromkeys(ids))
 
     def _rollback_resumed_transaction(self, tx: ExtensionTransaction, reason: str) -> None:
@@ -497,9 +625,7 @@ class SelfExtensionOrchestrator:
             )
             settings_transaction = kind == ExtensionKind.CONFIG
             plan = tx.plan or tx.request.plan
-            if kind == ExtensionKind.MCP_TOOL and plan and plan.mcp_name:
-                rollback = self._mcp_adapter.rollback_mcp_server(plan.mcp_name)
-            elif kind == ExtensionKind.CODE_SMALL and plan and plan.tool_name:
+            if kind == ExtensionKind.CODE_SMALL and plan and plan.tool_name:
                 rollback = self._code_adapter.rollback_code_extension(plan.tool_name, checkpoint=tx.checkpoint)
             elif kind == ExtensionKind.SKILL:
                 skill_id = next((item for item in self._affected_capability_ids(tx) if item.startswith("skill_")), "")
@@ -542,8 +668,8 @@ class SelfExtensionOrchestrator:
 
         Steps:
           1. CodeIndex.refresh() if available
-          2. RuntimeIntrospector.get_capabilities_info() — ext_id must appear
-          3. CharlieDoctor.diagnose() — must be healthy
+          2. RuntimeIntrospector.get_capabilities_info() — affected capability must appear and be available
+          3. CharlieDoctor.diagnose() — checks required by this extension kind must pass
           4. SelfKnowledge.answer_self_question() — grounded query about capability
         Returns (success, message).
         """
@@ -564,27 +690,40 @@ class SelfExtensionOrchestrator:
                 return False, "RuntimeIntrospector unavailable for capability verification."
             try:
                 caps_info = self._introspector.get_capabilities_info()
-                by_id = caps_info.get("by_id", {})
+                by_id = caps_info.get("by_id") if isinstance(caps_info, dict) else None
+                if not isinstance(by_id, dict):
+                    return False, "Required capability health is unknown: capability index was not readable."
                 missing = [eid for eid in affected_ext_ids if eid not in by_id]
                 if missing:
                     return False, (
                         f"Verification: expected capability/ies not visible after extension: {missing}"
                     )
                 unavailable = []
+                unknown = []
                 for eid in affected_ext_ids:
                     record = by_id[eid]
-                    health = record.get("health", {}) if isinstance(record, dict) else {}
-                    if (
-                        isinstance(record, dict)
-                        and (
-                            record.get("available") is False
-                            or record.get("status")
-                            in {"degraded", "unavailable", "failed", "error"}
-                        )
-                    ) or (isinstance(health, dict) and health.get("available") is False):
+                    if not isinstance(record, dict):
+                        unknown.append(eid)
+                        continue
+                    health = record.get("health")
+                    available = record.get("available")
+                    unhealthy = (
+                        available is False
+                        or record.get("status") in {"degraded", "unavailable", "failed", "error"}
+                        or (isinstance(health, dict) and health.get("available") is False)
+                    )
+                    if unhealthy:
                         unavailable.append(eid)
+                    elif available is not True:
+                        unknown.append(eid)
+                    elif health is not None and (
+                        not isinstance(health, dict) or health.get("available") is not True
+                    ):
+                        unknown.append(eid)
                 if unavailable:
                     return False, f"Verification: expected capability/ies unavailable after extension: {unavailable}"
+                if unknown:
+                    return False, f"Verification: required capability health is unknown after extension: {unknown}"
             except Exception as exc:
                 logger.error("Introspector caps check failed: %s", exc, exc_info=True)
                 return False, f"Capability introspection failed: {exc}"
@@ -594,11 +733,59 @@ class SelfExtensionOrchestrator:
             return False, "CharlieDoctor unavailable for post-extension health check."
         try:
             report = self._doctor.diagnose()
-            is_healthy = report.get("is_healthy") if isinstance(report, dict) else getattr(report, "is_healthy", False)
-            errors = report.get("errors", []) if isinstance(report, dict) else getattr(report, "errors", [])
-            if not is_healthy:
-                error_summaries = [getattr(c, "summary", str(c)) for c in errors[:3]]
-                return False, f"Doctor reports errors after extension: {error_summaries}"
+            tx = self._transactions.get(tx_id)
+            if tx is None:
+                return False, "Required doctor checks are unknown: extension transaction metadata is unavailable."
+            plan = tx.plan or tx.request.plan
+            classification = tx.request.classification
+            kind = classification.kind if classification is not None else (plan.kind if plan is not None else None)
+            if kind == ExtensionKind.CONFIG:
+                required_check_ids = ("config_validity",)
+            elif kind in {ExtensionKind.SKILL, ExtensionKind.CODE_SMALL}:
+                if not affected_ext_ids:
+                    return False, "Required capability health is unknown: extension capability IDs are missing."
+                required_check_ids = ("extensions_registry",)
+            else:
+                kind_name = getattr(kind, "value", kind) or "unknown"
+                return False, f"Required doctor checks are unknown for extension kind '{kind_name}'."
+
+            checks = report.get("checks") if isinstance(report, dict) else getattr(report, "checks", None)
+            if not isinstance(checks, list):
+                return False, "Required doctor checks are unknown: diagnostic checks were not returned."
+            checks_by_id = {}
+            for check in checks:
+                check_id = (
+                    check.get("check_id")
+                    if isinstance(check, dict)
+                    else getattr(check, "check_id", None)
+                )
+                if isinstance(check_id, str):
+                    checks_by_id[check_id] = check
+            for check_id in required_check_ids:
+                check = checks_by_id.get(check_id)
+                if check is None:
+                    return False, f"Required doctor check '{check_id}' is unknown after extension."
+                check_status = (
+                    check.get("status")
+                    if isinstance(check, dict)
+                    else getattr(check, "status", None)
+                )
+                check_status = getattr(check_status, "value", check_status)
+                summary = (
+                    check.get("summary")
+                    if isinstance(check, dict)
+                    else getattr(check, "summary", None)
+                )
+                if check_status != "ok":
+                    state = {
+                        "error": "unhealthy",
+                        "warning": "degraded",
+                        "info": "unknown",
+                    }.get(check_status, "unknown")
+                    return False, (
+                        f"Required doctor check '{check_id}' is {state} after extension: "
+                        f"{summary or 'no diagnostic evidence'}"
+                    )
         except Exception as exc:
             logger.error("Doctor diagnose failed: %s", exc, exc_info=True)
             return False, f"Doctor health check failed: {exc}"
@@ -612,7 +799,7 @@ class SelfExtensionOrchestrator:
                         "what capabilities do you have"
                     )
                     answer_text = ans.get("answer", "") if isinstance(ans, dict) else str(ans)
-                    name_part = ext_id.replace("code_", "").replace("mcp_", "").replace("skill_", "")
+                    name_part = ext_id.replace("code_", "").replace("skill_", "")
                     if name_part not in answer_text and ext_id not in answer_text:
                         return False, (
                             f"SelfKnowledge does not reflect extension '{ext_id}' after apply."
@@ -629,7 +816,7 @@ class SelfExtensionOrchestrator:
 
     @staticmethod
     def _approval_covers(guard_decision: Any, approved_binding: Optional[str]) -> bool:
-        """An approval only counts when it matches the argv just reviewed.
+        """An approval only counts when it matches the launch binding reviewed.
 
         An unbound decision (no resolvable argv) is never covered, so an
         approval recorded for one command cannot authorise another.
@@ -648,9 +835,9 @@ class SelfExtensionOrchestrator:
         Process a generic extension request through classification, guard evaluation,
         and type-specific execution.
 
-        CODE_SMALL and MCP_TOOL require a validated ExtensionPlan with the actual
-        structured payload attached.  Raw user_prompt is never treated as executable
-        code or server config.  ARCHITECTURE_LARGE always requires explicit approval.
+        CODE_SMALL requires a validated ExtensionPlan with the actual structured
+        payload attached. Raw user_prompt is never treated as executable code.
+        ARCHITECTURE_LARGE always requires explicit approval.
 
         ``approved_binding`` is the approval digest the owner granted.  It only
         authorises the request when it matches the exact argv the guard just
@@ -730,29 +917,6 @@ class SelfExtensionOrchestrator:
                 request,
                 skill_name=skill_name,
                 raw_text=raw_text,
-                tx_id=tx_id,
-            )
-
-        elif kind == ExtensionKind.MCP_TOOL:
-            if not request.plan or not getattr(request.plan, "mcp_name", None):
-                tx.status = TransactionStatus.FAILED
-                self._emit(EventType.SELF_EXTENSION_FAILED, {"tx_id": tx_id, "reason": "no mcp_name in plan"})
-                return ExtensionResult(
-                    success=False,
-                    transaction_id=tx_id,
-                    status=TransactionStatus.FAILED,
-                    message=(
-                        "MCP_TOOL extension requires a validated plan with mcp_name and mcp_command. "
-                        "Provide an ExtensionPlan with the server specification."
-                    ),
-                )
-            return self.execute_mcp_transaction(
-                request,
-                name=request.plan.mcp_name,
-                command=request.plan.mcp_command,
-                args=getattr(request.plan, "mcp_args", None),
-                env=getattr(request.plan, "mcp_env", None),
-                declared_tools=getattr(request.plan, "mcp_declared_tools", None),
                 tx_id=tx_id,
             )
 
@@ -1096,72 +1260,6 @@ class SelfExtensionOrchestrator:
                 transaction_id=transaction_id,
                 status=TransactionStatus.ROLLED_BACK,
                 message=f"Skill extension rolled back — verification gate failed: {gate_msg}",
-            )
-
-        tx.status = TransactionStatus.COMPLETED
-        tx.finished_at = time.time()
-        self._emit(EventType.SELF_EXTENSION_COMPLETED, {"tx_id": transaction_id})
-        return ExtensionResult(
-            success=True,
-            transaction_id=transaction_id,
-            status=TransactionStatus.COMPLETED,
-            message=res.message,
-            affected_capabilities=[ext_id],
-        )
-
-    def execute_mcp_transaction(
-        self,
-        request: ExtensionRequest,
-        name: str,
-        command: str,
-        args: Optional[List[str]] = None,
-        env: Optional[Dict[str, str]] = None,
-        declared_tools: Optional[List[str]] = None,
-        tx_id: Optional[str] = None,
-    ) -> ExtensionResult:
-        """Execute MCP server integration and capability indexing."""
-        transaction_id = tx_id or f"tx-{uuid.uuid4().hex[:8]}"
-        tx = self._transactions.get(transaction_id) or ExtensionTransaction(
-            transaction_id=transaction_id, request=request
-        )
-        self._transactions[transaction_id] = tx
-
-        self._emit(EventType.SELF_EXTENSION_APPLYING, {"tx_id": transaction_id})
-        tx.status = TransactionStatus.APPLYING
-        res = self._mcp_adapter.register_mcp_server(
-            name=name,
-            command=command,
-            args=args,
-            env=env,
-            declared_tools=declared_tools,
-        )
-        if not res.success:
-            tx.status = TransactionStatus.FAILED
-            tx.error_message = res.message
-            self._emit(EventType.SELF_EXTENSION_FAILED, {"tx_id": transaction_id, "reason": res.message})
-            return ExtensionResult(
-                success=False,
-                transaction_id=transaction_id,
-                status=TransactionStatus.FAILED,
-                message=res.message,
-            )
-
-        ext_id = f"mcp_{name}"
-        if ext_id not in tx.request.affected_capabilities:
-            tx.request.affected_capabilities.append(ext_id)
-        tx.verification_criteria = [ext_id]
-        self._emit(EventType.SELF_EXTENSION_TESTING, {"tx_id": transaction_id})
-
-        gate_ok, gate_msg = self._run_verification_gate(transaction_id, affected_ext_ids=[ext_id])
-        if not gate_ok:
-            self._mcp_adapter.rollback_mcp_server(name)
-            tx.status = TransactionStatus.ROLLED_BACK
-            self._emit(EventType.SELF_EXTENSION_ROLLED_BACK, {"tx_id": transaction_id})
-            return ExtensionResult(
-                success=False,
-                transaction_id=transaction_id,
-                status=TransactionStatus.ROLLED_BACK,
-                message=f"MCP extension rolled back — verification gate failed: {gate_msg}",
             )
 
         tx.status = TransactionStatus.COMPLETED

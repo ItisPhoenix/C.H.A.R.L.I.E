@@ -146,6 +146,47 @@ async def test_turn_deadline_returns_truthful_timeout(monkeypatch, brain_config)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("question", ["Why?", "And that?"])
+async def test_short_followup_recall_does_not_block_event_loop(monkeypatch, brain_config, question):
+    import threading
+    from types import SimpleNamespace
+
+    brain_config.research_enabled = False
+    brain_config.router_classifier_enabled = False
+    brain = Brain(brain_config, register_panic_hotkey=False)
+    owner_thread = threading.get_ident()
+    recalls = []
+    payloads = []
+
+    def recall(query, n_results):
+        assert threading.get_ident() != owner_thread
+        recalls.append(query)
+        return [{"content": "User prefers brief explanations."}]
+
+    brain.memory_service = SimpleNamespace(
+        recall=recall,
+        format_recall_for_prompt=lambda items: "[RECALLED MEMORY] " + items[0]["content"],
+    )
+    brain.history = [{"role": "user", "content": "Explain how a bicycle stays balanced."}]
+
+    async def completion(payload, *_args, **_kwargs):
+        payloads.append(payload)
+        return "Steering keeps its support beneath its center of mass.", []
+
+    monkeypatch.setattr(brain, "_stream_completion", completion)
+    monkeypatch.setattr(brain, "schedule_background_task", lambda coroutine: coroutine.close())
+    try:
+        result = [chunk async for chunk in brain.chat_stream(
+            question, platform="text", skip_pre_search=True, skip_tools=True,
+        )]
+        assert result
+        assert recalls
+        assert "User prefers brief explanations." in payloads[0]["messages"][-1]["content"]
+    finally:
+        await brain.close()
+
+
+@pytest.mark.asyncio
 async def test_explicit_remember_bypasses_model_tool_calling(monkeypatch, brain_config):
     brain = Brain(brain_config)
     calls = []
@@ -157,7 +198,57 @@ async def test_explicit_remember_bypasses_model_tool_calling(monkeypatch, brain_
     result = [chunk async for chunk in brain.chat_stream("Please remember that my name is Alex")]
 
     assert result == ["Remembered: my name is Alex"]
-    assert calls == [("vector_memory", {"action": "remember", "content": "my name is Alex"})]
+    assert calls == [(
+        "memory",
+        {
+            "action": "add",
+            "target": "structured",
+            "category": "fact",
+            "content": "my name is Alex",
+        },
+    )]
+
+
+def test_location_statements_extract_and_correct_current_location():
+    from charlie.core import _detect_user_location_update
+
+    assert _detect_user_location_update("I live in Kanpur.") == "Kanpur"
+    assert _detect_user_location_update("I've moved from Kanpur to New York now.") == "New York"
+    assert _detect_user_location_update("Please remember that my home city is New Delhi, India.") == "New Delhi, India"
+    assert _detect_user_location_update("Charlie im currently in Kanpur") == "Kanpur"
+    assert _detect_user_location_update("I'm visiting New York this week.") is None
+    assert _detect_user_location_update("I don't live in Kanpur anymore.") is None
+
+
+@pytest.mark.asyncio
+async def test_location_statement_updates_durable_preference_without_llm(monkeypatch, brain_config, tmp_path):
+    from charlie.memory_graph import MemoryGraph
+    from charlie.memory_service import MemoryService
+
+    graph = MemoryGraph(str(tmp_path / "home-location.db"))
+    service = MemoryService(graph=graph, semantic_expected=False)
+    brain = Brain(
+        brain_config,
+        memory_graph=graph,
+        memory_service=service,
+        register_panic_hotkey=False,
+    )
+
+    async def unexpected_llm(*_args, **_kwargs):
+        raise AssertionError("A direct residence statement should persist without an LLM request")
+
+    monkeypatch.setattr(brain, "_stream_completion", unexpected_llm)
+    try:
+        result = [chunk async for chunk in brain.chat_stream("Charlie im currently in Kanpur", platform="text")]
+        assert "Kanpur" in "".join(result)
+        assert service.get_preference("current_location") == "Kanpur"
+
+        result = [chunk async for chunk in brain.chat_stream("I have moved to New Delhi.", platform="text")]
+        assert "New Delhi" in "".join(result)
+        assert service.get_preference("current_location") == "New Delhi"
+    finally:
+        await brain.close()
+        graph.close()
 
 
 @pytest.mark.asyncio
@@ -1106,6 +1197,9 @@ async def test_chat_stream_compound_open_app_continues_with_llm(monkeypatch, bra
 
     start_calls = _mock_verified_app_launch(monkeypatch)
     monkeypatch.setattr("charlie.tools._desktop_ready", lambda: True)
+    def unexpected_presearch(*_args, **_kwargs):
+        raise AssertionError("an already-selected app action must not enter automatic question research")
+    monkeypatch.setattr("charlie.core.route_research", unexpected_presearch)
 
     brain = Brain(brain_config)
 
@@ -1113,7 +1207,7 @@ async def test_chat_stream_compound_open_app_continues_with_llm(monkeypatch, bra
 
     async def mock_stream_completion(payload, generation):
         captured_payloads.append(payload)
-        return ("Sure, writing that now.", [])
+        return ("Notepad is open, but I haven't written the note.", [])
 
     monkeypatch.setattr(brain, "_stream_completion", mock_stream_completion)
 
@@ -1122,9 +1216,10 @@ async def test_chat_stream_compound_open_app_continues_with_llm(monkeypatch, bra
         results.append(chunk)
 
     joined = "".join(results)
-    assert "Notepad is open." in joined  # verified app outcome streamed first
+    assert "Notepad is open" in joined
     assert start_calls == ["notepad"]
-    assert "Sure, writing that now." in joined  # then the LLM continuation
+    assert "haven't written the note" in joined
+    assert len(results) == 1  # report the result once, without a separate app-open narration
 
     # The LLM only saw the leftover instruction, not the app-open part it
     # can't help with any faster than the fast-path already did.
@@ -1132,6 +1227,8 @@ async def test_chat_stream_compound_open_app_continues_with_llm(monkeypatch, bra
     llm_message = captured_payloads[0]["messages"][-1]["content"]
     assert "write hello" in llm_message
     assert "open notepad" not in llm_message.lower()
+    assert "EARLIER OPERATION RESULTS IN THIS TURN" in llm_message
+    assert "Notepad is open." in llm_message
 
     # But session history keeps the user's full original utterance.
     user_history = [m for m in brain.history if m["role"] == "user"]
@@ -2172,7 +2269,8 @@ async def test_research_turn_synthesizes_once_and_keeps_tools_only_for_requested
     monkeypatch, user_input, tools_expected
 ):
     from charlie.research.citations import assign_citations
-    from charlie.research.models import EvidenceItem, ResearchMode, ResearchReport, SourceDocument
+    from charlie.research.evidence import build_evidence
+    from charlie.research.models import ResearchMode, ResearchReport, SourceDocument
     from charlie.turn_contracts import TurnRequest
 
     decisions = []
@@ -2201,10 +2299,11 @@ async def test_research_turn_synthesizes_once_and_keeps_tools_only_for_requested
         query="latest stable Python documentation version",
         mode=ResearchMode.STANDARD,
         sources=[source],
-        evidence=[EvidenceItem("S1", "Python 3.14.7 is the latest stable release.")],
         stop_reason="evidence-sufficient",
     )
     report.citations = assign_citations(report.sources)
+    report.evidence = build_evidence(report.sources, report.query, policy="any_reputable")
+    report.bind_passages()
     request = TurnRequest(
         turn_id="turn-research-tools-policy",
         session_id="session-research-tools-policy",

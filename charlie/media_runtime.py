@@ -17,13 +17,13 @@ _media_thread_id: int | None = None
 
 
 def _init_media_thread() -> None:
-    """Initialize COM on the one thread that may touch Media state."""
+    """Initialize an MTA thread; STA calls can hang WinRT media awaits without a message pump."""
     global _media_thread_id
     _media_thread_id = threading.get_ident()
     try:
         import comtypes
 
-        comtypes.CoInitialize()
+        comtypes.CoInitializeEx(comtypes.COINIT_MULTITHREADED)
     except Exception:
         # Non-Windows/unit environments can still exercise truthful unavailable paths.
         logger.debug("Media COM initialization unavailable", exc_info=True)

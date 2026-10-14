@@ -1,5 +1,5 @@
-"""Extension system: shared gated-install flow for MCP/SKILL.md/OpenAPI/
-plugin adapters. No new execution engine -- every adapter
+"""Extension system: shared gated-install flow for SKILL.md/OpenAPI/generated
+extensions. No new execution engine -- every adapter
 still registers ordinary tools into charlie.tools.registry. This module only
 provides the shared safety gate: build a provenance "Skill Card", scan its
 content for red flags, and route the install/enable decision through
@@ -132,7 +132,7 @@ class RuntimeExtension:
         return {
             "name": self.name,
             "kind": self.kind,
-            "source": "mcp" if self.kind == "mcp" else redact_sensitive_text(self.source)[:500],
+            "source": redact_sensitive_text(self.source)[:500],
             "enabled": self.enabled,
             "tool_names": list(self.tool_names),
             "warnings": safe_warnings,

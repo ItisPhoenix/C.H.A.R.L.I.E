@@ -26,3 +26,19 @@ class TestTextToolInstructionsGating:
     def test_excluded_in_native_mode(self):
         stable = _build_stable_tier("soul", use_native_tools=True)
         assert _TEXT_TOOL_INSTRUCTIONS not in stable
+
+    def test_native_payload_keeps_live_tool_schemas_without_prompt_roster(self):
+        from charlie.config import Config
+        from charlie.core import Brain
+        from charlie import tools as _registered_tools  # noqa: F401
+
+        brain = Brain.__new__(Brain)
+        brain.config = Config()
+        brain.config.vision_enabled = False
+        brain._use_native_tools = True
+        brain._pending_vision_image_url = None
+        payload = brain._build_payload([{"role": "user", "content": "Explain recursion."}])
+
+        names = {item["function"]["name"] for item in payload["tools"]}
+        assert "weather_get" in names
+        assert "YOUR ACTUAL CAPABILITIES" not in _build_stable_tier("soul", use_native_tools=True)

@@ -1,6 +1,5 @@
 from charlie.self_extension.adapters.code_adapter import CodeAdapter
 from charlie.self_extension.adapters.config_adapter import ConfigAdapter
-from charlie.self_extension.adapters.mcp_adapter import MCPAdapter
 from charlie.self_extension.adapters.skill_adapter import SkillAdapter
 from charlie.self_extension.checkpoint import CheckpointManager
 from charlie.self_extension.classifier import ExtensionClassifier
@@ -38,7 +37,6 @@ __all__ = [
     "ExtensionRegistry",
     "ConfigAdapter",
     "SkillAdapter",
-    "MCPAdapter",
     "CodeAdapter",
     "SelfExtensionOrchestrator",
 ]

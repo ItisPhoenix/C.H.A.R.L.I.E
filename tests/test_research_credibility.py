@@ -195,6 +195,42 @@ def test_soft_404_page_returned_with_200_is_discarded():
     assert document_from_content(result, chrome, extraction_method="trafilatura") is None
 
 
+def test_login_gated_onboarding_shell_is_not_read_as_research_evidence():
+    from charlie.research.fetch import document_from_content
+    from charlie.research.models import SearchResult
+
+    result = SearchResult(
+        "X - The Everything App",
+        "https://x.com/i/jf/onboarding/web?redirect_after_login=%2Fexplore",
+        domain="x.com",
+    )
+    script_shell = "const formatters = {formatFullTimestamp: function formatFullTimestamp() {}; } " * 12
+
+    assert document_from_content(
+        result,
+        script_shell,
+        extraction_method="trafilatura",
+        title="X - The Everything App / X",
+    ) is None
+
+
+def test_public_login_document_is_not_mistaken_for_an_authentication_gate():
+    from charlie.research.fetch import document_from_content
+    from charlie.research.models import SearchResult
+
+    result = SearchResult(
+        "OAuth login guide",
+        "https://example.com/guides/login-with-oauth",
+        domain="example.com",
+    )
+    body = (
+        "The OAuth login flow redirects the visitor to the authorization page, "
+        "then validates the callback and exchanges the authorization code. "
+    ) * 4
+
+    assert document_from_content(result, body, extraction_method="trafilatura") is not None
+
+
 def test_real_content_with_the_same_host_is_still_kept():
     from charlie.research.fetch import document_from_content
     from charlie.research.models import SearchResult

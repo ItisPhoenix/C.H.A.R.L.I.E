@@ -336,3 +336,35 @@ def test_main_wires_tool_registry_from_process_composition(monkeypatch):
     main._wire_memory_service(service)
 
     assert calls == [service]
+
+
+def test_current_location_preference_survives_restart_and_updates(tmp_path):
+    location_db = tmp_path / "weather-memory.db"
+    graph = MemoryGraph(str(location_db))
+    service = MemoryService(graph=graph, semantic_expected=False)
+    try:
+        assert service.get_preference("current_location") is None
+        assert service.set_preference(
+            "current_location", "Kanpur, Uttar Pradesh, India", provenance="user_statement"
+        )
+    finally:
+        graph.close()
+
+    reopened_graph = MemoryGraph(str(location_db))
+    reopened_service = MemoryService(graph=reopened_graph, semantic_expected=False)
+    try:
+        assert reopened_service.get_preference("current_location") == "Kanpur, Uttar Pradesh, India"
+        assert reopened_service.set_preference(
+            "current_location", "New Delhi, India", provenance="user_correction"
+        )
+        assert reopened_service.get_preference("current_location") == "New Delhi, India"
+        weather_preferences = [
+            item for item in reopened_service.list_items(category="preference")
+            if (item.get("metadata") or {}).get("preference_key") == "current_location"
+        ]
+        assert len(weather_preferences) == 1
+        assert weather_preferences[0]["metadata"]["history"][0]["before"]["content"].endswith(
+            "Kanpur, Uttar Pradesh, India"
+        )
+    finally:
+        reopened_graph.close()

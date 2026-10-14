@@ -2,8 +2,8 @@
 
 Charlie keeps its public tool names, schemas, policy, approvals, leases and result
 envelopes. This module is the only place that decides *how* an action is executed:
-through Cua when the runtime is available, otherwise through the legacy
-``charlie.desktop`` adapters, which stay present until every acceptance gate passes.
+through the authorized Cua runtime. Unavailable or refused control stays refused;
+legacy ``charlie.desktop`` helpers do not provide a parallel physical executor.
 
 Marks are Charlie's own addressing scheme, so the public schema does not change:
 ``desktop_observe`` still returns ``[3] Button "Save"`` and ``desktop_click`` still
@@ -18,12 +18,15 @@ rather than guessing a pixel target.
 from __future__ import annotations
 
 import base64
+import logging
 import threading
 import time
 from typing import Any, Optional
 
 from .cua_adapter import CuaAdapter, CuaOutcome
-from .cua_bridge import CuaBridgeError, CuaRuntimeBridge
+from .cua_bridge import CuaBridgeError, CuaBridgeTimeout, CuaBridgeUnavailable, CuaRuntimeBridge
+
+logger = logging.getLogger("charlie.computer.backend")
 
 __all__ = [
     "DesktopBackend",
@@ -55,7 +58,7 @@ class _Snapshot:
 
 
 class DesktopBackend:
-    """Routes Charlie desktop actions to Cua, or to the legacy adapters as fallback."""
+    """Owns Charlie's authorized Cua desktop execution and observations."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -78,24 +81,59 @@ class DesktopBackend:
                     and self._target.get("pid") == selected.get("pid")
                     and self._target.get("window_id") == selected.get("window_id")
                 )
-                if same_target and self._adapter is not None and self._adapter.available:
-                    return self._adapter
                 old_bridge = self._bridge
+                idle_expired = bool(
+                    same_target and old_bridge is not None and getattr(old_bridge, "is_idle_expired", False)
+                )
+                if idle_expired and not _window_target_is_current(selected):
+                    self._bridge = None
+                    self._adapter = None
+                    self._snapshot = None
+                    self._target = None
+                    target_expired = True
+                else:
+                    target_expired = False
+                if (
+                    not target_expired
+                    and same_target
+                    and not idle_expired
+                    and self._adapter is not None
+                    and self._adapter.available
+                ):
+                    return self._adapter
                 self._bridge = None
                 self._adapter = None
                 self._snapshot = None
-                self._target = selected
+                if not target_expired:
+                    self._target = selected
             if old_bridge is not None:
-                old_bridge.shutdown()
+                if not old_bridge.shutdown():
+                    with self._lock:
+                        self._bridge = old_bridge
+                    logger.warning("Previous bounded Cua runtime did not finish shutdown")
+                    return None
+            if target_expired:
+                logger.info("Bounded Cua idle runtime expired after its exact window target disappeared")
+                return None
+            if idle_expired:
+                logger.info("Renewing idle bounded Cua runtime for its still-live exact window target")
             bridge = CuaRuntimeBridge(
                 window_target={"pid": int(selected["pid"]), "window_id": int(selected["window_id"])}
             )
             try:
                 if not bridge.ensure_started():
-                    bridge.shutdown()
+                    if not bridge.shutdown():
+                        with self._lock:
+                            self._bridge = bridge
+                            self._target = selected
+                        logger.warning("Failed bounded Cua startup left cleanup incomplete")
                     return None
             except CuaBridgeError:
-                bridge.shutdown()
+                if not bridge.shutdown():
+                    with self._lock:
+                        self._bridge = bridge
+                        self._target = selected
+                    logger.warning("Failed bounded Cua startup left cleanup incomplete")
                 return None
             with self._lock:
                 self._bridge = bridge
@@ -106,16 +144,40 @@ class DesktopBackend:
     def using_cua(self) -> bool:
         return self._ensure() is not None
 
-    def shutdown(self) -> None:
+    def shutdown(self) -> bool:
         with self._runtime_lock:
             with self._lock:
                 bridge = self._bridge
-                self._bridge = None
-                self._adapter = None
                 self._snapshot = None
                 self._target = None
-            if bridge is not None:
-                bridge.shutdown()
+            if bridge is None:
+                with self._lock:
+                    self._adapter = None
+                return True
+            stopped = bridge.shutdown()
+            if stopped:
+                with self._lock:
+                    if self._bridge is bridge:
+                        self._bridge = None
+                        self._adapter = None
+            return stopped
+
+    def focus_overlay_rect(self, window_hint: Optional[str] = None) -> Optional[dict[str, int]]:
+        """Return bounds only for the same live native target desktop control uses."""
+        if window_hint is not None:
+            target = _existing_native_window(window_hint)
+        else:
+            with self._lock:
+                target = dict(self._target or {}) or None
+            target = target or _current_window_target()
+        if not target or not _window_target_is_current(target) or _is_browser_window(target):
+            return None
+        try:
+            from charlie.desktop.windows import window_rect
+
+            return window_rect(int(target["window_id"]))
+        except (KeyError, TypeError, ValueError, OSError):
+            return None
 
     # -------------------------------------------------------------- observing
 
@@ -131,6 +193,7 @@ class DesktopBackend:
         """
         with self._lock:
             bound_target = dict(self._target or {})
+            self._snapshot = None
         target = dict(window_target or bound_target or _current_window_target() or {})
         if not target:
             return "Refused: no exact live window target is available."
@@ -140,12 +203,13 @@ class DesktopBackend:
         if adapter is None:
             return CUA_UNAVAILABLE_MSG
         pid, window_id = int(target["pid"]), int(target["window_id"])
+        max_depth = 24 if str(target.get("title") or "").casefold().startswith("save as") else 12
         payload = adapter.window_state(
             pid,
             window_id,
             capture_mode="ax",
             include_screenshot=include_screenshot,
-            max_depth=12,
+            max_depth=max_depth,
         )
         state = _as_state(payload)
         if _is_refusal(state):
@@ -186,6 +250,13 @@ class DesktopBackend:
                 pid, window_id, marks, state,
                 screenshot_data_url,
             )
+        if any(line.endswith('Edit "File name:"') for line in lines) and any(
+            line.endswith('Button "Save"') for line in lines
+        ):
+            return "\n".join(
+                line for line in lines
+                if line.endswith('Edit "File name:"') or line.endswith('Button "Save"')
+            )
         return "\n".join(lines) if lines else "(no marked elements)"
 
     def capture_window(self) -> tuple[str, Optional[str]]:
@@ -194,10 +265,45 @@ class DesktopBackend:
         snapshot = self._current_snapshot()
         return text, snapshot.screenshot_data_url if snapshot else None
 
+    def read_screen(self) -> str:
+        """Read text only from a fresh, authorized Cua window screenshot."""
+        from charlie.desktop import ocr
+
+        text, image = self.capture_window()
+        if text.startswith(("Refused:", CUA_UNAVAILABLE_MSG)):
+            return text
+        if not ocr.config.desktop_ocr_enabled or not ocr.OCR_AVAILABLE:
+            return f"{text}\nOCR is unavailable; I could not read the screen text."
+        if not image:
+            return f"{text}\nScreen text is unverified: Cua did not provide a window screenshot."
+        started = time.perf_counter()
+        try:
+            if not image.startswith("data:image/") or ";base64," not in image:
+                raise ValueError("Unsupported window screenshot encoding")
+            pixels = base64.b64decode(image.split(";base64,", 1)[1], validate=True)
+            elements = ocr.ocr_marks(pixels)
+        except Exception:
+            logger.warning("Cua window OCR failed", exc_info=True)
+            return f"{text}\nScreen text is unverified: OCR could not read the captured window."
+        finally:
+            logger.info(
+                "pipeline_stage | stage=desktop_ocr | latency_ms=%.1f",
+                (time.perf_counter() - started) * 1000,
+            )
+        if not elements:
+            return f"{text}\nOCR did not recognize reliable text in this window."
+        logger.info("Cua window OCR recognized %s text regions", len(elements))
+        return text + "\n[OCR TEXT - observation only]\n" + "\n".join(
+            element.name for element in elements
+        )
+
     def click_at(self, x: int, y: int, *, button: str = "left", double: bool = False) -> str:
         snapshot = self._current_snapshot()
         if snapshot is None or snapshot.screenshot_data_url is None:
             return "Refused: coordinate click needs a fresh Cua window screenshot."
+        capture_id = snapshot.state.get("snapshot_id")
+        if not isinstance(capture_id, str) or not capture_id:
+            return "Refused: Cua did not provide a capture identity for this screenshot."
         width, height = _screenshot_dimensions(snapshot.state)
         if width is None or height is None or not (0 <= x < width and 0 <= y < height):
             return "Refused: coordinate is outside the fresh Cua window screenshot."
@@ -207,14 +313,10 @@ class DesktopBackend:
         adapter = self._ensure(target)
         if adapter is None:
             return CUA_UNAVAILABLE_MSG
-        action = (
-            adapter.double_click(
-                pid=snapshot.pid, window_id=snapshot.window_id, x=x, y=y
-            )
-            if double
-            else adapter.click(
-                pid=snapshot.pid, window_id=snapshot.window_id, x=x, y=y, button=button
-            )
+        self._invalidate_snapshot()
+        action = adapter.click(
+            pid=snapshot.pid, window_id=snapshot.window_id, x=x, y=y,
+            button=button, click_count=2 if double else 1, capture_id=capture_id,
         )
         return self._outcome_text(action, "Clicked the fresh screenshot point.")
 
@@ -231,6 +333,7 @@ class DesktopBackend:
         adapter = self._ensure(target)
         if adapter is None:
             return CUA_UNAVAILABLE_MSG
+        self._invalidate_snapshot()
         action = adapter.move_cursor(x, y, pid=snapshot.pid, window_id=snapshot.window_id)
         return self._outcome_text(action, "Moved the cursor to the fresh screenshot point.")
 
@@ -241,6 +344,7 @@ class DesktopBackend:
         adapter = self._ensure(target)
         if adapter is None:
             return CUA_UNAVAILABLE_MSG
+        self._invalidate_snapshot()
         action = adapter.set_window_frame(
             int(target["pid"]), int(target["window_id"]), x=x, y=y,
             width=width, height=height,
@@ -259,10 +363,16 @@ class DesktopBackend:
         target = _existing_native_window(window)
         if target is None or not _window_target_is_current(target):
             return "Refused: no exact live window matches that title."
+        return self._manage_window_target(target, action)
+
+    def _manage_window_target(self, target: dict[str, Any], action: str) -> str:
+        if not _window_target_is_current(target):
+            return "Refused: the exact window target is stale."
         if action == "close":
             adapter = self._ensure(target)
             if adapter is None:
                 return CUA_UNAVAILABLE_MSG
+            self._invalidate_snapshot()
             result = adapter.invoke_menu(
                 int(target["pid"]), int(target["window_id"]), ["System", "Close"]
             )
@@ -284,6 +394,7 @@ class DesktopBackend:
         adapter = self._ensure(target)
         if adapter is None:
             return CUA_UNAVAILABLE_MSG
+        self._invalidate_snapshot()
         result = adapter.invoke_menu(
             int(target["pid"]), int(target["window_id"]), ["System", menu_item]
         )
@@ -333,9 +444,7 @@ class DesktopBackend:
             CuaOutcome.EXECUTED_UNVERIFIED,
             CuaOutcome.SUSPECTED_NOOP,
         }:
-            return (
-                f"Executed but not verified ({result.outcome.value}). {ok}"
-            )
+            return f"Executed but not verified ({result.outcome.value})."
         return f"Desktop action failed: {result.summary or result.outcome.value}."
 
     # ---------------------------------------------------------------- actions
@@ -352,6 +461,7 @@ class DesktopBackend:
         adapter = self._ensure(target)
         if adapter is None:
             return CUA_UNAVAILABLE_MSG
+        self._invalidate_snapshot()
         result = adapter.click(
             element_token=token, pid=snapshot.pid, window_id=snapshot.window_id
         )
@@ -377,6 +487,7 @@ class DesktopBackend:
             ),
             {},
         )
+        self._invalidate_snapshot()
         if "set_value" in (element.get("actions") or []):
             result = adapter.set_value(
                 snapshot.pid,
@@ -396,6 +507,14 @@ class DesktopBackend:
                 )
                 if focused.outcome in {CuaOutcome.REFUSED, CuaOutcome.FAILED}:
                     return self._outcome_text(focused, f"Could not focus element {mark_id}.")
+                selected_all = adapter.press_key(
+                    "a",
+                    modifiers=["ctrl"],
+                    pid=snapshot.pid,
+                    window_id=snapshot.window_id,
+                )
+                if selected_all.outcome in {CuaOutcome.REFUSED, CuaOutcome.FAILED}:
+                    return self._outcome_text(selected_all, f"Could not replace text in element {mark_id}.")
                 result = adapter.type_text(
                     text,
                     pid=snapshot.pid,
@@ -435,6 +554,14 @@ class DesktopBackend:
         """Charlie policy and approval have already cleared this chord."""
         snapshot = self._current_snapshot()
         if snapshot is None:
+            try:
+                # Typing a value invalidates its mark snapshot; refresh the exact foreground
+                # window before a follow-up chord such as Ctrl+S.
+                self.observe()
+            except Exception:
+                logger.debug("Fresh desktop observation failed before key input", exc_info=True)
+            snapshot = self._current_snapshot()
+        if snapshot is None:
             return "Refused: observe a target before sending keys."
         target = self._snapshot_target(snapshot)
         if not _window_target_is_current(target):
@@ -446,6 +573,7 @@ class DesktopBackend:
         if chord is None:
             return "Refused: unsupported or prohibited key chord."
         key, modifiers = chord
+        self._invalidate_snapshot()
         result = adapter.press_key(
             key,
             modifiers=modifiers,
@@ -470,6 +598,7 @@ class DesktopBackend:
         }
         args["pid"] = snapshot.pid
         args["window_id"] = snapshot.window_id
+        self._invalidate_snapshot()
         result = adapter.scroll(**args)
         return self._outcome_text(result, f"Scrolled {notches}.")
 
@@ -486,6 +615,7 @@ class DesktopBackend:
         if adapter is None:
             return CUA_UNAVAILABLE_MSG
         args: dict[str, Any] = {"pid": snapshot.pid, "window_id": snapshot.window_id}
+        self._invalidate_snapshot()
         result = adapter.drag(x1, y1, x2, y2, **args)
         return self._outcome_text(result, "Dragged.")
 
@@ -498,22 +628,95 @@ class DesktopBackend:
 
     def open_app(self, apps: Any, commands: Any = None) -> str:
         names = [str(apps)] if isinstance(apps, str) else [str(name) for name in apps]
-        commands_list = [commands] if isinstance(commands, str) else commands
+        commands = [commands] if isinstance(commands, str) else commands or []
         if not names:
             return "Refused: no application was specified."
-        from charlie.desktop.apps import launch_apps
+        results = []
+        for index, name in enumerate(names):
+            hint = str(commands[index]) if index < len(commands) and commands[index] else None
+            entry = _app_entry(name)
+            if hint and not _process_hint_matches_app(name, hint, entry):
+                results.append(f"Refused: the process hint did not match {name}.")
+                continue
+            targets = _native_app_windows(name, [hint] if hint else None)
+            if len(targets) != 1:
+                results.append(
+                    f"I couldn't focus {name}; no unique live app window was found. "
+                    "This desktop control can only focus apps that are already running."
+                )
+                continue
+            try:
+                results.append(self.bind_window_target(targets[0]))
+            except CuaBridgeUnavailable:
+                results.append(CUA_UNAVAILABLE_MSG)
+            except CuaBridgeTimeout:
+                results.append("Executed but not verified (Cua focus timed out).")
+            except CuaBridgeError:
+                results.append("I couldn't confirm the requested app window through desktop control.")
+        if all(result.startswith("Opened the app and confirmed") for result in results):
+            return "Opened the app and confirmed its exact window through bounded Cua."
+        return "I couldn't open every requested app. " + " ".join(results)
 
-        launched = launch_apps(names, commands_list)
-        if "could not open" in launched.lower():
-            return launched
-        target = _existing_native_window(names[-1])
-        if target is None:
-            return f"Refused: {names[-1]} opened without an exact observable window."
-        return self.bind_window_target(target)
+    def close_apps(
+        self, apps: list[str], process_hints: Optional[list[str]] = None
+    ) -> tuple[str, bool, str | None]:
+        """Close one unambiguous exact window per app through Cua."""
+        results: list[str] = []
+        verified = True
+        failure_kind: str | None = None
+        for index, name in enumerate(apps):
+            hint = process_hints[index] if process_hints and index < len(process_hints) else None
+            entry = _app_entry(name)
+            if hint and not _process_hint_matches_app(name, hint, entry):
+                results.append(f"Could not close {name}: its process hint did not match the app.")
+                verified = False
+                failure_kind = failure_kind or "invalid_process_hint"
+                continue
+            targets = _native_app_windows(name, [hint] if hint else None)
+            if len(targets) != 1:
+                why = "no exact live window" if not targets else "multiple matching windows"
+                results.append(f"Could not close {name}: {why}.")
+                verified = False
+                failure_kind = failure_kind or ("target_unavailable" if not targets else "ambiguous_target")
+                continue
+            target = targets[0]
+            try:
+                result = self._manage_window_target(target, "close")
+            except CuaBridgeUnavailable:
+                result = CUA_UNAVAILABLE_MSG
+            except CuaBridgeTimeout:
+                result = "Executed but not verified (Cua close timed out)."
+            except CuaBridgeError:
+                result = "I couldn't confirm the close action through desktop control."
+            closed = result == "Closed the exact window and verified it is gone."
+            results.append(
+                f"Closed the selected window for {name} and verified it is gone."
+                if closed else f"{name}: {result}"
+            )
+            verified = verified and closed
+            if not closed:
+                if failure_kind is None:
+                    if result == CUA_UNAVAILABLE_MSG:
+                        failure_kind = "unavailable"
+                    elif result.startswith(("Refused", "Refused by")):
+                        failure_kind = "target_unavailable"
+                    elif result.startswith("Desktop action failed"):
+                        failure_kind = "cua_failed"
+                    else:
+                        failure_kind = "cua_window_unverified"
+        if any("Executed but not verified" in result for result in results):
+            failure_kind = "cua_window_unverified"
+        elif any(result.startswith("Desktop action failed") for result in results):
+            failure_kind = "cua_failed"
+        return " ".join(results), verified, failure_kind
 
     def _current_snapshot(self) -> Optional[_Snapshot]:
         with self._lock:
             return self._snapshot
+
+    def _invalidate_snapshot(self) -> None:
+        with self._lock:
+            self._snapshot = None
 
     def _snapshot_target(self, snapshot: _Snapshot) -> dict[str, Any]:
         with self._lock:
@@ -577,21 +780,64 @@ def note_focus(pid: int, window_id: Optional[int]) -> None:
         _LAST_FOCUSED["window_id"] = window_id
 
 
-def _existing_native_window(name: str) -> Optional[dict[str, Any]]:
-    """Find a visible app window before bounded Cua's pid-scoped lookup.
-
-    Bounded Cua intentionally rejects global window enumeration. Native enumeration
-    supplies the exact pid/hwnd, after which Cua still performs the authorized
-    focus and state verification.
-    """
+def _native_app_windows(
+    name: str, process_hints: Optional[list[str]] = None
+) -> list[dict[str, Any]]:
+    """Resolve visible windows by exact process identity or exact configured title."""
     if not name:
-        return None
+        return []
     try:
-        from charlie.desktop.windows import find_window_identity
-
-        return find_window_identity(name)
+        from charlie.desktop import windows
+        entry = _app_entry(name)
+        processes = {
+            _process_basename(value).casefold()
+            for value in (process_hints or (entry.close_processes if entry else ()))
+            if value
+        }
+        titles = {name.strip().casefold()}
+        if entry:
+            titles.update(title.casefold() for title in entry.close_window_titles)
+        matches = []
+        for item in windows.list_windows():
+            title = str(item.get("title") or "")
+            hwnd = int(item.get("hwnd") or 0)
+            if not hwnd:
+                continue
+            identity = windows.window_identity(hwnd, title)
+            if not identity or _is_browser_window(identity):
+                continue
+            process_name = _process_basename(str(identity.get("process_name") or "")).casefold()
+            executable = _process_basename(str(identity.get("executable") or "")).casefold()
+            if title.casefold() in titles or processes.intersection({process_name, executable}):
+                if _window_target_is_current(identity):
+                    matches.append(identity)
+        return matches
     except Exception:
-        return None
+        return []
+
+
+def _existing_native_window(name: str) -> Optional[dict[str, Any]]:
+    matches = _native_app_windows(name)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _app_entry(name: str) -> Any:
+    from charlie.known_apps import APP_REGISTRY
+
+    return APP_REGISTRY.get(name.strip().casefold())
+
+
+def _process_basename(value: str) -> str:
+    """Windows process basename without interpreting a hint as an executable path."""
+    return value.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _process_hint_matches_app(name: str, hint: str, entry: Any) -> bool:
+    basename = _process_basename(hint).casefold()
+    if entry:
+        return basename in {value.casefold() for value in entry.close_processes}
+    stem = basename[:-4] if basename.endswith(".exe") else basename
+    return stem == name.strip().casefold()
 
 
 def _current_window_target() -> Optional[dict[str, Any]]:
@@ -762,11 +1008,16 @@ def reset_cua_browser() -> None:
     return None
 
 
-def reset_backend() -> None:
+def reset_backend() -> bool:
     """Drop the runtime. Used by tests and by Charlie's teardown."""
     global _backend
     with _backend_lock:
         backend = _backend
-        _backend = None
-    if backend is not None:
-        backend.shutdown()
+    if backend is None:
+        return True
+    stopped = backend.shutdown()
+    if stopped:
+        with _backend_lock:
+            if _backend is backend:
+                _backend = None
+    return stopped

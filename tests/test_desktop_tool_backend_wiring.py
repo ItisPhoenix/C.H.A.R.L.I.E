@@ -17,6 +17,7 @@ from __future__ import annotations
 import pytest
 
 from charlie import tools as T
+from charlie.core import _verification_status_from_result
 
 
 class RecordingBackend:
@@ -31,6 +32,9 @@ class RecordingBackend:
 
     def observe(self) -> str:
         return self._record("observe")
+
+    def read_screen(self) -> str:
+        return self._record("read_screen")
 
     def click_mark(self, mark_id) -> str:
         return self._record("click_mark", mark_id)
@@ -67,6 +71,7 @@ def backend(monkeypatch):
 
 DIRECT_CASES = [
     ("desktop_observe", (), "observe"),
+    ("desktop_read_screen", (), "read_screen"),
     ("desktop_click", (7,), "click_mark"),
     ("desktop_type", (7, "hi"), "type_text"),
     ("desktop_key", ("escape",), "key_press"),
@@ -76,6 +81,7 @@ DIRECT_CASES = [
 
 REGISTRY_CASES = [
     ("desktop_observe", {}, "observe"),
+    ("desktop_read_screen", {}, "read_screen"),
     ("desktop_click", {"mark_id": 7}, "click_mark"),
     ("desktop_type", {"mark_id": 7, "text": "hi"}, "type_text"),
     ("desktop_key", {"keys": "escape"}, "key_press"),
@@ -167,6 +173,26 @@ class TestGuardStillShortCircuits:
         assert fake.calls == [], "the backend must not be called when disabled"
 
 
+def test_focus_preserves_cua_exact_window_verification(monkeypatch):
+    from charlie.computer import backend as backend_module
+    from charlie.desktop import windows
+    from charlie.core import _normalize_tool_result
+
+    target = {"pid": 10, "window_id": 20, "title": "Untitled - Editor"}
+    class FocusBackend:
+        def bind_window_target(self, value):
+            assert value == target
+            return "Opened the app and confirmed its exact window through bounded Cua."
+    monkeypatch.setattr(T, "_desktop_ready", lambda: True)
+    monkeypatch.setattr(windows, "find_window_identity", lambda _title: target)
+    monkeypatch.setattr(backend_module, "get_backend", lambda: FocusBackend())
+    raw = T.registry.execute_tool_structured("desktop_focus", {"window": "Editor"})
+    result = _normalize_tool_result("desktop_focus", raw, request="Use Editor", task_id="task", session_id="test", turn_id="turn")
+    assert result.verification_status == "verified_success"
+    assert "couldn't verify" not in result.result
+    assert raw.structured_data["window_identity"] == {"pid": 10, "window_id": 20}
+
+
 def test_type_text_uses_set_value_when_the_fresh_element_exposes_it(monkeypatch):
     from charlie.computer import backend as backend_module
     from charlie.computer.backend import DesktopBackend, _Snapshot
@@ -245,6 +271,10 @@ def test_type_text_falls_back_to_exact_window_typing_only_for_no_value_pattern(m
             calls.append(("focus", kwargs))
             return CuaActionResult(outcome=CuaOutcome.EXECUTED_UNVERIFIED)
 
+        def press_key(self, key, **kwargs):
+            calls.append(("select_all", key, kwargs))
+            return CuaActionResult(outcome=CuaOutcome.EXECUTED_UNVERIFIED)
+
         def type_text(self, text, **kwargs):
             calls.append(("type", text, kwargs))
             return CuaActionResult(outcome=CuaOutcome.EXECUTED_UNVERIFIED)
@@ -263,9 +293,57 @@ def test_type_text_falls_back_to_exact_window_typing_only_for_no_value_pattern(m
 
     result = backend.type_text(129, "fixture")
 
-    assert [call[0] for call in calls] == ["focus", "type"]
-    assert "element_token" not in calls[1][2]
+    assert [call[0] for call in calls] == ["focus", "select_all", "type"]
+    assert calls[1][1] == "a" and calls[1][2]["modifiers"] == ["ctrl"]
+    assert "element_token" not in calls[2][2]
     assert "fresh UIA readback matches" in result
+
+
+def test_save_as_observation_reads_deeper_dialog_tree_without_changing_other_windows():
+    from charlie.computer.backend import DesktopBackend
+
+    depths = []
+
+    class Adapter:
+        def window_state(self, _pid, _window_id, **kwargs):
+            depths.append(kwargs["max_depth"])
+            return {"elements": []}
+
+    backend = DesktopBackend()
+    backend._ensure = lambda _target=None: Adapter()
+    backend._target = {"pid": 10, "window_id": 20, "title": "Save as"}
+    backend.observe()
+    backend._target = {"pid": 10, "window_id": 21, "title": "Notepad"}
+    backend.observe()
+
+    assert depths == [24, 12]
+
+
+def test_large_file_save_dialog_surfaces_only_actionable_controls():
+    from charlie.computer.backend import DesktopBackend
+
+    elements = [
+        {"element_token": f"folder-{index}", "role": "TreeItem", "label": f"Folder {index}"}
+        for index in range(133)
+    ]
+    elements.extend([
+        {"element_token": "filename", "role": "Edit", "label": "File name:"},
+        {"element_token": "file-type", "role": "ComboBox", "label": "Save as type:"},
+        {"element_token": "save", "role": "Button", "label": "Save"},
+    ])
+
+    class Adapter:
+        def window_state(self, _pid, _window_id, **_kwargs):
+            return {"elements": elements}
+
+    backend = DesktopBackend()
+    backend._ensure = lambda _target=None: Adapter()
+    backend._target = {"pid": 10, "window_id": 20, "title": "Save as"}
+
+    observed = backend.observe()
+
+    assert observed == '[133] Edit "File name:"\n[135] Button "Save"'
+    assert len(backend._snapshot.marks) == 136
 
 
 def test_key_chord_splits_into_cua_key_and_modifier_fields(monkeypatch):
@@ -288,6 +366,33 @@ def test_key_chord_splits_into_cua_key_and_modifier_fields(monkeypatch):
 
     backend.key_press("Ctrl+S")
 
+    assert calls == [("s", {"modifiers": ["ctrl"], "pid": 10, "window_id": 20})]
+
+
+def test_key_press_reobserves_after_verified_typing_invalidates_snapshot(monkeypatch):
+    from charlie.computer import backend as backend_module
+    from charlie.computer.backend import DesktopBackend, _Snapshot
+    from charlie.computer.cua_adapter import CuaActionResult, CuaOutcome
+
+    calls = []
+    backend = DesktopBackend()
+
+    class Adapter:
+        def press_key(self, key, **kwargs):
+            calls.append((key, kwargs))
+            return CuaActionResult(outcome=CuaOutcome.EXECUTED_UNVERIFIED)
+
+    def observe():
+        backend._snapshot = _Snapshot(10, 20, {}, {"elements": []})
+        return "Observed the foreground window."
+
+    monkeypatch.setattr(backend_module, "_window_target_is_current", lambda _target: True)
+    monkeypatch.setattr(backend, "observe", observe)
+    monkeypatch.setattr(backend, "_ensure", lambda target=None: Adapter())
+
+    result = backend.key_press("Ctrl+S")
+
+    assert result.startswith("Executed but not verified")
     assert calls == [("s", {"modifiers": ["ctrl"], "pid": 10, "window_id": 20})]
 
 
@@ -362,6 +467,28 @@ def test_window_close_uses_cua_and_waits_for_disappearance(monkeypatch):
 
     assert result == "Closed the exact window and verified it is gone."
     assert calls == [(20, 30, ["System", "Close"])]
+
+
+def test_closed_window_verification_text_is_accepted_only_after_readback():
+    assert _verification_status_from_result(
+        "desktop_window", "Closed the exact window and verified it is gone.", None
+    ) == "verified_success"
+    assert _verification_status_from_result(
+        "desktop_window", "Executed but not verified: the exact window is still present.", None
+    ) == "executed_unverified"
+
+
+def test_desktop_type_accepts_only_an_exact_fresh_uia_readback():
+    assert _verification_status_from_result(
+        "desktop_type",
+        "Typed into element 0; fresh UIA readback matches requested text.",
+        None,
+    ) == "verified_success"
+    assert _verification_status_from_result(
+        "desktop_type",
+        "Executed but not verified (fresh UIA readback did not match requested text).",
+        None,
+    ) == "executed_unverified"
 
 
 class TestOpenAppUsesTheCanonicalLauncher:

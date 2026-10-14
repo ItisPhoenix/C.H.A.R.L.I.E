@@ -1,6 +1,5 @@
 from charlie.research.candidates import extract_candidates
 from charlie.research.models import ResearchBrief, SourceClass, SourceDocument
-from charlie.research.search import verification_queries
 from charlie.research.sources import classify
 
 
@@ -30,11 +29,6 @@ def test_llm_release_candidates_are_extracted_from_dated_source_statements():
     assert candidates["GPT-6 Sol"].brand == "OpenAI"
     assert candidates["GPT-6 Sol"].access == "closed"
     assert candidates["GPT-6 Sol"].release_date == "2026-09-29"
-    assert verification_queries(candidates["Beam"], brief) == [
-        "Reflection AI Beam official model release announcement",
-        "Reflection AI Beam official release date",
-        "Reflection AI Beam release 2026-10-05",
-    ]
 
 
 def test_llm_release_candidate_can_be_named_before_the_release_verb():

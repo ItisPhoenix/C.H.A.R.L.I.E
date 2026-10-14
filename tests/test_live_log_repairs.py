@@ -181,28 +181,26 @@ def test_no_research_evidence_is_a_failed_tool_result():
 
 
 @pytest.mark.asyncio
-async def test_browser_extraction_reobserves_once_when_navigation_changes(monkeypatch):
+async def test_browser_extraction_uses_isolated_research_crawler(monkeypatch):
     from charlie import core
-    from charlie.browser import controller
+    from charlie.research import crawler
     from charlie.research.models import SearchResult
+
     brain = core.Brain.__new__(core.Brain)
     brain.config = SimpleNamespace(browser_enabled=True)
     monkeypatch.setattr(core, "_BROWSER_AVAILABLE", True)
-    monkeypatch.setattr("charlie.research.fetch.validate_public_url", lambda url: url)
-    class Page:
-        calls = 0
-        waits = 0
-        def goto(self, *args, **kwargs): pass
-        def content(self):
-            self.calls += 1
-            if self.calls == 1:
-                raise RuntimeError("Page.content: Unable to retrieve content because the page is navigating and changing the content.")
-            return "<html><body><p>Grounded source text with sufficient detail. " + "Public evidence. " * 30 + "</p></body></html>"
-        def wait_for_load_state(self, *args, **kwargs): self.waits += 1
-    page = Page()
-    monkeypatch.setattr(controller, "run", lambda fn, **kwargs: fn(page))
+    expected = object()
+    calls = []
+
+    async def crawl(result, *, timeout_s):
+        calls.append((result.url, timeout_s))
+        return expected
+
+    monkeypatch.setattr(crawler, "crawl_document", crawl)
     doc = await brain._research_browser_fetch(SearchResult("Source", "https://example.org/a", ""))
-    assert doc is not None and page.calls == 2 and page.waits == 1
+
+    assert doc is expected
+    assert calls == [("https://example.org/a", 15.0)]
 
 
 @pytest.mark.asyncio
@@ -212,7 +210,7 @@ async def test_inline_release_reads_canonical_pages_when_search_is_empty(monkeyp
     engine = ResearchEngine(SimpleNamespace(research_enabled=True, research_max_sources=3))
     seen = []
     async def empty_search(plan): return []
-    async def fetch_sources(results, mode):
+    async def fetch_sources(results, mode, **_kwargs):
         seen.extend(result.url for result in results)
         return [SourceDocument(url="https://www.python.org/downloads/", source_id="S1", title="Python downloads",
             domain="python.org", content="Python 3.14.0 - Oct. 7, 2026\nPython 3.15.0a1 - Oct. 8, 2026")]
@@ -328,7 +326,8 @@ async def test_research_voice_uses_the_short_result_and_keeps_full_text(tmp_path
 def test_savings_and_instalments_are_not_product_prices():
     from charlie.research.facts import extract_facts_from_document
     from charlie.research.models import SourceDocument
-    doc = SourceDocument(url="https://hp.com/product", source_id="S1", source_class="official",
+    doc = SourceDocument(url="https://hp.com/product", title="HP Victus 15-FA2381TX Gaming",
+        source_id="S1", source_class="official",
         content="Price: ₹78,584\nSave ₹36,990\nEMI ₹10,000 per month")
     facts = extract_facts_from_document(doc, candidate_name="HP Victus 15-FA2381TX Gaming")
     assert [fact.value for fact in facts if fact.aspect == "price"] == ["₹78,584"]

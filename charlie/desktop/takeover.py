@@ -6,6 +6,10 @@ If genuine user interaction is detected:
 2. Revokes canonical desktop capability ownership.
 3. Sets a clean cancellation flag.
 
+Windows reports one shared ``GetLastInputInfo`` tick for physical and injected input
+alike, so ticks Charlie caused are subtracted at the source: the dispatch path records
+its own ticks and those ticks are not read back as a human.
+
 Zero-keylogging guarantee: captures no keystrokes, no coordinates, and stores no input logs.
 """
 
@@ -22,6 +26,13 @@ logger = logging.getLogger("charlie.desktop.takeover")
 
 # Custom tag passed in dwExtraInfo during Charlie's synthetic SendInput calls
 CHARLIE_INPUT_TAG = 0x4348524C  # 'CHRL' in ASCII hex
+
+# How long after a Charlie dispatch its ticks keep counting as Charlie's, in the same
+# boot-tick domain as GetLastInputInfo. It only has to cover input the host delivers
+# after the call returns -- keystroke tails, multi-click and drag releases -- so 1.5s is
+# generous by two orders of magnitude over that. Wider would start eating a human who
+# grabs the mouse right after Charlie finishes, which is the takeover this exists for.
+CHARLIE_INPUT_GRACE_MS = 1500
 
 
 class LASTINPUTINFO(ctypes.Structure):
@@ -59,6 +70,10 @@ class UserTakeoverDetector:
         self._session_start_tick = 0
         self._session_owner: Optional[str] = None
         self._last_checked_tick = 0
+        self._self_input_dispatching = False
+        self._self_input_tick = 0
+        self._self_input_begin_tick = 0
+        self._self_input_grace_until = 0.0
 
     def get_last_input_tick(self) -> int:
         """Get the tick count of the last user physical or simulated input event."""
@@ -71,6 +86,39 @@ class UserTakeoverDetector:
             except Exception:
                 pass
         return int(time.perf_counter() * 1000)
+
+    def begin_self_input(self) -> None:
+        """Mark that Charlie is dispatching host input right now."""
+        with self._lock:
+            self._self_input_dispatching = True
+            self._self_input_begin_tick = self.get_last_input_tick()
+
+    def note_self_input(self) -> None:
+        """Record the tick Charlie's own last input dispatch produced."""
+        with self._lock:
+            end_tick = self.get_last_input_tick()
+            self._self_input_dispatching = False
+            # Unchanged from dispatch start means nothing at all arrived, so the newest
+            # tick predates this dispatch and belongs to a human. Anchor nothing rather
+            # than lend someone else's event Charlie's grace.
+            self._self_input_tick = (
+                0 if end_tick == self._self_input_begin_tick else end_tick
+            )
+            self._self_input_grace_until = (
+                time.monotonic() + CHARLIE_INPUT_GRACE_MS / 1000.0
+            )
+
+    def _explained_by_charlie(self, current_tick: int) -> bool:
+        if self._self_input_dispatching:
+            return True
+        if self._self_input_tick <= 0:
+            return False
+        # The tick comparison alone never expires: GetLastInputInfo only advances on new
+        # input, so a human who grabs once and holds still stays muted for good. The
+        # wall-clock bound expires the grace even when the tick never moves again.
+        if time.monotonic() >= self._self_input_grace_until:
+            return False
+        return current_tick <= self._self_input_tick + CHARLIE_INPUT_GRACE_MS
 
     def start_session(self, owner: str) -> None:
         """Mark the beginning of an automated physical cursor/keyboard effector session."""
@@ -95,6 +143,8 @@ class UserTakeoverDetector:
                 return self._takeover_triggered
 
             current_tick = self.get_last_input_tick()
+            if self._explained_by_charlie(current_tick):
+                return False
             # If user input occurred >= 250ms after session began, user took over
             if current_tick > self._session_start_tick + 250:
                 self._takeover_triggered = True

@@ -7,6 +7,7 @@ from charlie.browser.actions import read_url
 from charlie.core import Brain
 from charlie.research.citations import assign_search_citations, strip_invalid_citations
 from charlie.research.engine import ResearchEngine
+from charlie.research.formatting import compact_quick_search_answer, format_research_answer
 from charlie.research.models import (
     EvidenceItem,
     ResearchMode,
@@ -16,6 +17,64 @@ from charlie.research.models import (
     SourceDocument,
 )
 from charlie.research.providers import BingProvider, _BingParser, _DuckDuckGoParser, search_with_fallback
+
+
+def test_quick_search_answer_is_one_bold_cited_paragraph():
+    answer = (
+        "## Verified findings\n"
+        "- **Node.js v24.21.0** is the latest LTS release [S1].\n"
+        "2. Major versions spend six months in Current before LTS [S1].\n"
+        "3. A page excerpt that should not be shown [S1].\n"
+        "\n## Coverage gaps\nUnresolved: release date"
+    )
+
+    assert compact_quick_search_answer(answer) == (
+        "**Node.js v24.21.0** is the latest LTS release. [S1] "
+        "Major versions spend six months in Current before LTS [S1]."
+    )
+
+
+def test_research_answer_hides_unrequested_code_and_keeps_explanatory_paragraphs():
+    answer = (
+        "Enter or Space toggles the focused accordion row [S1].\n\n"
+        "import { Accordion } from '@uiarc/accordion';\n"
+        "import styles from '@/components/examples/accordion/accordion-basic.module.css';\n\n"
+        "The trigger exposes its expanded state to assistive technology [S1]."
+    )
+    formatted = format_research_answer(answer, "Research the accordion keyboard controls and accessibility.")
+    assert "Enter or Space" in formatted
+    assert "assistive technology" in formatted
+    assert "import {" not in formatted
+    assert "components/examples" not in formatted
+
+
+def test_large_json_fetch_text_keeps_release_rows_past_html_excerpt_limit():
+    import json
+
+    from charlie.research.fetch import _structured_json_text, document_from_content
+    from charlie.research.models import ResearchBrief
+    from charlie.research.releases import pick_stable
+
+    rows = [
+        {"version": f"v26.{index}.0", "date": "2026-10-01", "lts": False, "notes": "x" * 200}
+        for index in range(100)
+    ]
+    rows.append({"version": "v24.21.0", "date": "2026-10-01", "lts": "Jod"})
+    payload = json.dumps(rows)
+    preserved = _structured_json_text(payload)
+    assert preserved == payload and len(preserved) > 14000
+
+    source = document_from_content(
+        SearchResult("official releases", "https://nodejs.org/dist/index.json"),
+        preserved,
+        extraction_method="json",
+        max_chars=len(preserved),
+    )
+    source.source_id = "S1"
+    brief = ResearchBrief(
+        topic="Node.js", entity_kind="release", original_request="latest stable Node.js LTS release",
+    )
+    assert pick_stable([source], brief=brief) == ("v24.21.0", "2026-10-01", "S1")
 
 
 def test_duckduckgo_parser_extracts_structured_results():
@@ -107,21 +166,10 @@ async def test_yacy_provider_reads_local_json_results(monkeypatch):
     assert requests[0][1]["verify"] == "cacheonly"
 
 
-def test_scrapling_response_text_uses_visible_content_only():
-    import charlie.research.crawler as crawler
-
-    class FakeResponse:
-        def get_all_text(self, **kwargs):
-            assert kwargs["ignore_tags"] == ("script", "style", "noscript", "nav", "footer")
-            return "Visible article text"
-
-    assert crawler._response_text(FakeResponse()) == "Visible article text"
-
-
-def test_scrapling_dynamic_restores_windows_loop_policy_after_launch_error(monkeypatch):
+def test_isolated_browser_restores_windows_loop_policy_after_launch_error(monkeypatch):
     import asyncio
 
-    import scrapling.fetchers
+    import playwright.sync_api
 
     import charlie.research.crawler as crawler
 
@@ -134,30 +182,37 @@ def test_scrapling_dynamic_restores_windows_loop_policy_after_launch_error(monke
         current_policy["value"] = policy
         calls.append(("policy", policy))
 
-    class FakeFetcher:
-        @classmethod
-        def fetch(cls, _url, **_kwargs):
+    class FakeBrowserType:
+        def launch(self, **_kwargs):
             assert current_policy["value"] is proactor_policy
-            calls.append(("fetch", None))
+            calls.append(("launch", None))
             raise RuntimeError("launch failed")
+
+    class Manager:
+        chromium = FakeBrowserType()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
 
     monkeypatch.setattr(crawler.sys, "platform", "win32")
     monkeypatch.setattr(asyncio, "get_event_loop_policy", lambda: current_policy["value"])
     monkeypatch.setattr(asyncio, "set_event_loop_policy", set_policy)
     monkeypatch.setattr(asyncio, "WindowsProactorEventLoopPolicy", lambda: proactor_policy)
-    monkeypatch.setattr(scrapling.fetchers, "DynamicFetcher", FakeFetcher)
-    monkeypatch.setattr(scrapling.fetchers, "StealthyFetcher", FakeFetcher)
+    monkeypatch.setattr(playwright.sync_api, "sync_playwright", Manager)
 
     with pytest.raises(RuntimeError, match="launch failed"):
-        crawler._scrapling_dynamic_sync("https://example.com", 1)
+        crawler._render_page_sync("https://example.com", "http://127.0.0.1:4321", 1)
 
     assert current_policy["value"] is prior_policy
-    assert calls == [("policy", proactor_policy), ("fetch", None), ("policy", prior_policy)]
+    assert calls == [("policy", proactor_policy), ("launch", None), ("policy", prior_policy)]
 
 
-@pytest.mark.parametrize(("status", "expected_crawl_calls"), [(404, 0), (403, 0), (429, 0), (503, 0)])
+@pytest.mark.parametrize(("status", "expected_crawl_calls"), [(404, 0), (403, 1), (429, 1), (503, 1)])
 @pytest.mark.asyncio
-async def test_research_crawler_escalation_stays_disabled_without_egress_isolation(
+async def test_research_fetch_escalates_recoverable_static_failures(
     monkeypatch, status, expected_crawl_calls
 ):
     import charlie.research.engine as engine_module
@@ -170,19 +225,27 @@ async def test_research_crawler_escalation_stays_disabled_without_egress_isolati
 
     async def fake_crawl(_result, **_kwargs):
         crawl_calls.append(status)
-        return None
+        return SourceDocument(
+            url="https://example.com/article",
+            source_id="S1",
+            content="The article describes a readable result after browser rendering.",
+            extraction_method="browser:route-isolated",
+        )
 
     monkeypatch.setattr(engine_module, "fetch_document", fake_fetch)
     monkeypatch.setattr(engine_module, "crawl_document", fake_crawl)
     engine = ResearchEngine(SimpleNamespace(research_crawl_enabled=True, research_fetch_timeout_s=1))
 
-    await engine._fetch_one(SearchResult("Article", "https://example.com/article"), ResearchMode.STANDARD)
+    document = await engine._fetch_one(
+        SearchResult("Article", "https://example.com/article"), ResearchMode.STANDARD
+    )
 
     assert len(crawl_calls) == expected_crawl_calls
+    assert (document is not None) is (status != 404)
 
 
 @pytest.mark.asyncio
-async def test_research_does_not_use_unisolated_fetch_fallbacks(monkeypatch):
+async def test_research_uses_browser_fallback_after_static_fetch_fails(monkeypatch):
     import charlie.research.engine as engine_module
 
     calls = []
@@ -190,9 +253,16 @@ async def test_research_does_not_use_unisolated_fetch_fallbacks(monkeypatch):
     async def unreadable(*_args, **_kwargs):
         return None
 
-    async def fallback(*_args, **_kwargs):
-        calls.append("fallback")
-        return None
+    browser_document = SourceDocument(
+        url="https://example.com/article",
+        source_id="S1",
+        content="The browser rendered this article and exposed the relevant passage.",
+        extraction_method="browser:route-isolated",
+    )
+
+    async def fallback(_result):
+        calls.append("browser")
+        return browser_document
 
     monkeypatch.setattr(engine_module, "fetch_document", unreadable)
     monkeypatch.setattr(engine_module, "crawl_document", fallback)
@@ -201,12 +271,13 @@ async def test_research_does_not_use_unisolated_fetch_fallbacks(monkeypatch):
         browser_fetch=fallback,
     )
 
-    await asyncio.wait_for(
+    document = await asyncio.wait_for(
         engine._fetch_one(SearchResult("Article", "https://example.com/article"), ResearchMode.STANDARD),
         timeout=2,
     )
 
-    assert calls == []
+    assert calls == ["browser"]
+    assert document is browser_document
 
 
 @pytest.mark.asyncio
@@ -433,24 +504,15 @@ async def test_search_plan_interleaves_query_groups_instead_of_starving_later_re
     assert [item.title for item in results] == ["first 0", "second 0", "first 1", "second 1"]
 
 
-def test_official_coverage_queries_scope_each_dimension_to_its_project_domain():
-    from charlie.research.engine import _official_coverage_queries, _research_brief, _source_allowed
+def test_official_domain_constraints_reject_off_domain_redirects():
+    from charlie.research.engine import _research_brief, _source_allowed
 
     brief = _research_brief(
         "Research the architecture, advantages and limitations of SearXNG, Crawl4AI and Scrapling. "
         "Use their official project documentation and identify missing evidence.",
         ResearchMode.DEEP,
     )
-    queries = _official_coverage_queries(brief)
-
-    assert len(queries) == 9
-    assert [query.domain_filters for query in queries[:3]] == [
-        ["searxng.org"],
-        ["crawl4ai.com"],
-        ["scrapling.readthedocs.io"],
-    ]
-    assert all("limitations" in query.text.casefold() for query in queries[:3])
-    assert all("python.org" not in " ".join(query.domain_filters) for query in queries)
+    assert {"searxng.org", "crawl4ai.com", "scrapling.readthedocs.io"}.issubset(brief.explicit_domains)
     redirected = SourceDocument(
         source_id="S1",
         url="https://docs.python.org/3/whatsnew/3.14.html",
@@ -627,7 +689,7 @@ def test_deep_brief_keeps_comparison_subjects_and_requested_dimensions():
 
 
 def test_official_multi_publisher_briefs_keep_required_dimensions_and_domains():
-    from charlie.research.engine import _official_document_search_results, _research_brief
+    from charlie.research.engine import _research_brief
 
     http_clients = _research_brief(
         "Compare HTTPX and aiohttp using their official documentation. "
@@ -637,11 +699,6 @@ def test_official_multi_publisher_briefs_keep_required_dimensions_and_domains():
     )
     assert http_clients.source_policy == "official_required"
     assert {"python-httpx.org", "aiohttp.org"}.issubset(http_clients.explicit_domains)
-    documentation_urls = {result.url for result in _official_document_search_results(http_clients)}
-    assert "https://www.python-httpx.org/async/" in documentation_urls
-    assert "https://www.python-httpx.org/compatibility/" in documentation_urls
-    assert "https://docs.aiohttp.org/en/stable/client_quickstart.html" in documentation_urls
-    assert "https://docs.aiohttp.org/en/stable/client_reference.html" in documentation_urls
     httpx_fields = {
         (q.required_fields[0], q.required_fields[1])
         for q in http_clients.required_subquestions
@@ -681,11 +738,6 @@ def test_official_multi_publisher_briefs_keep_required_dimensions_and_domains():
     assert crawlers.source_policy == "official_required"
     assert {"searxng.org", "crawl4ai.com", "scrapling.readthedocs.io"}.issubset(crawlers.explicit_domains)
     assert len([q for q in crawlers.required_subquestions if len(q.required_fields) == 2]) == 9
-    crawler_docs = {result.url for result in _official_document_search_results(crawlers)}
-    assert "https://docs.searxng.org/admin/settings/settings_search.html" in crawler_docs
-    assert "https://docs.searxng.org/admin/settings/settings_engines.html" in crawler_docs
-    assert "https://docs.crawl4ai.com/core/installation/" in crawler_docs
-
     sources_brief = _research_brief(
         (
             "Research SSRF prevention guidance from OWASP and PortSwigger. "
@@ -776,6 +828,94 @@ def test_official_required_comparison_does_not_use_unknown_publishers():
     )
     assert httpx_async.status == "unresolved"
     assert httpx_async.supporting_claim_ids == []
+
+
+def test_official_guidance_requires_a_verified_authority_without_query_length_coupling():
+    from charlie.research.engine import _source_allowed
+    from charlie.research.models import SourceClass
+    from charlie.research.search import parse_brief
+    from charlie.research.sources import classify
+
+    brief = parse_brief(
+        "Research current official guidance on accessible disclosure controls and summarize it with sources."
+    )
+    assert brief.source_policy == "official_required"
+    assert classify("https://www.w3.org/WAI/ARIA/apg/patterns/disclosure/", brief=brief) is SourceClass.OFFICIAL
+    assert classify("https://access-board.gov/guidance/", brief=brief) is SourceClass.OFFICIAL
+    unknown = SourceDocument(
+        source_id="S1", url="https://whatisada.com/patterns/disclosures", title="Disclosure guidance",
+        domain="whatisada.com", content="A page with unverified publisher authority.", source_class="unknown",
+    )
+    unverified = SourceDocument(
+        source_id="S2", url="https://unverified.example/guidance", title="Guidance",
+        domain="unverified.example", content="A page with unverified publisher authority.", source_class="official_unverified",
+    )
+    assert not _source_allowed(unknown, brief.source_policy)
+    assert not _source_allowed(unverified, brief.source_policy)
+
+    preferred = parse_brief("Prefer official sources when available, alongside other reputable context.")
+    excluded = parse_brief("Explain the debate without official sources.")
+    assert preferred.source_policy == "official_preferred"
+    assert excluded.source_policy == "any_reputable"
+
+    w3c_guidance = parse_brief(
+        "Find W3C guidance for accessible accordion interfaces and summarize the key points with sources."
+    )
+    nasa_guidance = parse_brief(
+        "Find NASA guidance for safe solar-eclipse viewing and summarize the key steps with sources."
+    )
+    assert w3c_guidance.source_policy == nasa_guidance.source_policy == "official_required"
+    assert w3c_guidance.explicit_domains == ["w3.org"]
+    assert nasa_guidance.explicit_domains == ["nasa.gov", "science.nasa.gov"]
+    general_guidance = parse_brief(
+        "Find guidance for safe eclipse viewing from reputable astronomy sources."
+    )
+    assert general_guidance.source_policy == "any_reputable"
+    assert general_guidance.explicit_domains == []
+
+
+def test_official_steps_and_safety_procedures_keep_general_authority_intent():
+    from charlie.research.search import parse_brief
+
+    python_steps = parse_brief("Find Python's official steps for handling a Unicode encoding error.")
+    assert python_steps.source_policy == "official_required"
+    assert python_steps.explicit_domains == ["python.org"]
+
+    kitchen_safety = parse_brief("Find official safety procedures for treating a minor kitchen burn.")
+    assert kitchen_safety.source_policy == "official_required"
+    assert kitchen_safety.explicit_domains == []
+
+
+def test_citation_source_class_uses_publisher_url_when_record_class_is_unknown():
+    from charlie.research.sources import citation_source_class
+
+    assert citation_source_class("unknown", "https://science.nasa.gov/eclipses/safety/") == "official"
+    assert citation_source_class("official_unverified", "https://science.nasa.gov/eclipses/safety/") == "official_unverified"
+
+
+def test_research_resource_records_preserve_valid_urls_and_skip_unlinkable_hits():
+    from types import SimpleNamespace
+
+    from main import _research_resource_records
+
+    records = _research_resource_records([
+        SimpleNamespace(
+            title="Python tutorial", url="https://docs.python.org/3/tutorial/", canonical_url="", domain=""
+        ),
+        SimpleNamespace(
+            title="Python async guide",
+            url="javascript:invalid",
+            canonical_url="https://docs.python.org/3/library/asyncio.html",
+            domain="docs.python.org",
+        ),
+        SimpleNamespace(title="No public URL", url="", canonical_url="", domain=""),
+    ])
+
+    assert [item["url"] for item in records] == [
+        "https://docs.python.org/3/tutorial/",
+        "https://docs.python.org/3/library/asyncio.html",
+    ]
+    assert records[0]["domain"] == "docs.python.org"
 
 
 def test_httpx_redirect_and_client_lifecycle_evidence_handles_common_doc_wording():
@@ -1490,6 +1630,9 @@ def test_web_research_converts_comma_domains_to_filters_without_rewriting_query(
         def __init__(self, _config):
             pass
 
+        def decide(self, _query, _mode):
+            return SimpleNamespace(should_research=True, mode=ResearchMode.STANDARD)
+
         def run_sync(self, query, mode, *, domain_filters=None):
             calls.append((query, mode, domain_filters))
             return SimpleNamespace(legacy_text=lambda: "ok")
@@ -1497,13 +1640,37 @@ def test_web_research_converts_comma_domains_to_filters_without_rewriting_query(
     monkeypatch.setattr(engine_module, "ResearchEngine", FakeEngine)
     report = tools_module._run_research_report(
         "web_research",
-        {"query": "Python list comprehensions", "mode": "standard", "domain": "docs.python.org, example.com"},
+        {"query": "Research Python list comprehensions", "mode": "standard", "domain": "docs.python.org, example.com"},
     )
 
     assert report.legacy_text() == "ok"
     assert calls == [
-        ("Python list comprehensions", "standard", ["docs.python.org", "example.com"])
+        ("Research Python list comprehensions", "standard", ["docs.python.org", "example.com"])
     ]
+
+
+@pytest.mark.parametrize("requested_mode", ["standard", "deep"])
+def test_web_research_keeps_single_current_fact_on_router_quick_budget(monkeypatch, requested_mode):
+    import charlie.research.engine as engine_module
+    import charlie.tools as tools_module
+
+    calls = []
+
+    def run_sync(_engine, query, mode, *, domain_filters=None):
+        calls.append((query, mode, domain_filters))
+        return SimpleNamespace(legacy_text=lambda: "ok")
+
+    monkeypatch.setattr(engine_module.ResearchEngine, "run_sync", run_sync)
+    report = tools_module._run_research_report(
+        "web_research",
+        {
+            "query": "What is the price of gold in Kanpur right now?",
+            "mode": requested_mode,
+        },
+    )
+
+    assert report.legacy_text() == "ok"
+    assert calls == [("What is the price of gold in Kanpur right now?", "quick", None)]
 
 
 def test_web_search_promotes_explicit_research_but_keeps_simple_lookup_quick(monkeypatch):
@@ -1714,6 +1881,7 @@ def test_research_progress_keeps_session_scope():
     brain = Brain.__new__(Brain)
     brain.on_thinking_update = lambda name, payload: updates.append((name, payload))
     brain._on_research_progress(ResearchProgress("searching", "Searching"), "session-1")
+    brain._on_research_progress(ResearchProgress("done", "Research evidence ready"), "session-1")
     assert updates == [
         (
             "research",
@@ -1725,7 +1893,18 @@ def test_research_progress_keeps_session_scope():
                 "mode": None,
                 "session_id": "session-1",
             },
-        )
+        ),
+        (
+            "research",
+            {
+                "stage": "synthesizing",
+                "message": "Preparing a grounded answer",
+                "current": 0,
+                "total": 0,
+                "mode": None,
+                "session_id": "session-1",
+            },
+        ),
     ]
 
 

@@ -9,6 +9,7 @@ import os
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from typing import Any, Callable, Dict, Optional, TypeVar
 
 from charlie.browser import BROWSER_EXECUTOR
@@ -19,9 +20,19 @@ logger = logging.getLogger("charlie.browser")
 
 T = TypeVar("T")
 
-# a policy swap is process-global; this lock keeps two concurrent launches (there should never
-# be more than one, since BROWSER_EXECUTOR has one worker) from racing the swap-back
+# Policy swaps are process-global across browser startup and research workers.
 _POLICY_SWAP_LOCK = threading.Lock()
+_POLICY_SWAP_LOCK_TIMEOUT_S = 1.0
+
+
+@contextmanager
+def _policy_swap():
+    if not _POLICY_SWAP_LOCK.acquire(timeout=_POLICY_SWAP_LOCK_TIMEOUT_S):
+        raise BrowserUnavailable("Windows browser policy swap is busy with another operation")
+    try:
+        yield
+    finally:
+        _POLICY_SWAP_LOCK.release()
 
 _BLOCKED_RESOURCE_TYPES = {"image", "font", "media"}
 _NAV_HOST_COOLDOWN_S = 1.0
@@ -38,8 +49,25 @@ _resources_blocked = True
 _idle_timer: Optional[threading.Timer] = None
 _last_nav_by_host: Dict[str, float] = {}
 _activity_lock = threading.Lock()
+_admission_lock = threading.Lock()
+_shutdown_requested = False
 _active_task_leases = 0
 _active_operations = 0
+
+
+def _require_admission() -> None:
+    with _admission_lock:
+        if _shutdown_requested:
+            raise BrowserUnavailable("browser controller is shutting down")
+
+
+def _submit_operation(fn: Callable[..., T], *args: Any):
+    if not BROWSER_EXECUTOR:
+        raise BrowserUnavailable("playwright is not installed")
+    with _admission_lock:
+        if _shutdown_requested:
+            raise BrowserUnavailable("browser controller is shutting down")
+        return BROWSER_EXECUTOR.submit(fn, *args)
 
 
 def _page_is_alive() -> bool:
@@ -99,6 +127,7 @@ def _block_heavy_resources(route: Any) -> None:
 
 def _ensure_playwright() -> None:
     global _playwright
+    _require_admission()
     if _playwright is not None:
         return
     if not BROWSER_EXECUTOR:
@@ -107,7 +136,7 @@ def _ensure_playwright() -> None:
 
     from playwright.sync_api import sync_playwright
     if sys.platform == "win32":
-        with _POLICY_SWAP_LOCK:
+        with _policy_swap():
             prior_policy = asyncio.get_event_loop_policy()
             asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
             try:
@@ -161,6 +190,7 @@ def _launch_user() -> None:
     global _playwright, _user_context, _user_page, _user_profile_path
     if not BROWSER_EXECUTOR:
         raise BrowserUnavailable("playwright is not installed")
+    _require_admission()
     from charlie.computer.manifest import resolve_browser_executable
     from charlie.privacy_service import validate_browser_profile_path
 
@@ -184,6 +214,7 @@ def _launch_user() -> None:
 
 
 def _ensure_launched() -> Any:
+    _require_admission()
     if _page is None:
         _launch()
     elif not _page_is_alive():
@@ -195,6 +226,7 @@ def _ensure_launched() -> Any:
 
 def _prepare_user_visible_on_thread() -> Dict[str, Any]:
     """Expose the same Playwright page used by an interactive browser task."""
+    _require_admission()
     from charlie.browser.session import get_session
 
     if _page is None:
@@ -226,18 +258,12 @@ def _prepare_user_visible_on_thread() -> Dict[str, Any]:
 
 def prepare_user_visible(timeout: float = 10.0) -> Dict[str, Any]:
     """Make the controller's existing page the user-visible browser surface."""
-    if not BROWSER_EXECUTOR:
-        raise BrowserUnavailable("playwright is not installed")
-    return BROWSER_EXECUTOR.submit(_prepare_user_visible_on_thread).result(timeout=timeout)
+    return _submit_operation(_prepare_user_visible_on_thread).result(timeout=timeout)
 
 
 def prepare_user_browser(timeout: float = 10.0) -> Dict[str, Any]:
     """Launch Charlie's visible persistent browser profile and return its identity."""
-    if not BROWSER_EXECUTOR:
-        raise BrowserUnavailable("playwright is not installed")
-    return BROWSER_EXECUTOR.submit(_run_user_on_thread, runtime_user_identity).result(
-        timeout=timeout
-    )
+    return _submit_operation(_run_user_on_thread, runtime_user_identity).result(timeout=timeout)
 
 
 def _windows_session_id(pid: Optional[int]) -> Optional[int]:
@@ -403,6 +429,7 @@ def wait_host_cooldown(url: str) -> None:
 
 def _run_on_thread(fn: Callable[[Any], T], retry_on_stale: bool = True) -> T:
     global _last_used_at, _active_operations
+    _require_admission()
     page = _ensure_launched()
     with _activity_lock:
         _active_operations += 1
@@ -426,14 +453,13 @@ def _run_on_thread(fn: Callable[[Any], T], retry_on_stale: bool = True) -> T:
 
 def run(fn: Callable[[Any], T], timeout: Optional[float] = None, retry_on_stale: bool = True) -> T:
     """Run fn(page) on the dedicated browser thread, launching on first use."""
-    if not BROWSER_EXECUTOR:
-        raise BrowserUnavailable("playwright is not installed")
-    future = BROWSER_EXECUTOR.submit(_run_on_thread, fn, retry_on_stale)
+    future = _submit_operation(_run_on_thread, fn, retry_on_stale)
     return future.result(timeout=timeout)
 
 
 def _run_user_on_thread(fn: Callable[[Any], T]) -> T:
     global _user_page
+    _require_admission()
     if _user_page is None or not _user_page_is_alive():
         _launch_user()
     return fn(_user_page)
@@ -441,14 +467,13 @@ def _run_user_on_thread(fn: Callable[[Any], T]) -> T:
 
 def run_user(fn: Callable[[Any], T], timeout: Optional[float] = None) -> T:
     """Run one operation against Charlie's visible persistent browser profile."""
-    if not BROWSER_EXECUTOR:
-        raise BrowserUnavailable("playwright is not installed")
-    future = BROWSER_EXECUTOR.submit(_run_user_on_thread, fn)
+    future = _submit_operation(_run_user_on_thread, fn)
     return future.result(timeout=timeout)
 
 
 def _run_user_context_on_thread(fn: Callable[[Any], T]) -> T:
     global _user_page
+    _require_admission()
     if _user_page is None or not _user_page_is_alive():
         _launch_user()
     return fn(_user_context)
@@ -456,9 +481,7 @@ def _run_user_context_on_thread(fn: Callable[[Any], T]) -> T:
 
 def run_user_context(fn: Callable[[Any], T], timeout: Optional[float] = None) -> T:
     """Run one operation against Charlie's visible browser context."""
-    if not BROWSER_EXECUTOR:
-        raise BrowserUnavailable("playwright is not installed")
-    future = BROWSER_EXECUTOR.submit(_run_user_context_on_thread, fn)
+    future = _submit_operation(_run_user_context_on_thread, fn)
     return future.result(timeout=timeout)
 
 
@@ -466,36 +489,52 @@ def warm() -> None:
     """Fire-and-forget launch, called on wake-word so the browser is ready before a command lands."""
     if not BROWSER_EXECUTOR or _page is not None:
         return
-    BROWSER_EXECUTOR.submit(_ensure_launched)
+    try:
+        _submit_operation(_ensure_launched)
+    except BrowserUnavailable:
+        return
 
 
-def _shutdown_on_thread() -> None:
-    global _playwright, _context, _page, _headless_mode, _user_context, _user_page, _user_profile_path
+def _shutdown_on_thread() -> bool:
+    global _playwright, _context, _page, _headless_mode, _user_context, _user_page, _user_profile_path, _idle_timer
+    complete = True
+    if _idle_timer is not None:
+        _idle_timer.cancel()
+        _idle_timer = None
     from charlie.browser.session import reset_session
-    reset_session()
+    try:
+        reset_session()
+    except Exception:
+        complete = False
+        logger.warning("Error resetting browser session", exc_info=True)
     if _user_context is not None:
         try:
             _user_context.close()
         except Exception:
+            complete = False
             logger.warning("Error closing visible browser context", exc_info=True)
     if _context is not None:
         try:
             _context.close()
         except Exception:
+            complete = False
             logger.warning("Error closing browser context", exc_info=True)
     if _playwright is not None:
         try:
             _playwright.stop()
         except Exception:
+            complete = False
             logger.warning("Error stopping playwright", exc_info=True)
-    _playwright = None
-    _context = None
-    _page = None
-    _headless_mode = None
-    _user_context = None
-    _user_page = None
-    _user_profile_path = None
-    logger.info("Browser controller shut down (idle)")
+    if complete:
+        _playwright = None
+        _context = None
+        _page = None
+        _headless_mode = None
+        _user_context = None
+        _user_page = None
+        _user_profile_path = None
+    logger.info("Browser controller shutdown %s", "completed" if complete else "incomplete")
+    return complete
 
 
 def _schedule_idle_shutdown() -> None:
@@ -516,7 +555,10 @@ def _idle_check() -> None:
             and time.monotonic() - _last_used_at >= config.browser_idle_timeout_s
         )
     if idle and BROWSER_EXECUTOR:
-        BROWSER_EXECUTOR.submit(_dispose_stale)
+        try:
+            _submit_operation(_dispose_stale)
+        except BrowserUnavailable:
+            return
 
 
 def acquire_task_lease() -> None:
@@ -538,7 +580,24 @@ def release_task_lease() -> None:
         _schedule_idle_shutdown()
 
 
-def shutdown() -> None:
+def shutdown() -> bool:
     """Explicit shutdown, e.g. on process exit."""
-    if BROWSER_EXECUTOR and (_page is not None or _user_page is not None):
-        BROWSER_EXECUTOR.submit(_shutdown_on_thread).result(timeout=10)
+    global _idle_timer, _shutdown_requested
+    if _idle_timer is not None:
+        _idle_timer.cancel()
+        _idle_timer = None
+    if not BROWSER_EXECUTOR:
+        with _admission_lock:
+            _shutdown_requested = True
+        return True
+    with _admission_lock:
+        _shutdown_requested = True
+        future = BROWSER_EXECUTOR.submit(_shutdown_on_thread)
+    try:
+        complete = bool(future.result(timeout=10))
+    except TimeoutError:
+        logger.warning("Browser cleanup is still queued or running after the 10 second wait; it was not cancelled")
+        raise
+    if not complete:
+        logger.warning("Browser controller cleanup reported an incomplete close")
+    return complete

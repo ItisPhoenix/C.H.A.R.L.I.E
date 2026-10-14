@@ -83,6 +83,7 @@ def _terminate_owned_process_tree(
     report: dict[str, Any],
     timeout_s: float = 5.0,
     owned_root: Optional[OwnedProcess] = None,
+    ownership_error: Optional[str] = None,
 ) -> dict[str, Any]:
     """Boundedly terminate only the recorded Cua process tree."""
     result = {
@@ -97,6 +98,21 @@ def _terminate_owned_process_tree(
         result["reason"] = report.get("reason", "process tree was not captured")
         return result
     if owned_root is not None:
+        root_record = next(
+            (item for item in report.get("processes", []) if item.get("pid") == owned_root.pid),
+            None,
+        )
+        try:
+            identity_matches = (
+                root_record is not None
+                and float(root_record["create_time"]) == owned_root.creation_time
+            )
+        except (KeyError, TypeError, ValueError):
+            identity_matches = False
+        if not identity_matches:
+            result["reason"] = "owned root identity did not match captured process tree"
+            result["remaining"] = [int(item["pid"]) for item in report.get("processes", [])]
+            return result
         result["verified"] = bool(terminate_process_tree(owned_root, timeout=timeout_s / 2))
         # A session may close the root while a renderer remains. Check every
         # recorded identity independently; access errors are uncertainty.
@@ -118,7 +134,10 @@ def _terminate_owned_process_tree(
             result["reason"] = "process termination or tree verification incomplete"
         return result
     # No identity means no authority to signal a PID. Preserve uncertainty.
-    result["reason"] = "owned process identity unavailable"
+    result["reason"] = (
+        f"owned process identity unavailable: {ownership_error}"
+        if ownership_error else "owned process identity unavailable"
+    )
     result["remaining"] = [int(record["pid"]) for record in report.get("processes", [])]
     return result
 
@@ -241,6 +260,7 @@ class CuaBrowser:
         self._pid: Optional[int] = None
         self._window_id: Optional[int] = None
         self._owned_root: Optional[OwnedProcess] = None
+        self._ownership_error: Optional[str] = None
         self._process_tree: dict[str, Any] = {}
         self.cleanup_report: Optional[dict[str, Any]] = None
         # Cua resolves browser authority per public session label. Repeating the label
@@ -315,10 +335,12 @@ class CuaBrowser:
         # Register ownership immediately: window discovery/binding may fail after launch.
         self._pid = int(pid)
         self._process_tree = _capture_owned_process_tree(self._pid)
+        self._ownership_error = None
         try:
             self._owned_root = capture_owned_pid(self._pid)
-        except Exception:
+        except Exception as exc:
             self._owned_root = None
+            self._ownership_error = type(exc).__name__
 
         window_id = self._window_for(int(pid))
         if not window_id:
@@ -436,20 +458,44 @@ class CuaBrowser:
                 detail={"exception": type(exc).__name__},
             )
         finally:
-            self.cleanup_report = _terminate_owned_process_tree(
-                self._process_tree,
-                owned_root=self._owned_root,
-            )
+            try:
+                self.cleanup_report = _terminate_owned_process_tree(
+                    self._process_tree,
+                    owned_root=self._owned_root,
+                    ownership_error=self._ownership_error,
+                )
+            except Exception as exc:
+                self.cleanup_report = {
+                    "verified": False,
+                    "reason": "process cleanup failed",
+                    "error": type(exc).__name__,
+                }
             shutdown = getattr(self._adapter, "shutdown", None)
+            runtime_stopped = False
             if callable(shutdown):
-                shutdown(timeout_s=5.0)
+                try:
+                    runtime_stopped = shutdown(timeout_s=5.0) is True
+                except Exception as exc:
+                    runtime_stopped = False
+                    self.cleanup_report["runtime_shutdown_error"] = type(exc).__name__
+            else:
+                self.cleanup_report["runtime_shutdown_error"] = "adapter shutdown unavailable"
+            self.cleanup_report["runtime_stopped"] = runtime_stopped
+            if not runtime_stopped:
+                self.cleanup_report["verified"] = False
+                self.cleanup_report.setdefault("reason", "Cua runtime shutdown incomplete")
+            if not self.cleanup_report.get("verified"):
+                result.outcome = CuaOutcome.FAILED
+                result.summary = "Browser session cleanup was incomplete"
         result.detail = {**(result.detail or {}), "process_cleanup": self.cleanup_report}
         logger.info("cua_browser_process_cleanup | %s", self.cleanup_report)
-        self._target = None
-        self._pid = None
-        self._window_id = None
-        self._owned_root = None
-        self._process_tree = {}
+        if self.cleanup_report.get("verified"):
+            self._target = None
+            self._pid = None
+            self._window_id = None
+            self._owned_root = None
+            self._ownership_error = None
+            self._process_tree = {}
         return result
 
     def _require_target(self) -> tuple[Optional[BrowserTarget], Optional[CuaActionResult]]:

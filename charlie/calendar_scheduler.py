@@ -10,22 +10,43 @@ from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
 
 from charlie.calendar_runtime import CalendarRuntime
-from charlie.calendar_store import CalendarStore, normalize_calendar_timestamp
+from charlie.calendar_store import CalendarStore, normalize_calendar_timestamp, normalize_delivery_channel
 
 logger = logging.getLogger("charlie.calendar_scheduler")
-ReminderCallback = Callable[[dict], None | Awaitable[None]]
+ReminderCallback = Callable[[dict], None | bool | Awaitable[None | bool]]
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-async def _invoke(callback: Optional[ReminderCallback], event: dict) -> None:
+async def _invoke(callback: Optional[ReminderCallback], event: dict) -> bool:
     if callback is None:
-        return
+        return False
     result = callback(event)
     if inspect.isawaitable(result):
-        await result
+        result = await result
+    return result is not False
+
+
+def _local_delivery_targets(callbacks: dict[str, Optional[ReminderCallback]]) -> list[tuple[str, ReminderCallback]]:
+    callback = callbacks.get("alert")
+    return [("alert", callback)] if callback is not None else []
+
+
+def _delivery_targets(
+    delivery_channel: str,
+    callbacks: dict[str, Optional[ReminderCallback]],
+) -> list[tuple[str, ReminderCallback]]:
+    try:
+        channel = normalize_delivery_channel(delivery_channel)
+    except ValueError:
+        channel = "local"
+    if channel == "local":
+        return _local_delivery_targets(callbacks)
+    callback_name = {"web": "alert"}.get(channel, channel)
+    callback = callbacks.get(callback_name)
+    return [(callback_name, callback)] if callback is not None else []
 
 
 async def deliver_due_reminders(
@@ -35,6 +56,8 @@ async def deliver_due_reminders(
     *,
     alert_callback: Optional[ReminderCallback] = None,
     voice_callback: Optional[ReminderCallback] = None,
+    telegram_callback: Optional[ReminderCallback] = None,
+    console_callback: Optional[ReminderCallback] = None,
 ) -> int:
     """Claim and deliver reminders with durable at-least-once state.
 
@@ -57,12 +80,16 @@ async def deliver_due_reminders(
             try:
                 if callback is not None:
                     if isinstance(runtime_or_store, CalendarRuntime):
-                        await _invoke(callback, claim)
+                        accepted = await _invoke(callback, claim)
+                        if not accepted:
+                            raise RuntimeError("reminder delivery callback did not accept the reminder")
                         finalized = await runtime_or_store.execute(
                             "finalize_reminder_claim", event_id, token, revision, delivered=True
                         )
                     else:
-                        await _invoke(callback, claim)
+                        accepted = await _invoke(callback, claim)
+                        if not accepted:
+                            raise RuntimeError("reminder delivery callback did not accept the reminder")
                         finalized = runtime_or_store.finalize_reminder_claim(
                             event_id, token, revision, delivered=True
                         )
@@ -70,11 +97,19 @@ async def deliver_due_reminders(
                         delivered += 1
                     continue
 
-                channels = (("alert", alert_callback), ("voice", voice_callback))
+                callbacks = {
+                    "alert": alert_callback,
+                    "voice": voice_callback,
+                    "telegram": telegram_callback,
+                    "console": console_callback,
+                }
+                targets = _delivery_targets(claim.get("delivery_channel", "local"), callbacks)
                 failed: Optional[Exception] = None
-                for channel, channel_callback in channels:
-                    if channel_callback is None:
-                        continue
+                if not targets:
+                    failed = RuntimeError(
+                        f"delivery callback unavailable for {claim.get('delivery_channel', 'local')} channel"
+                    )
+                for channel, channel_callback in targets:
                     if claim.get(f"reminder_{channel}_accepted_at"):
                         continue
                     current = (
@@ -85,7 +120,9 @@ async def deliver_due_reminders(
                     if not current:
                         break
                     try:
-                        await _invoke(channel_callback, claim)
+                        accepted = await _invoke(channel_callback, claim)
+                        if not accepted:
+                            raise RuntimeError(f"{channel} callback did not accept the reminder")
                     except Exception as exc:
                         failed = exc
                         break
@@ -168,6 +205,7 @@ async def deliver_due_automation_reminders(
     alert_callback: ReminderCallback,
     voice_callback: Optional[ReminderCallback] = None,
     telegram_callback: Optional[ReminderCallback] = None,
+    console_callback: Optional[ReminderCallback] = None,
 ) -> int:
     """Process due automation reminders through the durable run claim."""
     processed = 0
@@ -184,18 +222,23 @@ async def deliver_due_automation_reminders(
 
         outcomes = []
         try:
-            await _invoke(alert_callback, schedule)
-            outcomes.append("alert accepted")
-            if voice_callback is None:
-                outcomes.append("speech not queued")
-            else:
-                await _invoke(voice_callback, schedule)
-                outcomes.append("speech queued")
-            if telegram_callback is None:
-                outcomes.append("Telegram message not configured")
-            else:
-                await _invoke(telegram_callback, schedule)
-                outcomes.append("Telegram message accepted")
+            callbacks = {
+                "alert": alert_callback,
+                "voice": voice_callback,
+                "telegram": telegram_callback,
+                "console": console_callback,
+            }
+            channel = normalize_delivery_channel(schedule.get("delivery_channel", "local"))
+            targets = _delivery_targets(channel, callbacks)
+            if not targets:
+                raise RuntimeError(f"delivery callback unavailable for {channel} channel")
+            for callback_name, callback in targets:
+                accepted = await _invoke(callback, schedule)
+                if not accepted:
+                    raise RuntimeError(f"{callback_name} callback did not accept the reminder")
+                outcomes.append(f"{callback_name} accepted")
+            if channel == "local" and voice_callback is None:
+                outcomes.append("voice not queued")
         except asyncio.CancelledError:
             # Leave the started claim for TaskJournal reconciliation after restart.
             raise

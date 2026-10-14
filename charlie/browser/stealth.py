@@ -9,7 +9,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from charlie.browser.controller import _POLICY_SWAP_LOCK
+from charlie.browser.controller import _policy_swap
 from charlie.browser.recipes import BrowserResult
 
 logger = logging.getLogger("charlie.browser")
@@ -26,7 +26,7 @@ def retry_blocked(url: str) -> Optional[BrowserResult]:
         return None
     try:
         # Patchright's sync_playwright() needs Proactor for subprocess creation, same as controller.py's _launch().
-        with _POLICY_SWAP_LOCK:
+        with _policy_swap():
             prior_policy = asyncio.get_event_loop_policy()
             asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
             try:

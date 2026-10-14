@@ -4,10 +4,19 @@ import { loadScene, orbStateForEvent, parseRuntimeEvent, parseSnapshot, postComm
 afterEach(() => vi.restoreAllMocks());
 
 describe("live runtime boundary", () => {
+  it("retains real research counters and rejects malformed counts", () => {
+    const event = parseRuntimeEvent({ type: "research_progress", payload: {
+      stage: "reading", source_count: 3, evidence_count: 7, finding_count: -1,
+    } });
+    expect(event?.sourceCount).toBe(3);
+    expect(event?.evidenceCount).toBe(7);
+    expect(event?.findingCount).toBeUndefined();
+  });
   it("maps canonical runtime events to truthful orb states", () => {
     expect(orbStateForEvent("transcript")).toBe("listening");
     expect(orbStateForEvent("thinking")).toBe("shaping");
     expect(orbStateForEvent({ type: "thinking", stage: "planning" })).toBe("weaving");
+    expect(orbStateForEvent({ type: "research_progress", stage: "synthesizing" })).toBe("composing");
     expect(orbStateForEvent("speaking_start")).toBe("composing");
     expect(orbStateForEvent("response_done")).toBe("breathing");
     expect(orbStateForEvent("unrelated_event")).toBeNull();
@@ -17,6 +26,33 @@ describe("live runtime boundary", () => {
     expect(parseSnapshot({ revision: 3, title: "System status", details: [{ label: "CPU", value: "18%" }] })?.details).toHaveLength(1);
     expect(parseSnapshot({ revision: -1, title: "invalid" })).toBeNull();
     expect(parseSnapshot({ revision: 1, title: "invalid", details: [{ label: "CPU", value: 18 }] })).toBeNull();
+  });
+
+  it("projects validated live system metrics into the dashboard widget", () => {
+    const sample = { cpu: 18, ram: 42, gpu: 11, disk_percent: 63, uptime_seconds: 3600, sampled_at_ms: 1000 };
+    expect(parseSnapshot({ revision: 3, title: "Ready", widgets: { timers: [], system_status: sample } })?.widgets?.systemStatus)
+      .toMatchObject({ cpuPercent: 18, memoryPercent: 42, gpuPercent: 11, diskPercent: 63, uptimeSeconds: 3600 });
+    expect(parseRuntimeEvent({ type: "system_status", payload: sample })?.systemStatus?.gpuPercent).toBe(11);
+    expect(parseRuntimeEvent({ type: "system_status", payload: { ...sample, cpu: 101 } })?.systemStatus).toBeUndefined();
+  });
+
+  it("validates real media session snapshots before projecting widgets", () => {
+    const snapshot = parseSnapshot({
+      revision: 3,
+      title: "Ready",
+      widgets: { timers: [], media: {
+        available: true,
+        adapter_available: true,
+        title: "Track",
+        artist: "Artist",
+        app: "Spotify",
+        status: "playing",
+        position_seconds: 12,
+        duration_seconds: 180,
+      } },
+    });
+    expect(snapshot?.widgets?.media).toMatchObject({ title: "Track", artist: "Artist", app: "Spotify", status: "playing", available: true });
+    expect(parseSnapshot({ revision: 4, title: "Ready", widgets: { media: { available: true, title: "Fake", position_seconds: -1 } } })?.widgets?.media).toBeUndefined();
   });
 
   it("hydrates the current session's chat and durable activity from a scene snapshot", () => {
@@ -62,12 +98,35 @@ describe("live runtime boundary", () => {
     expect(parseRuntimeEvent({ nope: true })).toBeNull();
   });
 
+  it("preserves only local JPEG artwork for the cross-app media widget", () => {
+    const media = {
+      available: true,
+      adapter_available: true,
+      title: "Browser video",
+      artist: "Channel",
+      app: "browser-session",
+      status: "playing",
+      position_seconds: 5,
+      duration_seconds: 60,
+      art_uri: "data:image/jpeg;base64,AA==",
+    };
+    const event = parseRuntimeEvent({ type: "dashboard_widgets", payload: { widgets: { media } } });
+    expect(event?.widgets?.media?.artUri).toBe(media.art_uri);
+
+    const unsafe = parseRuntimeEvent({
+      type: "dashboard_widgets",
+      payload: { widgets: { media: { ...media, art_uri: "https://example.com/cover.jpg" } } },
+    });
+    expect(unsafe?.widgets?.media?.artUri).toBeUndefined();
+  });
+
   it("retains validated research provenance and completion metrics from scene and SSE payloads", () => {
     const researchResult = {
       result_id: "result-1",
       text: "Alpha is licensed under MIT [S1].",
       query: "Is Alpha licensed under GPL-3.0?",
       answer: "Alpha is licensed under MIT [S1].",
+      mode: "quick",
       partial: false,
       completeness: "complete",
       termination_reason: "completed",
@@ -75,6 +134,12 @@ describe("live runtime boundary", () => {
       source_urls: ["https://alpha.example/license", "file:///private/source"],
       search_result_count: 3,
       document_count: 1,
+      search_results: [
+        { title: "Alpha license details", url: "https://alpha.example/license", domain: "alpha.example" },
+        { title: "Canonical page", url: "file:///private/source", canonical_url: "https://alpha.example/canonical", domain: "" },
+        { title: "Unsafe local file", url: "file:///private/source", domain: "" },
+      ],
+      read_pages: [{ title: "Alpha license", url: "file:///private/source", canonical_url: "https://alpha.example/license", domain: "alpha.example" }],
       evidence_count: 1,
       passage_count: 1,
       fact_count: 1,
@@ -138,16 +203,23 @@ describe("live runtime boundary", () => {
       completed_at: "2026-10-08T00:00:01Z",
     };
 
-    const secondResearchResult = { ...researchResult, result_id: "result-2", query: "A second research task" };
+    const secondResearchResult = { ...researchResult, result_id: "result-2", query: "A second research task", turn_id: "turn-2" };
     const snapshot = parseSnapshot({
       revision: 1,
       title: "Ready",
+      conversation_history: [{ id: "session:1", role: "you", text: "A second research task", turn_id: "turn-2" }],
       research_result: secondResearchResult,
       research_results: [researchResult, secondResearchResult],
     });
     const event = parseRuntimeEvent({ type: "research_result", payload: researchResult });
+    const voiceEvent = parseRuntimeEvent({ type: "research_result", turn_id: "voice-turn-1", payload: { ...researchResult, channel: "voice" } });
+    const legacyVoiceEvent = parseRuntimeEvent({
+      type: "research_result",
+      payload: { ...researchResult, search_results: undefined, read_pages: undefined, channel: "voice" },
+    });
 
     expect(snapshot?.researchResult).toMatchObject({
+      mode: "quick",
       documentCount: 1,
       evidenceCount: 1,
       passageCount: 1,
@@ -157,12 +229,25 @@ describe("live runtime boundary", () => {
       claims: [{ relationship: "refutes", evidencePassageIds: ["p1"] }],
       passages: [{ id: "p1", sourceUrl: "https://alpha.example/license" }],
       sourceUrls: ["https://alpha.example/license"],
+      searchResults: [
+        { title: "Alpha license details", url: "https://alpha.example/license", domain: "alpha.example" },
+        { title: "Canonical page", url: "https://alpha.example/canonical", domain: "alpha.example" },
+      ],
+      readPages: [{ title: "Alpha license", url: "https://alpha.example/license", domain: "alpha.example" }],
     });
     expect(snapshot?.researchResult?.passages).toHaveLength(1);
     expect(snapshot?.researchResults?.map((item) => item.id)).toEqual(["result-1", "result-2"]);
     expect(snapshot?.researchResult?.id).toBe("result-2");
+    expect(snapshot?.researchResult?.turnId).toBe("turn-2");
+    expect(snapshot?.conversationHistory?.[0]?.turnId).toBe("turn-2");
     expect(event?.researchResult?.claims?.[0]?.evidencePassageIds).toEqual(["p1"]);
     expect(event?.researchResult?.verifiedFacts?.[0]?.value).toBe("MIT");
+    expect(voiceEvent?.researchResult?.channel).toBe("voice");
+    expect(voiceEvent?.researchResult?.turnId).toBe("voice-turn-1");
+    expect(legacyVoiceEvent?.researchResult?.readPages).toEqual([
+      { title: "Alpha license", url: "https://alpha.example/license", domain: "alpha.example" },
+    ]);
+    expect(legacyVoiceEvent?.researchResult?.searchResults).toBeUndefined();
   });
 
   it("only reports command acceptance when the server explicitly confirms it", async () => {

@@ -8,7 +8,7 @@ import inspect
 import logging
 import re
 import time
-from datetime import datetime
+from dataclasses import replace
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Set
 from urllib.parse import urlparse
 
@@ -18,12 +18,11 @@ from charlie.research.crawler import crawl_document
 from charlie.research.credibility import (
     organisational_domain as _organisational_domain,
 )
-from charlie.research.evidence import build_evidence, normalize_research_term
+from charlie.research.evidence import build_evidence, fact_evidence
 from charlie.research.facts import (
-    extract_facts_from_document,
-    fact_table,
+    conflicting_facts,
     model_facts,
-    parse_inr_price,
+    matches_product_variant,
 )
 from charlie.research.fetch import fetch_document
 from charlie.research.media import media_results
@@ -43,98 +42,40 @@ from charlie.research.models import (
     Subquestion,
 )
 from charlie.research.ranking import rank_documents, rank_search_results
-from charlie.research.releases import (
-    canonical_release_urls,
-    is_stable_version,
-    parse_version_tuple,
-    pick_stable,
-    stable_release_span,
-)
 from charlie.research.router import ResearchDecision, is_sustained_research_query, route
-from charlie.research.candidates import extract_candidates
 from charlie.research.search import (
     clean_query,
     build_plan,
-    discovery_queries,
-    is_llm_release_brief,
+    explicit_domain_filters,
     parse_brief,
     search_plan,
-    verification_queries,
 )
 from charlie.research.semantics import gather_semantic_scores
-from charlie.research.shopping import extract_products, is_shopping_query
 from charlie.research.sources import (
-    OFFICIAL_REGISTRY,
     classify,
     citable_for,
-    get_official_document_urls,
-    get_official_domains,
-    resolve_brand,
 )
 
 logger = logging.getLogger("charlie.research.engine")
 
 
-def _release_date_key(value: str) -> Optional[datetime]:
-    normalized = re.sub(r"\bSept\.?", "Sep", str(value or "").strip(), flags=re.I)
-    normalized = re.sub(
-        r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.",
-        r"\1",
-        normalized,
-        flags=re.I,
-    )
-    for pattern in ("%Y-%m-%d", "%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%b %d %Y"):
-        try:
-            return datetime.strptime(normalized, pattern)
-        except ValueError:
-            continue
-    return None
 
-
-def _candidate_name_key(value: str) -> str:
-    return re.sub(r"[^\w\s]", "", str(value or "")).casefold().strip()
-
-
-def _latest_llm_release_candidates(
-    candidates: List[Candidate], access: str
-) -> tuple[Optional[datetime], set[str]]:
-    dated = [
-        (candidate, _release_date_key(candidate.release_date or ""))
-        for candidate in candidates
-        if candidate.access == access
-    ]
-    dated = [(candidate, date) for candidate, date in dated if date is not None]
-    latest = max((date for _candidate, date in dated), default=None)
-    return latest, {
-        _candidate_name_key(candidate.name)
-        for candidate, date in dated
-        if date == latest
-    }
-
-
-def _llm_release_category_verified(
-    candidates: List[Candidate], facts: List[Fact], access: str, policy: str
-) -> bool:
-    latest_date, latest_names = _latest_llm_release_candidates(candidates, access)
-    return bool(
-        latest_date is not None
-        and any(
-            _candidate_name_key(fact.candidate or "") in latest_names
-            and fact.aspect == "release_date"
-            and _release_date_key(fact.value) == latest_date
-            and citable_for(fact.aspect, fact.source_class, policy)
-            for fact in facts
-        )
-    )
 
 ProgressCallback = Callable[[ResearchProgress], Any]
 BrowserFetchCallback = Callable[[SearchResult], Awaitable[Optional[SourceDocument]]]
 BriefPlannerCallback = Callable[[str, ResearchBrief], Awaitable[Dict[str, Any]]]
 CandidateExtractorCallback = Callable[[ResearchBrief, List[SourceDocument]], Awaitable[List[Dict[str, Any]]]]
 
+_SHARED_SEARCH_CACHE: TTLCache[List[SearchResult]] = TTLCache(256)
+_SHARED_DOCUMENT_CACHE: TTLCache[SourceDocument] = TTLCache(128)
+
 
 _CONFIDENCE_HALF_WEIGHT = 2.0
 CREDIBILITY_FLOOR = 0.4
+
+# Only a provider that actually ran a search can support a claim about the world.
+# Any other outcome is our plumbing and must not read as "the web has no answer".
+_SEARCHED_PROVIDER_STATUSES = frozenset({"ok", "empty"})
 
 
 def organisational_domain(host: str) -> str:
@@ -211,7 +152,7 @@ def _source_allowed(
         return False
     if policy == "official_required" and source.source_class not in {
         SourceClass.OFFICIAL.value,
-        SourceClass.OFFICIAL_UNVERIFIED.value,
+        SourceClass.OFFICIAL_STORE.value,
     }:
         return False
     if domain_filters:
@@ -232,641 +173,52 @@ def _source_allowed(
 
 
 def _research_brief(query: str, mode: ResearchMode) -> ResearchBrief:
+    """Retain the request; the model supplies its questions and evidence fields."""
     brief = parse_brief(query)
     brief.original_request = query
-    brief.objective = brief.topic
-    brief.strategy = brief.entity_kind
+    brief.objective = query
     brief.depth = mode.value
-    if is_llm_release_brief(brief) and brief.source_policy == "any_reputable":
-        brief.source_policy = "official_preferred"
-    license_question = re.search(
-        r"\b(?:is|does)\s+(.+?)\s+licensed\s+under\s+([A-Za-z0-9][A-Za-z0-9.-]*)\b",
-        query,
-        re.I,
-    )
-    if license_question and brief.entity_kind == "general":
-        subject = re.sub(r"\s+(?:project|software)$", "", license_question.group(1).strip(), flags=re.I)
-        license_id = license_question.group(2).upper()
-        brief.topic = subject
-        brief.objective = subject
-        brief.aspects = ["license"]
-        brief.required_subquestions = [
-            Subquestion(
-                id="q1",
-                question=f"Is {subject} licensed under {license_id}?",
-                required_fields=[f"license_proposition:{license_id}", f"subject:{subject}"],
-                evidence_requirements=["fetched license statement attributable to this project"],
-            )
-        ]
-        brief.required_subquestions.extend(
-            Subquestion(
-                id=f"source-{index}",
-                question=f"Fetch evidence from {domain}",
-                required_fields=[f"source:{domain}"],
-                evidence_requirements=["accepted fetched source from this domain"],
-            )
-            for index, domain in enumerate(brief.explicit_domains, start=2)
-        )
-        return brief
-
-    def split_list(value: str) -> list[str]:
-        value = re.sub(r"\b(?:projects?|libraries|tools|systems|publishers|options?)\b", "", value, flags=re.I)
-        return [
-            part.strip(" ,.;:")
-            for part in re.split(r"\s*,\s*|\s+and\s+|\s+or\s+", value, flags=re.I)
-            if part.strip(" ,.;:")
-        ]
-
-    subjects: list[str] = []
-    dimensions: list[str] = []
-    if brief.entity_kind == "general":
-        comparison = re.search(
-            r"\bcompare\s+(.+?)(?=\s+\b(?:using|by|on|across|against)\b|[?.;]|$)",
-            query,
-            re.I,
-        )
-        if comparison:
-            subjects = split_list(comparison.group(1))
-            subjects = [
-                subject
-                for subject in subjects
-                if not re.match(r"^(?:their|these|those|cite|both)\b", subject, re.I)
-            ]
-        dimension_match = re.search(r"\bcover\s+(.+?)(?:[?.;]|$)", query, re.I)
-        if not dimension_match:
-            dimension_match = re.search(r"\b(?:by|on)\s+(.+?)(?:[?.;]|$)", query, re.I)
-        if dimension_match:
-            dimensions = split_list(dimension_match.group(1))
-        if not subjects and re.search(r"\b(?:research|investigate|compare)\b", query, re.I):
-            source_match = re.search(r"\b(?:from|of)\s+(.+?)(?:[?.;]|$)", query, re.I)
-            if source_match:
-                subjects = split_list(source_match.group(1))
-            before_of = re.search(r"\b(?:research|investigate)\s+(.+?)\s+of\b", query, re.I)
-            from_topic = re.search(r"\b(?:research|investigate)\s+(.+?)\s+from\b", query, re.I)
-            topic_match = before_of or from_topic
-            if topic_match:
-                dimensions = split_list(topic_match.group(1))
-        comparative_dimensions = re.search(
-            r"\bcompare\s+(?:their|both|these|those|the)\s+(.+?)(?:[?.;]|$)",
-            query,
-            re.I,
-        )
-        if comparative_dimensions:
-            dimension_text = re.split(
-                r"\b(?:cite|sources?|publishers?|documentation|docs)\b",
-                comparative_dimensions.group(1),
-                maxsplit=1,
-                flags=re.I,
-            )[0]
-            dimension_text = re.sub(r"^(?:their|both|these|those|the)\s+", "", dimension_text, flags=re.I)
-            requested_dimensions = split_list(dimension_text)
-            if requested_dimensions:
-                dimensions = requested_dimensions
-        if not dimensions and subjects and re.search(r"\bcompare\b", query, re.I):
-            dimensions = ["recommendations"]
-
-    if subjects:
-        mapped_domains = [
-            domain
-            for subject in subjects
-            if (brand := resolve_brand(subject))
-            for domain in get_official_domains(brand)
-        ]
-        if mapped_domains:
-            brief.explicit_domains = list(dict.fromkeys(brief.explicit_domains + mapped_domains))
-            brief.source_policy = "official_required"
-
-    questions: list[Subquestion] = []
-    topic_lower = brief.topic.casefold()
-    asks_open_llm = bool(re.search(r"\bopen[- ](?:source|weight)\b", topic_lower))
-    asks_closed_llm = bool(re.search(r"\b(?:close|closed)[- ]source\b|\bproprietary\b", topic_lower))
-    if is_llm_release_brief(brief) and asks_open_llm and asks_closed_llm:
-        questions = [
-            Subquestion(
-                id="llm-closed-release",
-                question=f"Latest closed-source LLM release for {brief.topic}",
-                required_fields=["llm_release:closed"],
-                evidence_requirements=["developer source ties a model release date to this model"],
-            ),
-            Subquestion(
-                id="llm-open-release",
-                question=f"Latest open-weight LLM release for {brief.topic}",
-                required_fields=["llm_release:open"],
-                evidence_requirements=["developer source ties a model release date to this model"],
-            ),
-        ]
-    elif brief.entity_kind == "release" and brief.requested_version:
-        version = brief.requested_version
-        questions = [
-            Subquestion(
-                id="q1",
-                question=f"{brief.topic}: version {version}",
-                required_fields=[f"version:{version}"],
-                evidence_requirements=["fetched passage tying this exact version to the release"],
-            ),
-            Subquestion(
-                id="q2",
-                question=f"{brief.topic}: release date for version {version}",
-                required_fields=[f"release_date:{version}"],
-                evidence_requirements=["fetched passage tying the date to this exact version"],
-            ),
-        ]
-    elif subjects and dimensions:
-        for subject in subjects:
-            for dimension in dimensions:
-                questions.append(
-                    Subquestion(
-                        id=f"q{len(questions) + 1}",
-                        question=f"{subject}: {dimension}",
-                        required_fields=[subject, dimension],
-                        evidence_requirements=["fetched source passage from the requested subject"],
-                    )
-                )
-    else:
-        fields = brief.aspects or ["answer"]
-        questions = [
-            Subquestion(
-                id=f"q{index}",
-                question=query if aspect == "answer" else f"{brief.topic}: {aspect}",
-                required_fields=[aspect],
-                evidence_requirements=["fetched source passage"],
-            )
-            for index, aspect in enumerate(fields, start=1)
-        ]
-
-    for domain in brief.explicit_domains:
-        questions.append(
-            Subquestion(
-                id=f"source-{len(questions) + 1}",
-                question=f"Fetch evidence from {domain}",
-                required_fields=[f"source:{domain}"],
-                evidence_requirements=["accepted fetched source from this domain"],
-            )
-        )
-
-    source_count = re.search(
-        r"\b(one|two|three|four|five|\d+)\s+(?:independent\s+)?(?:sources?|publishers?)\b",
-        query,
-        re.I,
-    )
-    if source_count:
-        number = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}.get(
-            source_count.group(1).casefold(), int(source_count.group(1)) if source_count.group(1).isdigit() else 1
-        )
-        questions.append(
-            Subquestion(
-                id=f"source-count-{len(questions) + 1}",
-                question=f"Use {number} independent publishers",
-                required_fields=[f"independent_sources:{number}"],
-                evidence_requirements=["fetched sources from distinct publishers"],
-            )
-        )
-    brief.required_subquestions = questions
+    brief.required_subquestions = [Subquestion(id="q1", question=query, required_fields=["q1"])]
     return brief
 
 
-def _official_document_search_results(brief: ResearchBrief) -> List[SearchResult]:
-    if brief.source_policy != "official_required":
-        return []
-    subjects = {
-        question.required_fields[0]
-        for question in brief.required_subquestions
-        if len(question.required_fields) >= 2
-    }
-    results: List[SearchResult] = []
-    seen: set[str] = set()
-    for subject in subjects:
-        brand = resolve_brand(subject)
-        for url in get_official_document_urls(brand or ""):
-            if url not in seen:
-                results.append(
-                    SearchResult(
-                        title=f"{subject} official documentation",
-                        url=url,
-                        provider="canonical",
-                        rank=0,
-                    )
-                )
-                seen.add(url)
-    return results
 
-
-def _official_coverage_queries(brief: ResearchBrief) -> List[ResearchQuery]:
-    if brief.entity_kind != "general" or brief.source_policy != "official_required":
-        return []
-    questions = [
-        item
-        for item in brief.required_subquestions
-        if len(item.required_fields) >= 2 and not item.required_fields[0].startswith("source:")
-    ]
-    questions.sort(
-        key=lambda item: 0 if re.search(r"\blimit|constraint|trade.?off|drawback", item.required_fields[1], re.I) else 1
-    )
-    queries = []
-    for item in questions:
-        subject, dimension = item.required_fields[:2]
-        brand = resolve_brand(subject)
-        domains = get_official_domains(brand) if brand else []
-        if not domains:
-            continue
-        dimension = re.sub(r"^the\s+", "", dimension, flags=re.I)
-        query = f"{subject} {dimension}"
-        if re.search(r"\blimit|constraint|trade.?off|drawback", dimension, re.I):
-            query += " constraints tradeoffs drawbacks requirements prerequisites dependencies unsupported restrictions installation"
-        queries.append(ResearchQuery(f"{query} official documentation", "evidence coverage", domains))
-    return queries
-
-
-def _bind_stable_release_passages(report: ResearchReport) -> bool:
-    if report.brief is None or report.brief.entity_kind != "release":
-        return False
-    sources_by_id = {source.source_id: source for source in report.sources}
-    facts_by_release = {}
-    for fact in report.facts:
-        if fact.extractor == "releases:pick_stable":
-            facts_by_release.setdefault((fact.source_id, fact.candidate), {})[fact.aspect] = fact
-
-    added = False
-    for (source_id, _candidate), release_facts in facts_by_release.items():
-        version_fact = release_facts.get("version")
-        if version_fact is None or not is_stable_version(version_fact.value):
-            continue
-        source = sources_by_id.get(source_id)
-        if source is None or not citable_for("version", source.source_class, report.brief.source_policy):
-            continue
-        date_fact = release_facts.get("release_date")
-        released = date_fact.value if date_fact is not None else ""
-        span = stable_release_span(source, version_fact.value, released)
-        if span is None:
-            continue
-        start, end = span
-        if any(
-            item.source_id == source_id and item.start_offset == start and item.end_offset == end
-            for item in report.evidence
-        ):
-            continue
-        statement = source.content[start:end]
-        passage_id = hashlib.sha256(
-            f"{source.document_id}\0{source.content_hash}\0{start}\0{end}".encode("utf-8")
-        ).hexdigest()[:24]
-        report.evidence.append(
-            EvidenceItem(
-                source_id,
-                statement,
-                relevance=1.0,
-                confidence=source.quality_score,
-                passage_id=passage_id,
-                start_offset=start,
-                end_offset=end,
-                document_hash=source.content_hash,
-            )
-        )
-        added = True
-    if added:
-        report.bind_passages()
-    return added
-
-
-def _bind_llm_release_fact_passages(report: ResearchReport) -> bool:
-    if report.brief is None or not is_llm_release_brief(report.brief):
-        return False
-    sources_by_id = {source.source_id: source for source in report.sources}
-    added = False
-    for fact in report.facts:
-        if fact.aspect != "release_date" or not fact.source_id:
-            continue
-        source = sources_by_id.get(fact.source_id)
-        if source is None or not citable_for(fact.aspect, source.source_class, report.brief.source_policy):
-            continue
-        start = source.content.find(fact.quote) if fact.quote else -1
-        span = fact.quote
-        if start < 0 and fact.value:
-            start = source.content.find(fact.value)
-            span = fact.value
-        if start < 0 or not span:
-            continue
-        end = start + len(span)
-        if any(
-            item.source_id == fact.source_id and item.start_offset == start and item.end_offset == end
-            for item in report.evidence
-        ):
-            continue
-        statement = source.content[start:end]
-        passage_id = hashlib.sha256(
-            f"{source.document_id}\0{source.content_hash}\0{start}\0{end}".encode("utf-8")
-        ).hexdigest()[:24]
-        report.evidence.append(
-            EvidenceItem(
-                fact.source_id,
-                statement,
-                relevance=1.0,
-                confidence=source.quality_score,
-                passage_id=passage_id,
-                start_offset=start,
-                end_offset=end,
-                document_hash=source.content_hash,
-            )
-        )
-        added = True
-    if added:
-        report.bind_passages()
-    return added
 
 
 def _update_report_coverage(report: ResearchReport) -> bool:
-    brief = report.brief
-    if brief is None or not report.coverage:
+    """Resolve model-planned questions only from independently bound fact quotes."""
+    if not report.coverage:
         return False
-    _bind_stable_release_passages(report)
-    _bind_llm_release_fact_passages(report)
-    stopwords = {
-        "about", "across", "and", "are", "by", "compare", "cover", "cite", "documentation",
-        "for", "from", "how", "is", "it", "of", "official", "project", "research", "source",
-        "sources", "the", "their", "this", "to", "what", "with", "use", "using",
-    }
-
-    def terms(value: str) -> set[str]:
-        return {
-            normalize_research_term(token)
-            for token in re.findall(r"[A-Za-z0-9]+", value)
-            if normalize_research_term(token) not in stopwords
-        }
-
-    def dimension_matches(dimension: str, passage_terms: set[str]) -> bool:
-        expected = terms(dimension)
-        if "recommendation" in expected:
-            return bool(
-                {
-                    "recommendation", "recommend", "guidance", "prevent", "prevention",
-                    "mitigation", "mitigate", "allow", "deny", "block", "restrict",
-                    "validate", "validation",
-                }
-                & passage_terms
-            )
-        if "architecture" in expected:
-            return bool(
-                {
-                    "architecture", "architectural", "structure", "component", "service",
-                    "engine", "crawler", "scraper", "fetcher", "spider", "pipeline",
-                    "browser", "api", "metasearch", "aggregate",
-                }
-                & passage_terms
-            )
-        if "advantage" in expected:
-            return bool(
-                {
-                    "advantage", "benefit", "feature", "privacy", "private", "tracked",
-                    "profiled", "free", "open", "performance", "fast", "blocking", "block",
-                }
-                & passage_terms
-            )
-        if "limitation" in expected:
-            return bool(
-                {
-                    "limitation", "limit", "constraint", "tradeoff", "drawback", "caveat",
-                    "unsupported", "cannot", "require", "requires", "need", "install",
-                    "dependency", "prerequisite", "missing", "unavailable",
-                }
-                & passage_terms
-            )
-        if {"redirect", "handling"}.issubset(expected):
-            return "redirect" in passage_terms and bool(
-                {"follow", "followed", "allow", "default", "history"} & passage_terms
-            )
-        if {"client", "lifecycle"}.issubset(expected):
-            return bool({"client", "session", "clientsession"} & passage_terms) and bool(
-                {"context", "manager", "managed", "close", "cleanup", "persistent", "session"}
-                & passage_terms
-            )
-        return bool(expected & passage_terms)
-
-    sources_by_id = {source.source_id: source for source in report.sources}
-
-    def source_eligible(source: Optional[SourceDocument]) -> bool:
-        return _source_allowed(source, brief.source_policy, brief.explicit_domains)
-
-    unique_publishers = {
-        organisational_domain(source.domain or urlparse(source.url).netloc)
-        for source in report.sources
-        if source_eligible(source)
-    } - {""}
-
-    def passage_ids_for_facts(facts: list[Fact]) -> list[str]:
-        passage_ids: list[str] = []
-        for passage in report.passages:
-            for fact in facts:
-                if passage.source_id != fact.source_id:
-                    continue
-                values = [fact.value, fact.quote]
-                if fact.aspect != "release_date":
-                    values.append(fact.candidate)
-                if any(
-                    value and str(value).casefold() in passage.text.casefold()
-                    for value in values
-                ):
-                    passage_ids.append(passage.passage_id)
-                    break
-        return list(dict.fromkeys(passage_ids))
-
-    def facts_conflict(facts: list[Fact]) -> bool:
-        values = {" ".join(str(fact.value).split()).casefold() for fact in facts if fact.value}
-        return len(values) > 1 and len({fact.source_id for fact in facts if fact.source_id}) > 1
-
-    def normalize_license(value: str) -> str:
-        compact = re.sub(r"[^a-z0-9.]", "", value.casefold())
-        if compact == "mit":
-            return "MIT"
-        match = re.match(r"(agpl|lgpl|gpl|apache|bsd|mpl|epl)(\d+(?:\.\d+)?)", compact)
-        if match:
-            family, version = match.groups()
-            return f"{family.upper()}-{version}"
-        return compact.upper()
-
-    def licenses_in(text: str) -> set[str]:
-        matches = re.findall(
-            r"\b(?:MIT|(?:A|L)?GPL(?:[- ]?v?[- ]?\d+(?:\.\d+)?(?:[- ](?:only|or-later))?)?|"
-            r"Apache[- ]?2(?:\.0)?|BSD[- ]?[23](?:-Clause)?|ISC|MPL[- ]?2(?:\.0)?|EPL[- ]?2(?:\.0)?)\b",
-            text,
-            re.I,
-        )
-        natural_gpl = re.findall(
-            r"\bGNU\s+General\s+Public\s+License(?:\s+(?:version\s*)?)(\d+(?:\.\d+)?)\b",
-            text,
-            re.I,
-        )
-        return {normalize_license(value) for value in matches} | {
-            f"GPL-{version}" for version in natural_gpl
-        }
-
-    gaps: list[str] = []
+    sources = {source.source_id: source for source in report.sources}
+    policy = report.brief.source_policy if report.brief else "any_reputable"
+    domains = report.brief.explicit_domains if report.brief else []
+    gaps = []
     for question in report.coverage:
-        fields = question.required_fields
-        supporting: list[str] = []
-        refuting: list[str] = []
-        conflict = False
-        conflict_message = ""
-        missing_message = ""
-        if fields and fields[0].startswith("license_proposition:"):
-            expected = normalize_license(fields[0].split(":", 1)[1])
-            subject = fields[1].split(":", 1)[1] if len(fields) > 1 and fields[1].startswith("subject:") else ""
-            subject_terms = terms(subject)
-            observed: dict[str, list[str]] = {}
-            for passage in report.passages:
-                source = sources_by_id.get(passage.source_id)
-                if not source_eligible(source):
-                    continue
-                source_terms = terms(f"{source.title} {source.url} {source.content[:5000]} {passage.text}")
-                if not subject_terms or not subject_terms.intersection(source_terms):
-                    continue
-                if not re.search(r"\blicen[cs](?:e|ed|ing)\b", passage.text, re.I):
-                    continue
-                for license_id in licenses_in(passage.text):
-                    observed.setdefault(license_id, []).append(passage.passage_id)
-            supporting = list(dict.fromkeys(observed.get(expected, [])))
-            refuting = list(dict.fromkeys(
-                passage_id
-                for license_id, passage_ids in observed.items()
-                if license_id != expected
-                for passage_id in passage_ids
-            ))
-            conflict = bool(supporting and refuting) or len(observed) > 1
-            if conflict:
-                conflict_message = "Fetched official sources disagree about the project's license"
-        elif fields and fields[0].startswith("llm_release:"):
-            access = fields[0].split(":", 1)[1]
-            latest_candidate_date, latest_candidate_names = _latest_llm_release_candidates(
-                report.candidates, access
-            )
-            matching_facts = [
-                fact
-                for fact in report.facts
-                if _candidate_name_key(fact.candidate or "") in latest_candidate_names
-                and fact.aspect == "release_date"
-                and citable_for(fact.aspect, fact.source_class, brief.source_policy)
-                and _release_date_key(fact.value) == latest_candidate_date
-            ]
-            supporting = passage_ids_for_facts(matching_facts)
-            conflict = facts_conflict(matching_facts)
-            if conflict:
-                conflict_message = f"Developer sources disagree about the {access}-weight model release date"
-            elif latest_candidate_date is None:
-                missing_message = "No dated candidate was found for this access category"
-            elif not matching_facts:
-                missing_message = "The newest dated candidate lacks a matching developer-source release date"
-            elif not supporting:
-                missing_message = "The developer release date was not retained in a supporting evidence passage"
-        elif fields and fields[0].startswith(("version:", "release_date:")):
-            aspect, requested_version = fields[0].split(":", 1)
-            requested = parse_version_tuple(requested_version)
-            matching_facts = []
-            for fact in report.facts:
-                if fact.aspect != aspect:
-                    continue
-                if aspect == "version":
-                    candidate_version = parse_version_tuple(fact.value)
-                    if requested and candidate_version and candidate_version[:3] == requested[:3]:
-                        matching_facts.append(fact)
-                elif re.search(
-                    rf"(?<![A-Za-z0-9.]){re.escape(requested_version)}(?![A-Za-z0-9.])",
-                    f"{fact.candidate or ''} {fact.quote}",
-                    re.I,
-                ):
-                    matching_facts.append(fact)
-            supporting = passage_ids_for_facts(matching_facts)
-            conflict = aspect == "release_date" and facts_conflict(matching_facts)
-            if conflict:
-                conflict_message = "Credible sources report different dates for this exact version"
-        elif fields and fields[0].startswith("source:"):
-            domain = fields[0].split(":", 1)[1].casefold()
-            matching_ids = {
-                source.source_id
-                for source in report.sources
-                if source_eligible(source) and (
-                    (source.domain or urlparse(source.url).netloc).casefold().split(":")[0] == domain
-                    or (source.domain or urlparse(source.url).netloc).casefold().split(":")[0].endswith(f".{domain}")
-                )
-            }
-            supporting = [item.passage_id for item in report.passages if item.source_id in matching_ids]
-        elif fields and fields[0].startswith("independent_sources:"):
-            required = int(fields[0].split(":", 1)[1])
-            if len(unique_publishers) >= required:
-                supporting = [item.passage_id for item in report.passages]
-        elif len(fields) >= 2:
-            subject_terms = terms(fields[0])
-            for passage in report.passages:
-                source = sources_by_id.get(passage.source_id)
-                if not source_eligible(source):
-                    continue
-                subject_found = subject_terms.intersection(
-                    terms(f"{source.title} {source.url} {source.content[:5000]}")
-                )
-                if subject_found and dimension_matches(fields[1], terms(passage.text)):
-                    supporting.append(passage.passage_id)
-        elif fields and fields[0] not in {"answer", ""}:
-            required = fields[0].casefold()
-            matching_facts = [
-                fact for fact in report.facts if fact.aspect.casefold() == required
-            ]
-            if brief.entity_kind == "release" and required in {"version", "release_date"}:
-                if is_llm_release_brief(brief):
-                    matching_facts = [
-                        fact
-                        for fact in matching_facts
-                        if fact.candidate
-                        and citable_for(fact.aspect, fact.source_class, brief.source_policy)
-                    ]
-                else:
-                    matching_facts = [
-                        fact
-                        for fact in matching_facts
-                        if fact.extractor == "releases:pick_stable"
-                    ]
-            supporting = passage_ids_for_facts(matching_facts)
-            conflict = facts_conflict(matching_facts)
-            if conflict:
-                conflict_message = f"Fetched sources disagree about {required}"
-            if not supporting:
-                supporting = [
-                    item.passage_id for item in report.passages if required in terms(item.text)
-                ]
-        else:
-            required_terms = terms(question.question)
-            for passage in report.passages:
-                overlap = required_terms.intersection(terms(passage.text))
-                if overlap and len(overlap) >= min(2, len(required_terms)):
-                    supporting.append(passage.passage_id)
-
-        question.supporting_claim_ids = list(dict.fromkeys(supporting))
-        if len(fields) >= 2 and supporting:
-            relevance_by_passage = {item.passage_id: item.relevance for item in report.evidence}
-            question.supporting_claim_ids = sorted(
-                question.supporting_claim_ids,
-                key=lambda passage_id: relevance_by_passage.get(passage_id, 0.0),
-                reverse=True,
-            )[:2]
-        question.refuting_claim_ids = list(dict.fromkeys(refuting))
-        question.conflict = conflict
-        if conflict:
+        if not question.evidence_requirements:
             question.status = "unresolved"
-            question.missing_evidence = [conflict_message or "Credible sources disagree on this requirement"]
-            gaps.append(f"Unresolved: {question.question} (conflicting evidence)")
-        elif supporting:
-            question.status = "supported"
-            question.missing_evidence = []
-        elif refuting:
-            question.status = "contradicted"
-            question.missing_evidence = []
-        else:
-            question.status = "unresolved"
-            question.missing_evidence = [missing_message or "No fetched passage resolved this requirement"]
+            question.supporting_claim_ids = []
+            question.missing_evidence = ["An evidence obligation plan was not available"]
             gaps.append(f"Unresolved: {question.question}")
-
-    other_gaps = [
-        gap for gap in report.gaps
-        if not str(gap).startswith("Unresolved: ")
-    ]
-    report.gaps = list(dict.fromkeys(other_gaps + gaps))
-    return all(question.status in {"supported", "contradicted"} for question in report.coverage)
+            continue
+        facts = [
+            fact for fact in report.facts
+            if fact.aspect == question.id
+            and _source_allowed(sources.get(fact.source_id), policy, domains)
+        ]
+        bound = fact_evidence(report.sources, facts)
+        question.supporting_claim_ids = [item.passage_id for item in bound]
+        question.refuting_claim_ids = []
+        question.conflict = conflicting_facts(facts)
+        question.status = "supported" if bound and not question.conflict else "unresolved"
+        question.missing_evidence = (
+            [] if question.status == "supported" else ["No consistent fetched evidence resolved this question"]
+        )
+        if question.status == "unresolved":
+            gaps.append(f"Unresolved: {question.question}")
+    report.gaps = list(dict.fromkeys(
+        [gap for gap in report.gaps if not str(gap).startswith("Unresolved: ")] + gaps
+    ))
+    return all(question.status == "supported" for question in report.coverage)
 
 
 _ENTITY_RE = re.compile(r"&(?:nbsp|ensp|emsp|thinsp|#160|#8194|#8195|#8201);", re.I)
@@ -928,75 +280,19 @@ def sanitize_source_text(content: str) -> str:
 
 
 def _matches_candidate_variant(candidate_name: str, doc_title: str, doc_url: str, text_span: str) -> bool:
-    """Product-variant guard: facts are bound only to the exact model variant."""
-    # Extract distinct model alphanumeric tokens like 15IAX9, FA507NV, G15-5530, etc.
-    code_tokens = re.findall(
-        r"\b\d{2}[A-Za-z]{3}\d\b|\b[A-Za-z]{2}\d{3}[A-Za-z]{2}\b|\b[A-Za-z0-9]+-[A-Za-z0-9]+\b",
-        candidate_name,
-    )
-    if not code_tokens:
-        # Check brand + main model token
-        name_lower = candidate_name.lower()
-        return (
-            name_lower in doc_title.lower()
-            or name_lower in doc_url.lower()
-            or name_lower in text_span.lower()
-        )
-
-    for tok in code_tokens:
-        tok_lower = tok.lower()
-        # If candidate code appears in page or span, it matches
-        span_codes = re.findall(
-            r"\b\d{2}[A-Za-z]{3}\d\b|\b[A-Za-z]{2}\d{3,}[A-Za-z]{2}\b|\b[A-Za-z]\d{2}-\d{4}\b",
-            text_span,
-        )
-        variant_parts = set(tok_lower.split("-")) | {tok_lower}
-        if span_codes and any(oc.lower() not in variant_parts for oc in span_codes):
-            return False
-        if tok_lower in doc_title.lower() or tok_lower in doc_url.lower() or tok_lower in text_span.lower():
-            return True
-        # If a different competing code is present on the page, reject
-        other_codes = re.findall(
-            r"\b\d{2}[A-Za-z]{3}\d\b|\b[A-Za-z]{2}\d{3}[A-Za-z]{2}\b",
-            doc_title + " " + doc_url,
-        )
-        if other_codes and any(oc.lower() != tok_lower for oc in other_codes):
-            return False
-
-    return False
+    return matches_product_variant(candidate_name, doc_title, doc_url, text_span)
 
 
 def _is_candidate_complete(candidate: Candidate, facts: List[Fact], brief: ResearchBrief) -> bool:
-    """Check if a candidate has citable official specs for required aspects and price <= budget."""
-    cand_name_clean = re.sub(r"[^\w\s]", "", candidate.name).lower().strip()
-    cand_facts = []
-    for f in facts:
-        if not f.candidate:
-            continue
-        fc_clean = re.sub(r"[^\w\s]", "", f.candidate).lower().strip()
-        if fc_clean == cand_name_clean and citable_for(f.aspect, f.source_class, brief.source_policy):
-            cand_facts.append(f)
-
-    if not cand_facts:
-        return False
-
-    aspects_covered = {f.aspect for f in cand_facts}
-
-    # Must have price
-    price_facts = [f for f in cand_facts if f.aspect == "price"]
-    if not price_facts and brief.budget:
-        return False
-    if brief.budget and price_facts:
-        val = parse_inr_price(price_facts[0].value)
-        if val is None or val > brief.budget:
-            return False
-
-    # Check key hardware aspects if required
-    for req in ("gpu", "vram", "ram"):
-        if req in brief.aspects and req not in aspects_covered:
-            return False
-
-    return True
+    """Compatibility check against only the fields supplied by this request."""
+    supported = [
+        fact for fact in facts
+        if fact.candidate and fact.candidate.casefold() == candidate.name.casefold()
+        and citable_for(fact.aspect, fact.source_class, brief.source_policy)
+    ]
+    return bool(supported) and not conflicting_facts(supported) and set(brief.aspects).issubset(
+        {fact.aspect for fact in supported}
+    )
 
 
 class PhaseBudget:
@@ -1034,6 +330,8 @@ class ResearchEngine:
         query_planner: Optional[Callable[[str], Awaitable[List[str]]]] = None,
         brief_planner: Optional[BriefPlannerCallback] = None,
         candidate_extractor: Optional[CandidateExtractorCallback] = None,
+        fact_extractor: Optional[CandidateExtractorCallback] = None,
+        cache_scope: Optional[str] = None,
     ) -> None:
         self.config = config
         self.progress = progress
@@ -1041,14 +339,21 @@ class ResearchEngine:
         self.query_planner = query_planner
         self.brief_planner = brief_planner
         self.candidate_extractor = candidate_extractor
-        self.search_cache: TTLCache[List[SearchResult]] = TTLCache(256)
-        self.document_cache: TTLCache[SourceDocument] = TTLCache(128)
+        self.fact_extractor = fact_extractor
+        self.cache_scope = cache_scope.strip() if isinstance(cache_scope, str) and cache_scope.strip() else None
+        self.search_cache: TTLCache[List[SearchResult]] = (
+            _SHARED_SEARCH_CACHE if self.cache_scope else TTLCache(256)
+        )
+        self.document_cache: TTLCache[SourceDocument] = (
+            _SHARED_DOCUMENT_CACHE if self.cache_scope else TTLCache(128)
+        )
         self._active_report: Optional[ResearchReport] = None
         self._acquisition_deadline: Optional[float] = None
         self._query_limit: Optional[int] = None
         self._queries_used = 0
         self._source_limit: Optional[int] = None
         self._source_attempts = 0
+        self._fetched_urls: Set[str] = set()
         self._concurrency_limit: Optional[int] = None
         self._iterations_limit = 1
         self._llm_call_limit: Optional[int] = None
@@ -1059,8 +364,8 @@ class ResearchEngine:
     def _configure_budget(self, mode: ResearchMode, *, sustained: bool) -> float:
         scope = "sustained" if sustained else mode.value
         limits = {
-            "quick": (20.0, 4.0, 2, 4, 2, 1, 8.0, 1),
-            "standard": (75.0, 12.0, 6, 12, 4, 2, 12.0, 3),
+            "quick": (20.0, 4.0, 1, 2, 2, 1, 8.0, 2),
+            "standard": (75.0, 12.0, 6, 12, 4, 2, 12.0, 5),
             "deep": (150.0, 20.0, 12, 24, 5, 4, 15.0, 6),
             "sustained": (300.0, 30.0, 24, 40, 6, 6, 20.0, 10),
         }
@@ -1076,6 +381,7 @@ class ResearchEngine:
             max(1, int(getattr(self.config, "research_max_search_queries", queries))), queries
         )
         self._queries_used = 0
+        self._fetched_urls.clear()
         self._source_limit = min(
             max(1, int(getattr(self.config, "research_max_sources", sources))), sources
         )
@@ -1105,6 +411,59 @@ class ResearchEngine:
         self._llm_calls_used += 1
         return True
 
+    async def _plan_brief(self, query: str, mode: ResearchMode) -> ResearchBrief:
+        brief = _research_brief(query, mode)
+        if self.brief_planner is None or not self._consume_llm_call():
+            return brief
+        try:
+            planned = await self.brief_planner(query, brief)
+            questions = planned.get("questions", []) if isinstance(planned, dict) else []
+            scoped = []
+            for item in questions:
+                if not isinstance(item, dict) or not isinstance(item.get("question"), str):
+                    continue
+                question = item["question"].strip()
+                requirements = item.get("evidence_requirements", [])
+                if not question or not isinstance(requirements, list):
+                    continue
+                for requirement in requirements:
+                    if not isinstance(requirement, str) or not requirement.strip():
+                        continue
+                    identity = f"q{len(scoped) + 1}"
+                    scoped.append(Subquestion(
+                        id=identity, question=f"{question}: {requirement.strip()}", required_fields=[identity],
+                        evidence_requirements=[requirement.strip()],
+                    ))
+            if scoped:
+                brief.required_subquestions = scoped
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.info("Research question planning unavailable; retaining the exact request", exc_info=True)
+        return brief
+
+    async def _read_model_facts(self, report: ResearchReport) -> None:
+        if not report.sources or self.fact_extractor is None or not self._consume_llm_call():
+            return
+        try:
+            proposals = await self.fact_extractor(report.brief, report.sources)
+            facts = model_facts(proposals, report.sources, policy=report.brief.source_policy)
+            question_ids = {item.id for item in report.coverage}
+            retained = {(fact.aspect, fact.value, fact.quote, fact.source_id): fact for fact in report.facts}
+            for fact in facts:
+                if fact.aspect in question_ids:
+                    retained[(fact.aspect, fact.value, fact.quote, fact.source_id)] = fact
+            report.facts = list(retained.values())
+            passages = {item.passage_id: item for item in report.evidence}
+            passages.update({item.passage_id: item for item in fact_evidence(report.sources, report.facts)})
+            report.evidence = list(passages.values())
+            report.bind_passages()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            report.errors.append("Model evidence extraction was unavailable")
+            logger.info("Research evidence extraction unavailable", exc_info=True)
+
     def _remaining_acquisition_s(self) -> Optional[float]:
         if self._acquisition_deadline is None:
             return None
@@ -1113,6 +472,13 @@ class ResearchEngine:
     async def _notify(self, progress: ResearchProgress) -> None:
         if self.progress is None:
             return
+        report = self._active_report
+        progress = replace(
+            progress,
+            source_count=len(self._fetched_urls),
+            evidence_count=len(report.evidence) if report and report.evidence else None,
+            finding_count=len(report.facts) if report and report.facts else None,
+        )
         result = self.progress(progress)
         if inspect.isawaitable(result):
             await result
@@ -1207,6 +573,17 @@ class ResearchEngine:
 
     async def _search(self, plan: ResearchPlan) -> List[SearchResult]:
         providers = self._providers()
+        if any(domain.removeprefix("www.").casefold() == "github.com" for domain in plan.domain_filters):
+            from charlie.research.github import GitHubProvider
+
+            providers.insert(0, GitHubProvider())
+        if any(
+            domain.casefold().removeprefix("www.") in {"bilibili.com", "b23.tv"}
+            for domain in plan.domain_filters
+        ):
+            from charlie.research.agent_reach import BilibiliProvider
+
+            providers.insert(0, BilibiliProvider())
         if not providers:
             if self._active_report is not None:
                 self._active_report.provider_outcomes.append(
@@ -1226,10 +603,35 @@ class ResearchEngine:
             self._queries_used += len(plan.queries)
         source_cap = self._source_limit or int(getattr(self.config, "research_max_sources", 40))
         limit = max(1, min(int(getattr(self.config, "research_max_sources", 40)), source_cap))
+        provider_config = tuple(
+            getattr(self.config, name, None)
+            for name in (
+                "searxng_url",
+                "searxng_engines",
+                "searxng_fallback_engines",
+                "research_ddg_enabled",
+                "research_ddg_endpoint",
+                "research_bing_enabled",
+                "research_bing_endpoint",
+                "research_yacy_enabled",
+                "research_yacy_url",
+                "research_yacy_resource",
+                "research_yacy_verify",
+                "research_provider_order",
+                "research_fetch_timeout_s",
+                "research_market",
+                "research_locale",
+            )
+        )
+        provider_scope = hashlib.sha256(repr(provider_config).encode("utf-8")).hexdigest()
         cache_key = repr(
             (
+                self.cache_scope,
+                provider_scope,
                 tuple(plan.domain_filters),
                 tuple((item.text, tuple(item.domain_filters)) for item in plan.queries),
+                plan.required_freshness,
+                limit,
             )
         )
         cached = self.search_cache.get(cache_key)
@@ -1240,18 +642,16 @@ class ResearchEngine:
             plan,
             providers,
             limit=limit,
-            max_concurrency=min(
-                2,
-                self._concurrency_limit or int(getattr(self.config, "research_max_concurrency", 6)),
-            ),
+            max_concurrency=self._concurrency_limit or int(getattr(self.config, "research_max_concurrency", 6)),
             progress=lambda current, total: logger.debug("Research search progress %d/%d", current, total),
             provider_outcomes=provider_outcomes,
         )
         if self._active_report is not None:
             self._active_report.provider_outcomes.extend(provider_outcomes)
         ranked = rank_search_results(results, plan, limit)
-        ttl = 60.0 if plan.required_freshness == "current" else 900.0
-        self.search_cache.set(cache_key, ranked, ttl)
+        if ranked:
+            ttl = 60.0 if plan.required_freshness == "current" else 900.0
+            self.search_cache.set(cache_key, ranked, ttl)
         return ranked
 
     async def _fetch_one(
@@ -1261,7 +661,9 @@ class ResearchEngine:
         max_chars: Optional[int] = None,
         timeout_s: Optional[float] = None,
     ) -> Optional[SourceDocument]:
-        cache_key = result.canonical_url or result.url
+        browser_owner = getattr(self.browser_fetch, "__self__", None)
+        fetcher_scope = id(browser_owner if browser_owner is not None else self.browser_fetch)
+        cache_key = repr((self.cache_scope, fetcher_scope, result.canonical_url or result.url))
         cached = self.document_cache.get(cache_key)
         if cached is not None and len(cached.content) >= (max_chars or 14000) * 0.8:
             return cached
@@ -1278,12 +680,32 @@ class ResearchEngine:
         except ValueError:
             logger.info("Research URL rejected: %s", result.url)
             document = None
-        # ponytail: dynamic fetch stays disabled until its entire connection path
-        # can enforce the same destination policy as the pinned HTTP transport.
-        if document is None and mode is not ResearchMode.QUICK and (
+        fallback_enabled = (
             getattr(self.config, "research_crawl_enabled", False) or self.browser_fetch is not None
-        ):
-            logger.debug("Research dynamic fallback unavailable without connection-level egress isolation")
+        )
+        terminal_fetch_status = bool(status_out and status_out[-1] in {404, 410})
+        thin_extraction = bool(
+            document is not None
+            and document.extraction_method == "html-text"
+            and len(document.content) < 1200
+        )
+        if (document is None or thin_extraction) and fallback_enabled and not terminal_fetch_status:
+            try:
+                if self.browser_fetch is not None:
+                    crawled = await self.browser_fetch(result)
+                else:
+                    crawled = await crawl_document(
+                        result,
+                        timeout_s=timeout_s or self._source_timeout_s or float(
+                            getattr(self.config, "research_fetch_timeout_s", 20)
+                        ),
+                    )
+                if crawled is not None:
+                    document = crawled
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.info("Research browser escalation failed for %s", result.url, exc_info=True)
         if status_out:
             logger.debug("Research source returned HTTP %s: %s", status_out[-1], result.url)
 
@@ -1294,6 +716,54 @@ class ResearchEngine:
             document.refresh_identity()
             self.document_cache.set(cache_key, document, 300.0 if mode is ResearchMode.DEEP else 900.0)
         return document
+
+    async def _fetch_until_covered(
+        self,
+        results: Sequence[SearchResult],
+        mode: ResearchMode,
+        report: ResearchReport,
+        cancel_event: Optional[asyncio.Event] = None,
+    ) -> List[SourceDocument]:
+        """Acquire small batches, stopping at supported coverage rather than a quota."""
+        documents: List[SourceDocument] = []
+        selected: List[SearchResult] = []
+        seen: Set[str] = set()
+        domains: dict[str, int] = {}
+        domain_limit = max(1, int(getattr(self.config, "research_max_pages_per_domain", 4)))
+        for result in results:
+            identity = result.canonical_url or result.url
+            domain = result.domain or "unknown"
+            if identity in seen or domains.get(domain, 0) >= domain_limit:
+                continue
+            seen.add(identity)
+            domains[domain] = domains.get(domain, 0) + 1
+            selected.append(result)
+        batch_size = 1 if mode is ResearchMode.QUICK else max(1, self._concurrency_limit or 1)
+        policy = report.brief.source_policy if report.brief else "balanced"
+        for offset in range(0, len(selected), batch_size):
+            remaining = self._remaining_acquisition_s()
+            if (cancel_event and cancel_event.is_set()) or (remaining is not None and remaining <= 0):
+                break
+            if self._source_limit is not None and self._source_attempts >= self._source_limit:
+                break
+            batch = await self._fetch_sources(
+                selected[offset:offset + batch_size], mode, timeout_s=remaining,
+            )
+            for document in batch:
+                document.source_class = classify(document.url, brief=report.brief).value
+            if policy == "official_required" and report.brief:
+                batch = [doc for doc in batch if _source_allowed(
+                    doc, policy, report.brief.explicit_domains,
+                )]
+            documents.extend(batch)
+            report.sources = (
+                await rank_documents(documents, report.plan, len(documents))
+                if report.plan and documents else list(documents)
+            )
+            report.citations = assign_citations(report.sources)
+            report.evidence = self._extract_evidence(report.sources, report.query, policy=policy)
+            report.bind_passages()
+        return documents
 
     async def _rank_sources(
         self,
@@ -1318,6 +788,7 @@ class ResearchEngine:
             pairs,
             base_url=getattr(self.config, "memory_embedding_url", ""),
             model=getattr(self.config, "memory_embedding_model", ""),
+            timeout_s=min(2.0, max(0.01, self._remaining_acquisition_s() or 2.0)),
         )
         return await rank_documents(documents, plan, limit, semantic=semantic)
 
@@ -1379,6 +850,8 @@ class ResearchEngine:
                 logger.warning("Research source fetch failed: %s", result.url, exc_info=True)
                 document = None
             completed += 1
+            if document is not None:
+                self._fetched_urls.add(document.url)
             try:
                 await self._notify(
                     ResearchProgress(
@@ -1420,431 +893,11 @@ class ResearchEngine:
         return documents
 
     async def _run_sustained(
-        self,
-        query: str,
-        cancel_event: Optional[asyncio.Event] = None,
-        domain_filters: Optional[List[str]] = None,
+        self, query: str, cancel_event: Optional[asyncio.Event] = None,
+        domain_filters: Optional[List[str]] = None, *, mode: ResearchMode = ResearchMode.DEEP,
     ) -> ResearchReport:
-        """Bounded discover -> verify loop (Decision 1 & Architecture)."""
-        started = time.perf_counter()
-        acquisition_budget = self._remaining_acquisition_s()
-        if acquisition_budget is None:
-            acquisition_budget = 170.0
-        acquisition_budget = max(0.0, acquisition_budget)
-        budget = PhaseBudget(
-            plan_s=acquisition_budget * 0.1,
-            discover_s=acquisition_budget * 0.45,
-            verify_s=acquisition_budget * 0.45,
-            synth_s=0.0,
-        )
-        phase_timings: Dict[str, float] = {}
-        report = ResearchReport(query=query, mode=ResearchMode.DEEP)
-        self._active_report = report
-
-        # ---------------------------------------------------------
-        # Phase 0: Brief (deterministic parse + optional model fill)
-        # ---------------------------------------------------------
-        p0_start = time.perf_counter()
-        await self._notify(ResearchProgress("planning", "Structuring research requirements", mode=ResearchMode.DEEP))
-        brief = _research_brief(query, ResearchMode.DEEP)
-        if domain_filters:
-            brief.explicit_domains = list(dict.fromkeys(brief.explicit_domains + domain_filters))
-        report.brief = brief
-        report.coverage = brief.required_subquestions
-
-        plan_deadline = budget.deadline_for(budget.plan_s)
-        if self.brief_planner is not None and self._consume_llm_call():
-            try:
-                extra = await asyncio.wait_for(self.brief_planner(query, brief), timeout=plan_deadline)
-                if isinstance(extra, dict):
-                    if "aspects" in extra and isinstance(extra["aspects"], list):
-                        brief.aspects = list(dict.fromkeys(brief.aspects + extra["aspects"]))
-                    if "priority" in extra and isinstance(extra["priority"], list):
-                        brief.priority = extra["priority"]
-            except Exception as e:
-                logger.info("Brief planner finished or skipped: %s", e)
-
-        p0_elapsed = time.perf_counter() - p0_start
-        budget.record_used(plan_deadline, p0_elapsed)
-        phase_timings["phase_0_brief_ms"] = p0_elapsed * 1000
-
-        if cancel_event and cancel_event.is_set():
-            report.stop_reason = "cancelled"
-            return report
-
-        # ---------------------------------------------------------
-        # Phase 1: Discover (queries -> search -> fetch -> candidates)
-        # ---------------------------------------------------------
-        p1_start = time.perf_counter()
-        await self._notify(ResearchProgress("searching", "Finding candidate options", mode=ResearchMode.DEEP))
-        disc_queries = discovery_queries(brief)
-        disc_plan = ResearchPlan(
-            goal=query,
-            mode=ResearchMode.DEEP,
-            queries=_official_coverage_queries(brief)
-            + [ResearchQuery(q, "discovery", list(brief.explicit_domains)) for q in disc_queries],
-            domain_filters=list(brief.explicit_domains),
-        )
-        report.plan = disc_plan
-
-        disc_deadline = budget.deadline_for(budget.discover_s)
-        try:
-            disc_search_results = await asyncio.wait_for(self._search(disc_plan), timeout=disc_deadline * 0.45)
-        except Exception:
-            disc_search_results = []
-
-        official_seeds = _official_document_search_results(brief)
-        seeded_urls = {result.canonical_url or result.url for result in official_seeds}
-        disc_search_results = official_seeds + [
-            result for result in disc_search_results
-            if (result.canonical_url or result.url) not in seeded_urls
-        ]
-
-        report.search_results.extend(disc_search_results)
-
-        # Fetch discovery sources (14,000 chars)
-        time_left_p1 = max(2.0, disc_deadline - (time.perf_counter() - p1_start))
-        disc_docs = await self._fetch_sources(
-            disc_search_results[:10],
-            ResearchMode.DEEP,
-            max_chars=14000,
-            timeout_s=time_left_p1,
-        )
-
-        # Classify discovery docs and assign IDs
-        for idx, doc in enumerate(disc_docs, start=1):
-            doc.source_id = f"D{idx}"
-            doc.source_class = classify(doc.url, brief=brief).value
-
-        # Extract candidates
-        model_proposals = None
-        if self.candidate_extractor is not None and self._consume_llm_call():
-            try:
-                model_proposals = await asyncio.wait_for(self.candidate_extractor(brief, disc_docs), timeout=5.0)
-            except Exception:
-                model_proposals = None
-
-        candidates = extract_candidates(disc_docs, brief, model_proposals)
-        report.candidates = candidates
-
-        p1_elapsed = time.perf_counter() - p1_start
-        budget.record_used(disc_deadline, p1_elapsed)
-        phase_timings["phase_1_discover_ms"] = p1_elapsed * 1000
-
-        if cancel_event and cancel_event.is_set():
-            report.stop_reason = "cancelled"
-            return report
-
-        # ---------------------------------------------------------
-        # Phase 2: Verify per candidate (registry queries, fetch, facts)
-        # ---------------------------------------------------------
-        p2_start = time.perf_counter()
-        verify_deadline = budget.deadline_for(budget.verify_s)
-        verified_sources: List[SourceDocument] = []
-        verified_facts: List[Fact] = []
-        max_verify_chars = int(getattr(self.config, "research_verify_fetch_chars", 60000))
-        max_rounds = int(getattr(self.config, "research_max_verify_rounds", 2))
-
-        # If release entity kind: verify official canonical release pages
-        if brief.entity_kind == "release" and not is_llm_release_brief(brief):
-            await self._notify(ResearchProgress("reading", "Verifying official release documentation", mode=ResearchMode.DEEP))
-            rel_plan = ResearchPlan(
-                goal=f"{brief.topic} official downloads",
-                mode=ResearchMode.DEEP,
-                queries=[ResearchQuery(q, "release", list(brief.explicit_domains)) for q in discovery_queries(brief)],
-                domain_filters=list(brief.explicit_domains),
-            )
-            rel_results = await self._search(rel_plan)
-            # Ensure canonical official release endpoints are always included
-            canonical_urls = canonical_release_urls(brief)
-            seen_r_urls = {r.canonical_url or r.url for r in rel_results}
-            for cu in dict.fromkeys(canonical_urls):
-                if cu not in seen_r_urls:
-                    rel_results.insert(
-                        0,
-                        SearchResult(
-                            title=f"{brief.topic} Official Downloads",
-                            url=cu,
-                            provider="canonical",
-                            rank=0,
-                        ),
-                    )
-            rel_docs = await self._fetch_sources(
-                rel_results[:6],
-                ResearchMode.DEEP,
-                max_chars=max_verify_chars,
-                timeout_s=max(0.0, verify_deadline - (time.perf_counter() - p2_start)),
-            )
-            for idx, doc in enumerate(rel_docs, start=1):
-                doc.source_id = f"S{idx}"
-                doc.source_class = classify(doc.url, brief=brief).value
-                verified_sources.append(doc)
-                facts = extract_facts_from_document(doc, policy=brief.source_policy)
-                verified_facts.extend(facts)
-
-            from charlie.research.releases import is_stable_version, pick_stable
-            stable_res = pick_stable(rel_docs, brief=brief)
-            if stable_res:
-                ver, dt, sid = stable_res
-                subject_name = "Python" if "python" in brief.topic.lower() else brief.topic.title()
-                cand_name = f"{subject_name} {ver}"
-                report.candidates = [Candidate(name=cand_name, brand=subject_name, quote=f"{subject_name} {ver} - {dt}", source_id=sid)]
-                primary_url = next((d.url for d in rel_docs if d.source_id == sid), "https://www.python.org/downloads/")
-                stable_facts = [
-                    Fact(candidate=cand_name, aspect="version", value=ver, quote=ver, source_id=sid, source_class=SourceClass.OFFICIAL.value, extractor="releases:pick_stable", url=primary_url),
-                ]
-                if dt:
-                    stable_facts.append(
-                        Fact(candidate=cand_name, aspect="release_date", value=dt, quote=dt, source_id=sid, source_class=SourceClass.OFFICIAL.value, extractor="releases:pick_stable", url=primary_url)
-                    )
-                verified_facts = stable_facts + [
-                    f for f in verified_facts
-                    if (f.aspect not in ("version", "release_date") or is_stable_version(f.value))
-                    and f.value != ver
-                ]
-
-        else:
-            # Candidate verification loop
-            for candidate in candidates:
-                for doc in disc_docs:
-                    if doc.source_id == candidate.source_id or _matches_candidate_variant(candidate.name, doc.title, doc.url, doc.content[:1000]):
-                        disc_facts = extract_facts_from_document(
-                            doc,
-                            candidate_name=candidate.name,
-                            candidate_brand=candidate.brand,
-                            policy=brief.source_policy,
-                        )
-                        for f in disc_facts:
-                            if _matches_candidate_variant(candidate.name, doc.title, doc.url, f.quote):
-                                verified_facts.append(f)
-
-            def _candidate_coverage(candidate: Candidate) -> tuple[int, int, int]:
-                candidate_key = re.sub(r"[^\w\s]", "", candidate.name).lower().strip()
-                covered = {
-                    fact.aspect
-                    for fact in verified_facts
-                    if fact.candidate
-                    and re.sub(r"[^\w\s]", "", fact.candidate).lower().strip() == candidate_key
-                    and fact.aspect in brief.aspects
-                    and citable_for(fact.aspect, fact.source_class, brief.source_policy)
-                }
-                return (len(covered), len([fact for fact in verified_facts if fact.candidate and re.sub(r"[^\w\s]", "", fact.candidate).lower().strip() == candidate_key]), candidate.mentions)
-
-            candidates = sorted(candidates, key=_candidate_coverage, reverse=True)
-            report.candidates = candidates
-            slots_to_verify = candidates[: (brief.option_count or 3) + 2]
-            round_num = 0
-
-            while round_num < max_rounds and slots_to_verify:
-                round_num += 1
-                for cand_idx, candidate in enumerate(slots_to_verify, start=1):
-                    if (time.perf_counter() - p2_start) >= verify_deadline or (cancel_event and cancel_event.is_set()):
-                        break
-
-                    cand_brand = candidate.brand or ""
-                    brand_host = OFFICIAL_REGISTRY.get(cand_brand.lower(), {}).get("domains", {"official"})
-                    primary_host = next(iter(brand_host), "official")
-                    await self._notify(
-                        ResearchProgress(
-                            "reading",
-                            f"Verifying {candidate.name} on {primary_host} ({cand_idx}/{len(slots_to_verify)})",
-                            cand_idx,
-                            len(slots_to_verify),
-                            ResearchMode.DEEP,
-                        )
-                    )
-
-                    v_queries = verification_queries(candidate, brief)
-                    v_plan = ResearchPlan(
-                        goal=candidate.name,
-                        mode=ResearchMode.DEEP,
-                        queries=[ResearchQuery(q, "verification", list(brief.explicit_domains)) for q in v_queries],
-                    )
-                    v_results = await self._search(v_plan)
-
-                    # Fetch official and store verification documents (60,000 chars)
-                    v_docs = await self._fetch_sources(
-                        v_results[:4],
-                        ResearchMode.DEEP,
-                        max_chars=max_verify_chars,
-                        timeout_s=max(0.0, verify_deadline - (time.perf_counter() - p2_start)),
-                    )
-                    for doc in v_docs:
-                        doc.source_class = classify(doc.url, brief=brief, candidate_brand=candidate.brand).value
-                        # Filter out forums/social if official required
-                        if brief.source_policy == "official_required" and doc.source_class == SourceClass.FORUM_SOCIAL.value:
-                            continue
-
-                        # Product-variant guard: only associate if page matches candidate variant
-                        if not _matches_candidate_variant(candidate.name, doc.title, doc.url, doc.content[:1000]):
-                            continue
-
-                        verified_sources.append(doc)
-                        extracted = extract_facts_from_document(
-                            doc,
-                            candidate_name=candidate.name,
-                            candidate_brand=candidate.brand,
-                            policy=brief.source_policy,
-                        )
-                        # Filter extracted facts with variant guard on quote
-                        for f in extracted:
-                            if _matches_candidate_variant(candidate.name, doc.title, doc.url, f.quote):
-                                verified_facts.append(f)
-
-                # Coverage check
-                complete_cands = [c for c in candidates if _is_candidate_complete(c, verified_facts, brief)]
-                if len(complete_cands) >= (brief.option_count or 3):
-                    break  # Coverage reached!
-                # If gap exists and time remains, promote any unverified candidate slots
-                verified_names = {c.name for c in slots_to_verify}
-                remaining_candidates = [c for c in candidates if c.name not in verified_names]
-                if not remaining_candidates or (time.perf_counter() - p2_start) >= verify_deadline - 10.0:
-                    break
-                slots_to_verify = remaining_candidates[:2]
-
-        p2_elapsed = time.perf_counter() - p2_start
-        phase_timings["phase_2_verify_ms"] = p2_elapsed * 1000
-
-        # Assign stable source IDs (S1, S2, ...)
-        source_documents = verified_sources + disc_docs
-        if brief.source_policy == "official_required":
-            eligible_documents = [
-                doc
-                for doc in source_documents
-                if _source_allowed(doc, brief.source_policy, brief.explicit_domains)
-            ]
-            eligible_facts = {
-                (doc.source_id, doc.url, doc.canonical_url)
-                for doc in eligible_documents
-            }
-            verified_facts = [
-                fact
-                for fact in verified_facts
-                if fact.source_class in {
-                    SourceClass.OFFICIAL.value,
-                    SourceClass.OFFICIAL_UNVERIFIED.value,
-                }
-                and any(
-                    fact.source_id == source_id and fact.url in {url, canonical_url}
-                    for source_id, url, canonical_url in eligible_facts
-                )
-            ]
-            source_documents = eligible_documents
-
-        unique_sources: List[SourceDocument] = []
-        seen_urls: Set[str] = set()
-        for doc in source_documents:
-            norm_url = doc.canonical_url or doc.url
-            if norm_url not in seen_urls:
-                seen_urls.add(norm_url)
-                unique_sources.append(doc)
-
-        old_doc_ids = {id(doc): getattr(doc, "source_id", None) for doc in unique_sources}
-
-        report.sources = unique_sources
-        report.citations = assign_citations(report.sources)
-        report.facts = verified_facts
-
-        # Re-map source_id on facts to match citations
-        url_to_source_id = {doc.url: doc.source_id for doc in report.sources}
-        for doc in report.sources:
-            if getattr(doc, "canonical_url", None):
-                url_to_source_id[doc.canonical_url] = doc.source_id
-        old_id_to_new_id = {}
-        for doc in report.sources:
-            old_sid = old_doc_ids.get(id(doc))
-            if old_sid:
-                old_id_to_new_id[old_sid] = doc.source_id
-            if hasattr(doc, "source_id") and doc.source_id:
-                old_id_to_new_id[doc.source_id] = doc.source_id
-        updated_facts: List[Fact] = []
-        for f in report.facts:
-            mapped_id = url_to_source_id.get(f.url) or old_id_to_new_id.get(f.source_id) or f.source_id
-            updated_facts.append(
-                Fact(
-                    candidate=f.candidate,
-                    aspect=f.aspect,
-                    value=f.value,
-                    quote=f.quote,
-                    source_id=mapped_id,
-                    source_class=f.source_class,
-                    extractor=f.extractor,
-                    url=f.url,
-                    fetched_at=f.fetched_at,
-                )
-            )
-        report.facts = list({(f.candidate, f.aspect, f.value, f.source_id): f for f in updated_facts}.values())
-
-        # Remap candidate source_ids to valid citation IDs
-        if getattr(report, "candidates", None):
-            updated_candidates: List[Candidate] = []
-            for c in report.candidates:
-                c_mapped_id = old_id_to_new_id.get(c.source_id) or c.source_id
-                updated_candidates.append(
-                    Candidate(
-                        name=c.name,
-                        brand=c.brand,
-                        quote=c.quote,
-                        source_id=c_mapped_id,
-                        mentions=getattr(c, "mentions", 1),
-                        access=getattr(c, "access", None),
-                        release_date=getattr(c, "release_date", None),
-                    )
-                )
-            report.candidates = updated_candidates
-
-        # Build evidence from verified sources
-        report.evidence = self._extract_evidence(report.sources, query, policy=brief.source_policy)
-        report.bind_passages()
-
-        # Coverage evaluation
-        complete_count = None
-        target_count = None
-        if brief.entity_kind == "product":
-            complete_count = len([c for c in candidates if _is_candidate_complete(c, report.facts, brief)])
-            target_count = brief.option_count or 3
-            if complete_count < target_count:
-                report.gaps.append(
-                    f"Found {complete_count} of {target_count} requested options meeting all official specifications and budget."
-                )
-                report.partial = True
-
-        total_elapsed = (time.perf_counter() - started) * 1000
-        report.duration_ms = total_elapsed
-        report.phase_ms = phase_timings
-        coverage_complete = _update_report_coverage(report)
-
-        if cancel_event and cancel_event.is_set():
-            report.stop_reason = "cancelled"
-        elif brief.entity_kind == "product" and (
-            not report.facts or (complete_count is not None and complete_count < (target_count or 1))
-        ):
-            report.stop_reason = "partial-evidence" if (report.facts or report.evidence) else "insufficient-evidence"
-        elif not report.facts and not report.evidence:
-            report.stop_reason = "insufficient-evidence"
-        elif not coverage_complete:
-            report.stop_reason = "partial-evidence"
-            report.partial = True
-        else:
-            report.stop_reason = "evidence-sufficient"
-
-        # Structured log line for acceptance evidence
-        official_sources_count = len(
-            [s for s in report.sources if s.source_class in (SourceClass.OFFICIAL.value, SourceClass.OFFICIAL_STORE.value)]
-        )
-        logger.info(
-            "Research sustained complete | topic=%r | candidates=%d | complete=%d | "
-            "official_sources=%d | facts=%d | stop=%s | partial=%s | duration_ms=%.0f",
-            brief.topic,
-            len(report.candidates),
-            len([c for c in report.candidates if _is_candidate_complete(c, report.facts, brief)]),
-            official_sources_count,
-            len(report.facts),
-            report.stop_reason,
-            report.partial,
-            report.duration_ms,
-        )
-        return report
+        """Sustained work uses the shared request-driven acquisition loop."""
+        return await self._run_inner(query, mode, cancel_event, domain_filters)
 
     async def _run_inner(
         self,
@@ -1854,7 +907,7 @@ class ResearchEngine:
         domain_filters: Optional[List[str]] = None,
     ) -> ResearchReport:
         started = time.perf_counter()
-        brief = _research_brief(query, mode)
+        brief = await self._plan_brief(query, mode)
         if domain_filters:
             brief.explicit_domains = list(dict.fromkeys(brief.explicit_domains + domain_filters))
         plan = self.plan(query, mode, domain_filters=brief.explicit_domains)
@@ -1863,52 +916,84 @@ class ResearchEngine:
         report.brief = brief
         report.coverage = brief.required_subquestions
 
+        max_gap_queries = 2
+        followup_iterations = max(0, self._iterations_limit - 1) if mode is not ResearchMode.QUICK else 0
+        query_budget = self._query_limit
+        if query_budget is not None:
+            followup_reserve = min(
+                max(0, query_budget - 1),
+                followup_iterations * max_gap_queries,
+            )
+            initial_query_budget = max(1, query_budget - followup_reserve)
+        else:
+            followup_reserve = 0
+            initial_query_budget = max(
+                1,
+                int(getattr(self.config, "research_max_search_queries", 6)),
+            )
+
         await self._notify(ResearchProgress("planning", f"Planning {mode.value} research", mode=mode))
-        if brief.entity_kind == "release" and not is_llm_release_brief(brief):
-            plan.queries = [ResearchQuery(text, "official release", list(plan.domain_filters))
-                            for text in discovery_queries(brief)]
-        elif mode is not ResearchMode.QUICK:
-            coverage_queries = _official_coverage_queries(brief)
+        if mode is not ResearchMode.QUICK:
+            deterministic_queries = list(plan.queries)
             planned_queries = []
             if self.query_planner is not None and self._consume_llm_call():
-                queries = await self.query_planner(query)
-                planned_queries = [
-                    ResearchQuery(text, "targeted evidence", list(plan.domain_filters))
-                    for text in queries[:max(1, int(getattr(self.config, "research_max_search_queries", 6)))]
-                ]
-            plan.queries = coverage_queries + (planned_queries or plan.queries)
+                try:
+                    queries = await self.query_planner(
+                        f"Original request: {query}\n"
+                        f"Plan at most {initial_query_budget} distinct search queries."
+                    )
+                    if isinstance(queries, (list, tuple)):
+                        planned_query_texts = []
+                        seen_planned = set()
+                        for text in queries:
+                            if not isinstance(text, str) or not text.strip():
+                                continue
+                            normalized = text.strip()
+                            if normalized.casefold() in seen_planned:
+                                continue
+                            planned_query_texts.append(normalized)
+                            seen_planned.add(normalized.casefold())
+                            if len(planned_query_texts) >= initial_query_budget:
+                                break
+                        planned_queries = [
+                            ResearchQuery(text, "targeted evidence", list(plan.domain_filters))
+                            for text in planned_query_texts
+                        ]
+                except Exception:
+                    logger.info("Optional research query planning failed; using deterministic queries", exc_info=True)
+            plan.queries = []
+            seen_queries: set[str] = set()
+            for candidate in deterministic_queries + planned_queries:
+                key = candidate.text.strip().casefold()
+                if key and key not in seen_queries:
+                    plan.queries.append(candidate)
+                    seen_queries.add(key)
+            plan.queries = plan.queries[:initial_query_budget]
         if cancel_event and cancel_event.is_set():
             report.stop_reason = "cancelled"
             return report
 
         await self._notify(ResearchProgress("searching", "Searching current sources", mode=mode))
         report.search_results = await self._search(plan)
-        if brief.entity_kind == "release" and mode is not ResearchMode.QUICK:
-            seeds = [SearchResult(f"{brief.topic} official releases", url, provider="canonical", rank=0)
-                     for url in canonical_release_urls(brief)]
-            report.search_results = seeds + report.search_results
-        elif mode is not ResearchMode.QUICK:
-            seeds = _official_document_search_results(brief)
-            seeded_urls = {result.canonical_url or result.url for result in seeds}
-            report.search_results = seeds + [
-                result for result in report.search_results
-                if (result.canonical_url or result.url) not in seeded_urls
-            ]
         if not report.search_results:
-            report.errors.append("No configured research provider returned results")
             outcomes = report.provider_outcomes
-            report.stop_reason = (
-                "provider-exhausted"
-                if outcomes and all(item.get("status") in {"failed", "unavailable"} for item in outcomes)
-                else "no-results"
-            )
+            statuses = [item.get("status") for item in outcomes]
+            if "challenge" in statuses:
+                report.stop_reason = "provider-challenge"
+            elif any(status in {"failed", "unavailable"} for status in statuses):
+                report.stop_reason = "provider-exhausted"
+            elif statuses and not any(status in _SEARCHED_PROVIDER_STATUSES for status in statuses):
+                report.stop_reason = "provider-unconfigured"
+            else:
+                report.stop_reason = "no-results"
+            report.errors.append(f"No results to verify ({report.stop_reason})")
             report.duration_ms = (time.perf_counter() - started) * 1000
             return report
 
         await self._notify(
             ResearchProgress(
                 "found",
-                f"Found {len(report.search_results)} search results",
+                f"Found {len(report.search_results)} candidate links",
                 len(report.search_results),
                 len(report.search_results),
                 mode,
@@ -1918,27 +1003,30 @@ class ResearchEngine:
             report.stop_reason = "cancelled"
             return report
 
-        if mode is not ResearchMode.QUICK:
-            await self._notify(ResearchProgress("reading", "Reading selected sources", mode=mode))
-            documents = await self._fetch_sources(
-                report.search_results,
-                mode,
-                timeout_s=self._remaining_acquisition_s(),
-            )
-            for doc in documents:
-                doc.source_class = classify(doc.url, brief=brief).value
-            if brief.source_policy == "official_required":
-                documents = [
-                    doc for doc in documents
-                    if _source_allowed(doc, brief.source_policy, brief.explicit_domains)
-                ]
-            report.sources = documents
-            report.citations = assign_citations(report.sources)
-            report.evidence = self._extract_evidence(report.sources, query, policy=brief.source_policy)
-            report.bind_passages()
-            for doc in report.sources:
-                report.facts.extend(extract_facts_from_document(doc, policy=brief.source_policy))
-            report.sources = await self._rank_sources(documents, plan, mode)
+        # Quick changes the acquisition budget, not the requirement to read evidence.
+        await self._notify(ResearchProgress("reading", "Reading selected sources", mode=mode))
+        documents = await self._fetch_until_covered(
+            report.search_results, mode, report, cancel_event,
+        )
+        if cancel_event and cancel_event.is_set():
+            report.stop_reason = "cancelled"
+            return report
+        for doc in documents:
+            doc.source_class = classify(doc.url, brief=brief).value
+        if brief.source_policy == "official_required":
+            documents = [
+                doc for doc in documents
+                if _source_allowed(doc, brief.source_policy, brief.explicit_domains)
+            ]
+        ranked_sources = await self._rank_sources(documents, plan, mode)
+        ranked_urls = {doc.canonical_url or doc.url for doc in ranked_sources}
+        source_limit = max(1, int(getattr(self.config, "research_max_sources", 12)))
+        # Keep zero-score fetches visible; they remain ungrounded until evidence extraction succeeds.
+        unranked_fetched = [
+            doc for doc in documents
+            if doc.relevance_score <= 0 and (doc.canonical_url or doc.url) not in ranked_urls
+        ]
+        report.sources = ranked_sources + unranked_fetched[:max(0, source_limit - len(ranked_sources))]
 
         report.citations = (
             assign_citations(report.sources)
@@ -1948,57 +1036,68 @@ class ResearchEngine:
         report.evidence = self._extract_evidence(report.sources, query, policy=brief.source_policy)
         report.bind_passages()
 
-        # Extract deterministic facts on inline path
-        if report.sources:
-            report.facts = []
-            for doc in report.sources:
-                facts = extract_facts_from_document(doc, policy=brief.source_policy)
-                report.facts.extend(facts)
+        await self._read_model_facts(report)
 
-        if report.sources:
-            grounded_ids = {item.source_id for item in report.evidence}
-            report.sources = [item for item in report.sources if item.source_id in grounded_ids]
-            report.citations = assign_citations(report.sources)
-            report.evidence = self._extract_evidence(report.sources, query, policy=brief.source_policy)
-            report.bind_passages()
-        elif mode is not ResearchMode.QUICK:
-            report.citations = []
-
-        if brief.entity_kind == "release" and not is_llm_release_brief(brief) and report.sources:
-            stable = pick_stable(report.sources, brief=brief)
-            if stable:
-                version, released, source_id = stable
-                source = next(doc for doc in report.sources if doc.source_id == source_id)
-                report.facts = [Fact(candidate=brief.topic, aspect="version", value=version,
-                    quote=version, source_id=source_id, source_class=source.source_class,
-                    extractor="releases:pick_stable", url=source.url)]
-                if released:
-                    report.facts.append(Fact(candidate=brief.topic, aspect="release_date", value=released,
-                        quote=released, source_id=source_id, source_class=source.source_class,
-                        extractor="releases:pick_stable", url=source.url))
-
-        if mode is ResearchMode.DEEP and brief.entity_kind == "general":
+        if mode is not ResearchMode.QUICK:
             seen_queries = {item.text.casefold() for item in plan.queries}
             seen_urls = {result.canonical_url or result.url for result in report.search_results}
-            for _iteration in range(max(0, self._iterations_limit - 1)):
+            for _iteration in range(followup_iterations):
                 if _update_report_coverage(report):
+                    break
+                remaining_queries = (
+                    max(0, self._query_limit - self._queries_used)
+                    if self._query_limit is not None
+                    else max_gap_queries
+                )
+                available_followup_queries = min(max_gap_queries, remaining_queries)
+                if available_followup_queries <= 0:
                     break
                 unresolved = [item for item in report.coverage if item.status == "unresolved"]
                 followup_queries = []
+                gap_lines = []
+                fallback_queries = []
                 for item in unresolved:
+                    query_text = clean_query(item.question)
                     if item.required_fields and item.required_fields[0].startswith("source:"):
                         domain = item.required_fields[0].split(":", 1)[1]
-                        query_text = f"{item.question} {domain}"
-                    elif item.required_fields and item.required_fields[0].startswith("independent_sources:"):
-                        query_text = f"{clean_query(item.question)} distinct primary sources"
+                        gap_lines.append(f"{item.question} (required domain: {domain})")
+                        fallback_queries.append(f"{query_text} site:{domain}")
                     else:
-                        query_text = f"{clean_query(item.question)} primary documentation"
-                    if query_text.casefold() not in seen_queries:
-                        followup_queries.append(
-                            ResearchQuery(query_text, "evidence gap", list(plan.domain_filters))
+                        gap_lines.append(item.question)
+                        fallback_queries.append(query_text)
+                planned_gaps = []
+                if (
+                    self.query_planner is not None
+                    and (self._llm_call_limit is None or self._llm_calls_used + 1 < self._llm_call_limit)
+                    and self._consume_llm_call()
+                ):
+                    try:
+                        planned = await self.query_planner(
+                            f"Original request: {query}\n"
+                            f"Plan at most {available_followup_queries} distinct follow-up search queries.\n"
+                            "Unresolved evidence gaps:\n"
+                            + "\n".join(f"- {item}" for item in gap_lines)
                         )
-                        seen_queries.add(query_text.casefold())
-                    if len(followup_queries) >= 2:
+                        if isinstance(planned, (list, tuple)):
+                            planned_gaps = [
+                                text.strip() for text in planned
+                                if isinstance(text, str) and text.strip()
+                            ]
+                    except Exception:
+                        logger.info("Research gap query planning unavailable; using the gap wording", exc_info=True)
+                for query_text in planned_gaps or fallback_queries:
+                    normalized_query = query_text.strip()
+                    if not normalized_query or normalized_query.casefold() in seen_queries:
+                        continue
+                    followup_queries.append(
+                        ResearchQuery(
+                            normalized_query,
+                            "evidence gap",
+                            list(dict.fromkeys(plan.domain_filters + explicit_domain_filters(normalized_query))),
+                        )
+                    )
+                    seen_queries.add(normalized_query.casefold())
+                    if len(followup_queries) >= available_followup_queries:
                         break
                 if not followup_queries:
                     break
@@ -2042,27 +1141,13 @@ class ResearchEngine:
                     report.sources, query, policy=brief.source_policy
                 )
                 report.bind_passages()
-                report.facts = [
-                    fact
-                    for document in report.sources
-                    for fact in extract_facts_from_document(document, policy=brief.source_policy)
-                ]
+                await self._read_model_facts(report)
                 _update_report_coverage(report)
                 after = sum(item.status != "unresolved" for item in report.coverage)
                 if after <= before:
                     break
 
         report.products = []
-        if is_shopping_query(query, plan):
-            try:
-                report.products = extract_products(
-                    report.sources,
-                    query,
-                    str(getattr(self.config, "research_currency", "INR")),
-                )
-            except Exception as exc:
-                logger.warning("Product enrichment failed: query=%r error=%s", query, exc, exc_info=True)
-                report.products = []
         report.media = media_results(report.search_results)
         report.confidence = compute_confidence(report.evidence, report.sources)
         coverage_complete = _update_report_coverage(report)
@@ -2108,29 +1193,16 @@ class ResearchEngine:
             report.finalize_outcome()
             return report
 
-        brief_kind = parse_brief(query).entity_kind
-        is_sustained = (
-            sustained
-            or is_sustained_research_query(query, decision)
-            or brief_kind == "product"
-        )
-        selected_mode = ResearchMode.DEEP if is_sustained else decision.mode
+        explicit_research = bool(re.search(r"\\bresearch\\b", query, re.IGNORECASE))
+        sustained = sustained and explicit_research
+        deep_budget = sustained or is_sustained_research_query(query, decision)
+        selected_mode = ResearchMode.DEEP if deep_budget else decision.mode
         timeout = self._configure_budget(selected_mode, sustained=sustained)
         self._active_report = None
         try:
-            if is_sustained and brief_kind != "general":
-                operation = self._run_sustained(
-                    query,
-                    cancel_event=cancel_event,
-                    domain_filters=domain_filters,
-                )
-            else:
-                operation = self._run_inner(
-                    query,
-                    selected_mode,
-                    cancel_event,
-                    domain_filters=domain_filters,
-                )
+            operation = self._run_inner(
+                query, selected_mode, cancel_event, domain_filters=domain_filters,
+            )
             report = await asyncio.wait_for(operation, timeout=max(0.01, timeout))
         except asyncio.TimeoutError:
             logger.warning("Research acquisition budget expired: mode=%s query=%r", selected_mode.value, query)

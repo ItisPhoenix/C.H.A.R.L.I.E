@@ -15,7 +15,6 @@ from typing import Any, Dict, List, Optional
 class ExtensionKind(StrEnum):
     CONFIG = "config"
     SKILL = "skill"
-    MCP_TOOL = "mcp_tool"
     CODE_SMALL = "code_small"
     ARCHITECTURE_LARGE = "architecture_large"
 
@@ -47,19 +46,21 @@ class RiskClass(StrEnum):
     CRITICAL = "critical"
 
 
-def approval_binding(kind: Any, name: Optional[str], argv: Optional[List[str]]) -> str:
-    """Stable identity of the exact executable an approval is granted for.
-
-    An approval is only ever valid for one (kind, name, argv) triple: a
-    different command or a different argument list is a different decision and
-    must be re-approved.  An empty argv yields an empty binding, which can
-    never authorise anything.
-    """
+def approval_binding(
+    kind: Any,
+    name: Optional[str],
+    argv: Optional[List[str]],
+) -> str:
+    """Stable identity of the exact executable command approved."""
     argv_list = [str(item) for item in (argv or [])]
     if not argv_list:
         return ""
     payload = json.dumps(
-        [str(getattr(kind, "value", kind)), str(name or ""), argv_list],
+        [
+            str(getattr(kind, "value", kind)),
+            str(name or ""),
+            argv_list,
+        ],
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -163,7 +164,7 @@ class GuardDecision:
     approved_argv: List[str] = field(default_factory=list)
     """Exact argv this decision was made about. Empty means nothing is bound."""
     approval_binding: str = ""
-    """Digest of (kind, name, approved_argv). Empty means the decision is unbound."""
+    """Digest of reviewed extension identity and effective launch environment."""
 
     def binds_plan(self, plan: Optional["ExtensionPlan"]) -> bool:
         """True only when this decision was made for exactly this plan's argv."""
@@ -195,7 +196,7 @@ class ExtensionPlan:
     """
     Validated execution plan for applying a self-extension.
 
-    Kind-specific payload fields (code_source, mcp_name, raw_text, etc.) carry the
+    Kind-specific payload fields (code_source, raw_text, etc.) carry the
     actual structured content that will be applied.  These must be explicitly set by
     the planner/orchestrator — raw user_prompt is never promoted into any payload field
     automatically.
@@ -227,53 +228,18 @@ class ExtensionPlan:
     raw_text: Optional[str] = None
     """Raw SKILL.md markdown text for a SKILL extension."""
 
-    # --- MCP_TOOL payload ---
-    mcp_name: Optional[str] = None
-    """Canonical name for the MCP server."""
-    mcp_command: Optional[str] = None
-    """Executable command used to launch the MCP server (e.g. 'npx', 'uvx')."""
-    mcp_args: Optional[List[str]] = None
-    """Arguments to pass to the MCP server command."""
-    mcp_env: Optional[Dict[str, str]] = None
-    """Environment variables for the MCP server process."""
-    mcp_declared_tools: Optional[List[str]] = None
-    """Tool names exposed by the MCP server for capability indexing."""
-
     launch_argv: List[str] = field(default_factory=list)
-    """Exact argv that will be executed for this plan, captured at planning time.
-
-    When empty, :meth:`resolve_argv` derives it from the MCP payload fields so a
-    hand-built plan is still bound to a real executable.  When it is set it must
-    AGREE with those fields, because the orchestrator executes ``mcp_command`` /
-    ``mcp_args`` and not this field."""
-
-    def _executed_argv(self) -> List[str]:
-        """The argv the orchestrator will actually hand to the process launcher."""
-        if self.kind != ExtensionKind.MCP_TOOL or not self.mcp_command:
-            return []
-        return [str(self.mcp_command), *(str(item) for item in (self.mcp_args or []))]
+    """Exact argv shown to the owner when an extension plan needs approval."""
 
     def resolve_argv(self) -> List[str]:
-        """Return the exact argv this plan will run, or [] when there is none.
-
-        ``launch_argv`` and the executed ``mcp_command`` / ``mcp_args`` are two
-        independent deserialisation targets (``from_dict`` reads both), so a
-        hand-edited or merged persisted plan can make them disagree.  Rather than
-        bind an approval digest to the field that is *not* executed, divergence
-        resolves to nothing: the guard then leaves the decision unbound and the
-        orchestrator can never be satisfied.  Fail closed.
-        """
-        executed = self._executed_argv()
-        if self.launch_argv:
-            recorded = [str(item) for item in self.launch_argv]
-            if executed and recorded != executed:
-                return []
-            return recorded
-        return executed
+        """Return the exact argv this plan presents for approval, if any."""
+        return [str(item) for item in self.launch_argv]
 
     def approval_binding(self) -> str:
         """Digest an approval must match to authorise this exact plan."""
-        return approval_binding(self.kind, self.mcp_name or self.tool_name, self.resolve_argv())
+        return approval_binding(
+            self.kind, self.tool_name or self.plan_id, self.resolve_argv(),
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -299,15 +265,6 @@ class ExtensionPlan:
             test_inputs=data.get("test_inputs"),
             expected_output=data.get("expected_output"),
             raw_text=data.get("raw_text"),
-            mcp_name=data.get("mcp_name"),
-            mcp_command=data.get("mcp_command"),
-            mcp_args=list(data.get("mcp_args") or []) if data.get("mcp_args") is not None else None,
-            mcp_env=dict(data.get("mcp_env") or {}) if data.get("mcp_env") is not None else None,
-            mcp_declared_tools=(
-                list(data.get("mcp_declared_tools") or [])
-                if data.get("mcp_declared_tools") is not None
-                else None
-            ),
             launch_argv=[str(item) for item in (data.get("launch_argv") or [])],
         )
 

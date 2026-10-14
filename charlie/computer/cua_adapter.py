@@ -141,7 +141,7 @@ def _loads(value: Any) -> Optional[dict[str, Any]]:
 
 
 def _content_blocks(payload: Any) -> Optional[dict[str, Any]]:
-    """MCP-style ``content`` block lists, where the payload hides in a text block."""
+    """SDK ``content`` block lists, where the payload hides in a text block."""
     if isinstance(payload, (list, tuple)):
         blocks = list(payload)
     elif isinstance(payload, dict) and isinstance(payload.get("content"), (list, tuple)):
@@ -455,8 +455,8 @@ class CuaAdapter:
     def ensure_started(self) -> bool:
         return self._bridge.ensure_started()
 
-    def shutdown(self, *, timeout_s: float = 10.0) -> None:
-        self._bridge.shutdown(timeout_s=timeout_s)
+    def shutdown(self, *, timeout_s: float = 10.0) -> bool:
+        return self._bridge.shutdown(timeout_s=timeout_s)
 
     def _call(self, tool: str, arguments: dict[str, Any], *, timeout_s: float | None = None):
         """Invoke one Cua tool. The model never reaches this with a free-form name."""
@@ -776,6 +776,7 @@ class CuaAdapter:
         foreground: bool = True,
         button: str = "left",
         click_count: int = 1,
+        capture_id: Optional[str] = None,
     ) -> CuaActionResult:
         """Element token first; pixel coordinates only when UIA cannot express it."""
         if not element_token and (x is None or y is None):
@@ -792,10 +793,55 @@ class CuaAdapter:
         else:
             args["x"] = float(x)
             args["y"] = float(y)
+        if capture_id is not None:
+            if element_token or pid is None or window_id is None:
+                return CuaActionResult(
+                    outcome=CuaOutcome.REFUSED,
+                    summary="captured coordinates need an exact window target",
+                )
+            try:
+                import cua_driver  # noqa: PLC0415
+
+                button_value = {
+                    "left": cua_driver.ClickButton.LEFT,
+                    "right": cua_driver.ClickButton.RIGHT,
+                    "middle": cua_driver.ClickButton.MIDDLE,
+                }.get(button)
+                if button_value is None:
+                    return CuaActionResult(
+                        outcome=CuaOutcome.REFUSED, summary="unsupported click button"
+                    )
+                payload = self._bridge.call_typed(
+                    lambda driver: driver.click(
+                        cua_driver.ClickInput(
+                            target=cua_driver.ActionTarget.WINDOW(int(pid), int(window_id)),
+                            position=cua_driver.ClickPosition.CAPTURED_COORDINATES(
+                                float(x), float(y), capture_id
+                            ),
+                            delivery_mode=(
+                                cua_driver.InputDeliveryMode.FOREGROUND
+                                if foreground
+                                else cua_driver.InputDeliveryMode.BACKGROUND
+                            ),
+                            session=None,
+                            button=button_value,
+                            count=int(click_count),
+                        )
+                    ),
+                    mutation=True,
+                )
+                return normalise(payload)
+            except (ImportError, CuaBridgeError, AttributeError, TypeError, ValueError) as exc:
+                return CuaActionResult(
+                    outcome=CuaOutcome.FAILED,
+                    summary="Cua captured-coordinate click failed",
+                    detail={"error_type": type(exc).__name__},
+                )
         if pid is not None:
             args["pid"] = int(pid)
         if window_id is not None:
             args["window_id"] = int(window_id)
+        args["count"] = int(click_count)
         return normalise(self._call("click", args))
 
     def move_cursor(

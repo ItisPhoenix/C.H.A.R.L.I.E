@@ -42,6 +42,28 @@ def test_session_store_append_and_search(tmp_path):
                 pass
 
 
+def test_prompt_history_uses_only_completed_prior_turns(tmp_path):
+    store = SessionStore(str(tmp_path / "completed_turn_history.db"))
+    store.create_session("context", source="test")
+    store.create_session("other", source="test")
+    try:
+        store.append("user", "completed request", session_id="context", turn_id="done")
+        store.append("tool", "completed action", session_id="context", turn_id="done")
+        store.append("assistant", "completed answer", session_id="context", turn_id="done")
+        store.append("user", "interrupted research", session_id="context", turn_id="interrupted")
+        store.append("tool", "unfinished search", session_id="context", turn_id="interrupted")
+        store.append("user", "current request", session_id="context", turn_id="current")
+        store.append("assistant", "other chat answer", session_id="other", turn_id="other-turn")
+
+        assert store.get_completed_turn_messages("context", current_turn_id="current") == [
+            ("user", "completed request"),
+            ("tool", "completed action"),
+            ("assistant", "completed answer"),
+        ]
+    finally:
+        store.close()
+
+
 def test_session_metadata_ops(tmp_path):
     db_path = str(tmp_path / "test_sessions_meta.db")
     for f in [db_path, f"{db_path}-wal", f"{db_path}-shm"]:
@@ -97,6 +119,25 @@ def test_session_metadata_ops(tmp_path):
                     os.remove(f)
                 except OSError:
                     pass
+
+
+def test_session_messages_with_turn_ids_preserves_replay_correlation(tmp_path):
+    store = SessionStore(str(tmp_path / "turn_history.db"))
+    store.create_session("session-turns", title="Dashboard", source="web")
+    try:
+        store.append("user", "Research a release", session_id="session-turns", turn_id="turn-a")
+        store.append("assistant", "The result is ready", session_id="session-turns", turn_id="turn-a")
+
+        assert store.get_session_messages_with_turn_ids("session-turns") == [
+            ("user", "Research a release", "turn-a"),
+            ("assistant", "The result is ready", "turn-a"),
+        ]
+        assert store.get_session_messages("session-turns") == [
+            ("user", "Research a release"),
+            ("assistant", "The result is ready"),
+        ]
+    finally:
+        store.close()
 
 
 def test_dashboard_history_is_session_scoped_bounded_and_survives_reopen(tmp_path):

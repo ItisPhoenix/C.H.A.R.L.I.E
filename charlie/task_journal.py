@@ -393,6 +393,8 @@ class TaskJournal:
     def request_cancel(self, task_id: str) -> TaskRecord:
         with self._lock:
             task = self._records[task_id]
+            if task.status in _TERMINAL_STATUSES:
+                return replace(task)
             task.cancel_requested = True
             task.updated_at = utc_now_iso()
             self._persist()
@@ -400,12 +402,7 @@ class TaskJournal:
             return replace(task)
 
     def cancel(self, task_id: str) -> TaskRecord:
-        with self._lock:
-            task = self._records[task_id]
-            if task.status in _TERMINAL_STATUSES:
-                return replace(task)
-            task.cancel_requested = True
-        return self.transition(task_id, TaskStatus.CANCELLED)
+        return self.request_cancel(task_id)
 
     def complete(self, task_id: str, *, result_reference: Optional[str] = None) -> TaskRecord:
         return self.transition(task_id, TaskStatus.COMPLETED, result_reference=result_reference)

@@ -4,12 +4,38 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Tuple
 
-from charlie.research.models import EvidenceItem, SourceClass, SourceDocument
+from charlie.research.models import EvidenceItem, Fact, SourceClass, SourceDocument
 
 _SEGMENT_RE = re.compile(r"(?<=[.!?])\s+|[\r\n]+")
 _INJECTION_RE = re.compile(r"\b(ignore|disregard)\s+(?:all\s+)?(?:previous|prior|system)\s+instructions?\b", re.I)
+
+
+def fact_evidence(documents: Iterable[SourceDocument], facts: Iterable[Fact]) -> List[EvidenceItem]:
+    """Retain exact cited fact spans even when topical lexical scoring misses them."""
+    sources = {source.source_id: source for source in documents}
+    retained = {}
+    for fact in facts:
+        source = sources.get(fact.source_id)
+        if source is None or not fact.quote or _INJECTION_RE.search(fact.quote):
+            continue
+        pattern = r"\s+".join(re.escape(word) for word in fact.quote.split())
+        match = re.search(pattern, source.content, re.I)
+        if match is None:
+            continue
+        start, end = match.span()
+        passage_id = hashlib.sha256(
+            f"{source.document_id}\0{source.content_hash}\0{start}\0{end}".encode("utf-8")
+        ).hexdigest()[:24]
+        retained[passage_id] = EvidenceItem(
+            source.source_id, match.group(), 1.0, min(1.0, source.quality_score),
+            passage_id=passage_id, start_offset=start, end_offset=end,
+            document_hash=source.content_hash,
+        )
+    return list(retained.values())
+
+
 _NEGATED_RELEVANCE_RE = re.compile(
     r"\b(?:unrelated\s+to|not\s+(?:about|relevant\s+to|related\s+to)|no\s+(?:relevance|relation)\s+to)\b",
     re.I,
@@ -18,25 +44,6 @@ _STOPWORDS = {
     "about", "and", "are", "for", "from", "how", "is", "it", "its", "the", "this",
     "to", "use", "used", "what", "when", "where", "which", "with",
 }
-_QUERY_TERM_SYNONYMS = {
-    "recommendation": {"guidance", "prevent", "prevention", "mitigation", "allow", "deny", "block", "restrict", "validate"},
-    "architecture": {"architectural", "structure", "component", "service", "engine", "crawler", "scraper", "fetcher", "spider", "pipeline", "browser", "api", "metasearch", "aggregate"},
-    "advantage": {"benefit", "feature", "privacy", "private", "tracked", "profiled", "free", "open", "performance", "fast", "blocking", "block"},
-    "limitation": {
-        "limit", "constraint", "tradeoff", "drawback", "caveat", "unsupported", "cannot", "require",
-        "need", "install", "dependency", "prerequisite", "missing", "unavailable",
-    },
-    "redirect": {"follow", "followed", "allow", "default", "history"},
-    "lifecycle": {"context", "manager", "managed", "close", "cleanup", "persistent", "session"},
-    "asynchronous": {"async", "await"},
-}
-
-_FACT_SHAPED_RE = re.compile(
-    r"(?:₹|rs\.?|inr|\b\d+\s*gb\b|\brtx\b|\bgpu\b|\bvram\b|\bram\b|\bso-dimm\b|\bddr[45]\b|"
-    r"\bssd\b|\bintel\b|\bamd\b|\bryzen\b|\bcore\s+i[3579]\b|\bnvidia\b|\bversion\b|\brelease\b|"
-    r"\bpython\s*\d+\.\d+\b|\bcamera\b|\bdisplay\b|\bspecifications?\b)",
-    re.I,
-)
 
 DEFAULT_PER_SOURCE_MAX = 6
 DEFAULT_MAX_ITEMS = 120
@@ -77,9 +84,7 @@ def build_evidence(
         for term in re.findall(r"[a-z0-9]{3,}", query.lower())
         if normalize_research_term(term) not in _STOPWORDS
     }
-    query_terms = base_query_terms | set().union(
-        *(_QUERY_TERM_SYNONYMS.get(term, set()) for term in base_query_terms)
-    )
+    query_terms = base_query_terms
     per_source = max(1, per_source_max)
     ceiling = max(1, max_items)
     evidence: List[EvidenceItem] = []
@@ -121,10 +126,8 @@ def build_evidence(
                 1.0,
                 len(query_terms & sentence_terms) / max(1, len(base_query_terms)),
             )
-            has_fact_shape = bool(_FACT_SHAPED_RE.search(sentence))
-
-            # Keep segment if it shares query terms OR has relevant fact shape (like specs/prices)
-            if term_overlap == 0 and not has_fact_shape:
+            # Model-quoted findings are retained independently through fact_evidence.
+            if term_overlap == 0:
                 continue
 
             key = (document.source_id, sentence.casefold())
@@ -132,8 +135,7 @@ def build_evidence(
                 continue
             seen.add(key)
 
-            # Score combines term overlap and fact presence
-            score = term_overlap + (0.35 if has_fact_shape else 0.0)
+            score = term_overlap
             start_offset = start + raw.find(sentence)
             statement = sentence[:MAX_STATEMENT_CHARS]
             end_offset = start_offset + len(statement)

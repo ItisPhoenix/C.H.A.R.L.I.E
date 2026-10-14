@@ -5,8 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
-from charlie.research.models import Candidate, Fact, SourceClass, SourceDocument
-from charlie.research.sources import classify, citable_for
+from charlie.research.models import Fact, SourceDocument
+from charlie.research.sources import citable_for, classify
 
 # Regular expressions for deterministic hardware/software spec extraction
 _INR_PRICE_RE = re.compile(
@@ -16,59 +16,7 @@ _INR_PRICE_RE = re.compile(
 )
 _LAKH_PRICE_RE = re.compile(r"([\d.]+)\s*(?:lakh|lac)\s*(?:rupees?|inr|rs\.?)?", re.IGNORECASE)
 
-_GPU_RE = re.compile(
-    r"\b(?:NVIDIA\s+)?(?:GeForce\s+)?(RTX\s*(?:4090|4080|4070|4060|4050|3080|3070|3060|3050(?:\s*6GB)?|2050|2060)|"
-    r"GTX\s*(?:1650|1660\s*Ti)|"
-    r"Radeon\s+(?:RX\s*\d{4}[A-Z]*|780M|680M)|"
-    r"Intel\s+(?:Arc\s+[A-Z]\d+|Iris\s+X[e]|Graphics)|"
-    r"Apple\s+M[1234](?:\s+(?:Pro|Max|Ultra))?)\b",
-    re.IGNORECASE,
-)
 
-_VRAM_RE = re.compile(
-    r"\b(\d{1,2}\s*GB)\s*(?:GDDR[56]X?|VRAM|dedicated|video\s+memory)\b|"
-    r"\b(?:with\s+)?(\d{1,2}\s*GB)\s*(?:VRAM|graphics\s+memory)\b",
-    re.IGNORECASE,
-)
-
-_RAM_RE = re.compile(
-    r"\b(\d{1,3}\s*GB)\s*(?:DDR[45]|LPDDR[45]X?|RAM|system\s+memory|unified\s+memory)\b|"
-    r"\bmemory[:\s]+(\d{1,3}\s*GB)\b",
-    re.IGNORECASE,
-)
-
-_RAM_UPGRADE_RE = re.compile(
-    r"\b(up\s+to\s+\d{1,3}\s*GB|expandable\s+to\s+\d{1,3}\s*GB|upgradable\s+to\s+\d{1,3}\s*GB|"
-    r"\d\s*x\s*SO-DIMM|2x\s*slots|two\s*slots|dual\s*channel\s*capable|soldered|onboard|not\s*upgradable|non-upgradable)\b",
-    re.IGNORECASE,
-)
-
-_STORAGE_RE = re.compile(
-    r"\b(\d{1,3}\s*(?:GB|TB))\s*(?:PCIe\s*(?:Gen\s*\d)?\s*NVMe\s*M\.2\s*SSD|NVMe\s*SSD|SSD|PCIe\s*SSD)\b|"
-    r"\bstorage[:\s]+(\d{1,3}\s*(?:GB|TB)\s*SSD)\b",
-    re.IGNORECASE,
-)
-
-_CPU_RE = re.compile(
-    r"\b(Intel\s+(?:Core\s+)?(?:i[3579]|Ultra\s+[579])[\w\s-]{1,20}|"
-    r"AMD\s+Ryzen\s+[3579][\w\s-]{1,20}|"
-    r"Apple\s+M[1234][\w\s-]{0,10})\b",
-    re.IGNORECASE,
-)
-
-_VERSION_RE = re.compile(
-    r"\b(?:Python|Release|Version|v)\s*(\d+\.\d+(?:\.\d+)?(?:(?:a|b|rc)\d+)?)\b|"
-    r"\b(\d+\.\d+\.\d+)\b",
-    re.IGNORECASE,
-)
-
-_DATE_RE = re.compile(
-    r"\b(?:released\s+on\s+|release\s+date[:\s]+|dated[:\s]+)?("
-    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Sept?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?"
-    r"\s+\d{1,2},?\s+\d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Sept?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?"
-    r"\s+\d{4})\b",
-    re.IGNORECASE,
-)
 
 
 def normalize_whitespace(text: str) -> str:
@@ -116,189 +64,55 @@ def parse_inr_price(text: str) -> Optional[float]:
     return None
 
 
+def product_identifiers(text: str) -> Set[str]:
+    """Read explicit alphanumeric identifiers without a model-family catalogue."""
+    return {
+        token.casefold()
+        for token in re.findall(r"\b[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*\b", text)
+        if len(token) >= 6 and re.search(r"[A-Za-z]", token)
+        and len(re.findall(r"\d", token)) >= 2
+    }
+
+
+def matches_product_variant(name: str, title: str, url: str, span: str) -> bool:
+    identifiers = product_identifiers(name)
+    span_ids = product_identifiers(span)
+    if identifiers:
+        if span_ids - identifiers:
+            return False
+        identity = f"{title} {url} {span}".casefold()
+        return all(re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", identity) for token in identifiers)
+    if span_ids or not re.search(r"\d", name):
+        return False
+    return normalize_whitespace(name).casefold() in normalize_whitespace(f"{title} {url} {span}").casefold()
+
+
+def normalized_fact_value(fact: Fact) -> str:
+    value = normalize_whitespace(fact.value).casefold()
+    return re.sub(r"\s+", "", value)
+
+
+def conflicting_facts(facts: Iterable[Fact]) -> bool:
+    values: Dict[Tuple[str, str], Set[str]] = {}
+    for fact in facts:
+        if fact.value:
+            subject = normalize_whitespace(fact.candidate or "").casefold()
+            key = (subject, fact.aspect)
+            values.setdefault(key, set()).add(normalized_fact_value(fact))
+    return any(len(group) > 1 for group in values.values())
+
+
 def extract_facts_from_document(
     doc: SourceDocument,
     candidate_name: Optional[str] = None,
     candidate_brand: Optional[str] = None,
     policy: str = "official_required",
+    *,
+    proposals: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Fact]:
-    """Extract hardware/software facts deterministically from a fetched document."""
-    facts: List[Fact] = []
-    text = doc.content
-    s_class = doc.source_class or classify(doc.url, candidate_brand=candidate_brand).value
-    fetched_at_str = doc.fetched_at.isoformat() if hasattr(doc, "fetched_at") and doc.fetched_at else ""
-
-    # Split into lines and sentences
-    lines = [line.strip() for line in re.split(r"[\n\r]+", text) if line.strip()]
-
-    for line in lines:
-        norm_line = normalize_whitespace(line)
-        if len(norm_line) < 3:
-            continue
-        fact_line = norm_line.replace("®", "").replace("™", "").replace("℠", "")
-
-        # 1. Price
-        non_price_amount = re.search(r"\b(?:save|savings?|emi|instalments?|installments?|monthly)\b", fact_line, re.I)
-        if citable_for("price", s_class, policy) and not non_price_amount:
-            price_val = parse_inr_price(fact_line)
-            if price_val and 5000 <= price_val <= 1000000:
-                # Format price nicely
-                formatted_price = f"₹{int(price_val):,}"
-                facts.append(
-                    Fact(
-                        candidate=candidate_name,
-                        aspect="price",
-                        value=formatted_price,
-                        quote=norm_line[:200],
-                        source_id=doc.source_id,
-                        source_class=s_class,
-                        extractor="regex:price",
-                        url=doc.url,
-                        fetched_at=fetched_at_str,
-                    )
-                )
-
-        # 2. GPU
-        if citable_for("gpu", s_class, policy):
-            gpu_m = _GPU_RE.search(fact_line)
-            if gpu_m:
-                val = normalize_whitespace(gpu_m.group(0))
-                facts.append(
-                    Fact(
-                        candidate=candidate_name,
-                        aspect="gpu",
-                        value=val,
-                        quote=norm_line[:200],
-                        source_id=doc.source_id,
-                        source_class=s_class,
-                        extractor="regex:gpu",
-                        url=doc.url,
-                        fetched_at=fetched_at_str,
-                    )
-                )
-
-        # 3. VRAM
-        if citable_for("vram", s_class, policy):
-            vram_m = _VRAM_RE.search(fact_line)
-            if vram_m:
-                val = normalize_whitespace(vram_m.group(1) or vram_m.group(2))
-                facts.append(
-                    Fact(
-                        candidate=candidate_name,
-                        aspect="vram",
-                        value=val,
-                        quote=norm_line[:200],
-                        source_id=doc.source_id,
-                        source_class=s_class,
-                        extractor="regex:vram",
-                        url=doc.url,
-                        fetched_at=fetched_at_str,
-                    )
-                )
-
-        # 4. RAM
-        if citable_for("ram", s_class, policy):
-            ram_m = _RAM_RE.search(fact_line)
-            if ram_m:
-                val = normalize_whitespace(ram_m.group(1) or ram_m.group(2))
-                facts.append(
-                    Fact(
-                        candidate=candidate_name,
-                        aspect="ram",
-                        value=val,
-                        quote=norm_line[:200],
-                        source_id=doc.source_id,
-                        source_class=s_class,
-                        extractor="regex:ram",
-                        url=doc.url,
-                        fetched_at=fetched_at_str,
-                    )
-                )
-
-        # 5. RAM Upgradeability
-        if citable_for("ram_upgradeable", s_class, policy):
-            upg_m = _RAM_UPGRADE_RE.search(fact_line)
-            if upg_m:
-                val = normalize_whitespace(upg_m.group(0))
-                facts.append(
-                    Fact(
-                        candidate=candidate_name,
-                        aspect="ram_upgradeable",
-                        value=val,
-                        quote=norm_line[:200],
-                        source_id=doc.source_id,
-                        source_class=s_class,
-                        extractor="regex:ram_upgradeable",
-                        url=doc.url,
-                        fetched_at=fetched_at_str,
-                    )
-                )
-
-        # 6. CPU
-        if citable_for("cpu", s_class, policy):
-            cpu_m = _CPU_RE.search(fact_line)
-            if cpu_m:
-                val = normalize_whitespace(cpu_m.group(0))
-                facts.append(
-                    Fact(
-                        candidate=candidate_name,
-                        aspect="cpu",
-                        value=val,
-                        quote=norm_line[:200],
-                        source_id=doc.source_id,
-                        source_class=s_class,
-                        extractor="regex:cpu",
-                        url=doc.url,
-                        fetched_at=fetched_at_str,
-                    )
-                )
-
-        # 7. Release Version & Date
-        if citable_for("version", s_class, policy):
-            ver_m = _VERSION_RE.search(fact_line)
-            if ver_m:
-                val = ver_m.group(1) or ver_m.group(2)
-                facts.append(
-                    Fact(
-                        candidate=candidate_name,
-                        aspect="version",
-                        value=val,
-                        quote=norm_line[:200],
-                        source_id=doc.source_id,
-                        source_class=s_class,
-                        extractor="regex:version",
-                        url=doc.url,
-                        fetched_at=fetched_at_str,
-                    )
-                )
-        if citable_for("release_date", s_class, policy):
-            dt_m = _DATE_RE.search(fact_line)
-            if dt_m:
-                val = normalize_whitespace(dt_m.group(1))
-                facts.append(
-                    Fact(
-                        candidate=candidate_name,
-                        aspect="release_date",
-                        value=val,
-                        quote=norm_line[:200],
-                        source_id=doc.source_id,
-                        source_class=s_class,
-                        extractor="regex:release_date",
-                        url=doc.url,
-                        fetched_at=fetched_at_str,
-                    )
-                )
-
-    # Deduplicate facts by (candidate, aspect, value)
-    unique_facts: List[Fact] = []
-    seen = set()
-    for f in facts:
-        key = (f.candidate, f.aspect, f.value.lower())
-        if key not in seen:
-            seen.add(key)
-            unique_facts.append(f)
-
-    return unique_facts
+    """Compatibility entrypoint for source-backed model extraction, with no field taxonomy."""
+    facts = model_facts(proposals or [], [doc], policy=policy)
+    return [fact for fact in facts if not candidate_name or fact.candidate == candidate_name]
 
 
 def model_facts(
@@ -321,7 +135,7 @@ def model_facts(
         source_id = item.get("source_id") or ""
         url = item.get("url") or ""
 
-        if not aspect or not value or not quote:
+        if not all(isinstance(field, str) and field.strip() for field in (aspect, value, quote)):
             continue
 
         doc = doc_map.get(source_id) or url_map.get(url)
@@ -332,15 +146,16 @@ def model_facts(
         if not verify_quote(quote, doc):
             continue
 
-        # Check value appears in quote or is direct numeric equivalent
+        # A matching number alone does not establish an otherwise invented value.
         norm_val = normalize_whitespace(str(value)).lower()
         norm_quote = normalize_whitespace(quote).lower()
         if norm_val not in norm_quote:
-            # Check digits match
-            val_digits = re.sub(r"\D", "", norm_val)
-            quote_digits = re.sub(r"\D", "", norm_quote)
-            if not val_digits or val_digits not in quote_digits:
-                continue
+            continue
+        if candidate and (
+            not isinstance(candidate, str)
+            or normalize_whitespace(candidate).casefold() not in normalize_whitespace(doc.title + " " + quote).casefold()
+        ):
+            continue
 
         s_class = doc.source_class or classify(doc.url).value
         if not citable_for(aspect, s_class, policy):
@@ -370,7 +185,6 @@ def fact_table(report: Any) -> str:
         return "No verified facts extracted."
 
     facts_by_cand: Dict[str, Dict[str, List[Fact]]] = {}
-    general_facts: List[Fact] = []
 
     for f in report.facts:
         cand_name = f.candidate or "General"
@@ -385,8 +199,6 @@ def fact_table(report: Any) -> str:
             for f in flist:
                 s_label = f"[{f.source_id}]" if f.source_id else "Verified"
                 class_desc = f.source_class
-                if f.source_class == SourceClass.RETAILER.value and aspect == "price":
-                    class_desc = "Retailer Price"
                 lines.append(
                     f"| {aspect} | {f.value} | {s_label} | {class_desc} | \"{f.quote[:80]}\" |"
                 )

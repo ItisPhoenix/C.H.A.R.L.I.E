@@ -2,7 +2,7 @@
 
 Deterministic, out-of-band classification by tool name and registered
 capability provenance -- not something the LLM can influence -- so retrieved
-file, session, graph, web, MCP, screen, and extension content can be told
+file, session, graph, web, screen, and extension content can be told
 apart from what the user typed in this turn. Everything else (config, user
 turns) is trusted by default.
 """
@@ -26,8 +26,6 @@ _EXTERNAL_TOOL_NAMES = frozenset(
         "vector_memory",
     }
 )
-# MCP tools are registered with this prefix (see mcp_client.py register_tools_into).
-_EXTERNAL_TOOL_PREFIXES = ("mcp_", "plugin_")
 _DYNAMIC_EXTERNAL_TOOL_PREFIXES = ("skill_", "api_")
 
 
@@ -45,7 +43,7 @@ def _registered_capability_provenance(tool_name: str) -> Optional[str]:
 
 def trust_level_for_tool(tool_name: str) -> TrustLevel:
     """Classify a tool result from its name and registered provenance."""
-    if tool_name in _EXTERNAL_TOOL_NAMES or tool_name.startswith(_EXTERNAL_TOOL_PREFIXES):
+    if tool_name in _EXTERNAL_TOOL_NAMES:
         return "tool_external"
     provenance = _registered_capability_provenance(tool_name)
     if provenance == "extension":

@@ -1,71 +1,12 @@
-"""Shared extension-install logic for MCP, skill, OpenAPI, and plugin adapters.
-
-Runtime lifecycle mutations are applied by main against its authoritative
-ToolRegistry, MCPClient, and PluginManager owners.
-"""
+"""Install supported skill, OpenAPI, and generated extensions into a registry."""
 
 from __future__ import annotations
 
-import json
-from typing import Any, Callable, List, Optional, Tuple
-
-BUILTIN_PLUGIN_NAMES = ("filesystem", "browser", "calendar", "code_exec")
+from typing import Any, Callable, List, Optional
 
 
-def builtin_plugin(name: str, plugin_allow_dirs: List[str]) -> Any:
-    from charlie.plugins import BrowserPlugin, CalendarPlugin, CodeExecPlugin, FilesystemPlugin
-
-    factories = {
-        "filesystem": lambda: FilesystemPlugin(allowed_dirs=plugin_allow_dirs),
-        "browser": BrowserPlugin,
-        "calendar": CalendarPlugin,
-        "code_exec": CodeExecPlugin,
-    }
-    if name not in factories:
-        raise ValueError(f"Unknown built-in plugin '{name}'. Valid: {', '.join(BUILTIN_PLUGIN_NAMES)}")
-    return factories[name]()
-
-
-def parsed_mcp_config(name: str, source: str, raw_text: str) -> Any:
-    """Parse an MCP server spec and require its name to match the
-    extension's declared name, so `name` stays the single source of truth
-    across propose/confirm/enable/disable for every extension kind."""
-    from charlie.mcp_client import parse_server_spec
-
-    spec = raw_text or source
-    try:
-        parsed = json.loads(spec)
-    except (TypeError, json.JSONDecodeError):
-        parsed = None
-    if isinstance(parsed, dict):
-        if isinstance(parsed.get("mcpServers"), dict):
-            parsed = parsed["mcpServers"].get(name)
-        if not isinstance(parsed, dict):
-            raise ValueError(f"MCP spec does not contain server '{name}'")
-        from charlie.mcp_client import MCPServerConfig
-
-        cfg = MCPServerConfig(
-            name=str(parsed.get("name") or name),
-            command=str(parsed.get("command") or ""),
-            args=[str(arg) for arg in (parsed.get("args") or [])],
-            env={str(key): str(value) for key, value in (parsed.get("env") or {}).items()},
-        )
-    else:
-        cfg = parse_server_spec(spec)
-    if cfg.name != name:
-        raise ValueError(f"MCP spec name '{cfg.name}' does not match extension name '{name}'")
-    if not cfg.command:
-        raise ValueError(f"MCP spec for '{name}' is missing command")
-    return cfg
-
-
-def declared_tools_for(
-    kind: str, name: str, source: str, raw_text: str, plugin_allow_dirs: List[str]
-) -> List[str]:
+def declared_tools_for(kind: str, name: str, source: str, raw_text: str) -> List[str]:
     """Parse without registering so the approval record lists declared tools."""
-    if kind == "mcp":
-        parsed_mcp_config(name, source, raw_text)
-        return []  # MCP tools aren't known until the server is actually started
     if kind == "skill":
         from charlie.extensions.skills import parse_skill_md
 
@@ -74,8 +15,6 @@ def declared_tools_for(
         from charlie.extensions.openapi_import import parse_openapi_spec
 
         return [op.operation_id for op in parse_openapi_spec(raw_text, base_url=source).operations]
-    if kind == "plugin":
-        return [t["name"] for t in builtin_plugin(name, plugin_allow_dirs).get_tools()]
     if kind == "generated":
         from charlie.extensions.generated import parse_generated_tool
 
@@ -127,82 +66,30 @@ def install_extension(
     source: str,
     raw_text: str,
     registry: Any,
-    plugin_manager: Any,
-    mcp_client: Any,
-    plugin_allow_dirs: List[str],
     script_runner: Optional[Callable[[str, List[str]], str]] = None,
-    *,
-    mcp_enabled: bool = True,
-) -> Tuple[List[str], Any]:
-    """Parse and register an approved extension into `registry`.
-
-    ``mcp_enabled`` mirrors ``Config.mcp_enabled`` (the ``MCP_ENABLED`` setting).
-    When it is off, the MCP branch refuses to add, start, or enable a server
-    instead of silently spawning a process the owner disabled.  It defaults to
-    ``True`` so existing callers that have no config in scope keep their current
-    behaviour; a caller holding the runtime Config must pass the real value.
-
-    Returns (registered_tool_names, mcp_client) -- `mcp_client` is handed
-    back since the "mcp" branch may lazily construct one; callers must store
-    the returned value back into their own module-level slot.
-    """
+) -> List[str]:
+    """Parse and register a supported extension into `registry`."""
     before_tools = set(getattr(registry, "_tools", {}))
-    plugin_was_registered = bool(
-        plugin_manager is not None
-        and getattr(plugin_manager, "get_plugin", lambda _name: None)(name) is not None
-    )
-    mcp_server_was_registered = bool(
-        mcp_client is not None and name in getattr(mcp_client, "_servers", {})
-    )
     try:
-        if kind == "mcp":
-            from charlie.mcp_client import MCPClient
-
-            if not mcp_enabled:
-                raise ValueError(
-                    f"MCP is disabled: refusing to install and start MCP server '{name}'. "
-                    "Set MCP_ENABLED=true (config.mcp_enabled) to allow MCP servers."
-                )
-            cfg = parsed_mcp_config(name, source, raw_text)
-            if mcp_client is None:
-                mcp_client = MCPClient()
-            mcp_client.add_server(cfg)
-            return mcp_client.enable_server(registry, name), mcp_client
         if kind == "skill":
 
             from charlie.extensions.skills import parse_skill_md, register_skill_scripts
 
             manifest = parse_skill_md(raw_text)
             runner = script_runner or run_skill_script
-            return register_skill_scripts(registry, manifest, runner), mcp_client
+            return register_skill_scripts(registry, manifest, runner)
         if kind == "openapi":
             from charlie.extensions.openapi_import import parse_openapi_spec, register_openapi_operations
 
             spec = parse_openapi_spec(raw_text, base_url=source)
-            return register_openapi_operations(registry, spec), mcp_client
-        if kind == "plugin":
-            from charlie.tools import enable_plugin
-
-            return enable_plugin(registry, plugin_manager, builtin_plugin(name, plugin_allow_dirs)), mcp_client
+            return register_openapi_operations(registry, spec)
         if kind == "generated":
             from charlie.extensions.generated import parse_generated_tool, register_generated_tool
 
             spec = parse_generated_tool(name, raw_text)
-            return register_generated_tool(registry, spec), mcp_client
+            return register_generated_tool(registry, spec)
         raise ValueError(f"Unknown extension kind '{kind}'")
     except Exception:
         for tool_name in set(getattr(registry, "_tools", {})) - before_tools:
             registry.unregister_tool(tool_name)
-        if kind == "mcp" and mcp_client is not None and not mcp_server_was_registered:
-            try:
-                mcp_client.remove_server(registry, name)
-            except Exception:
-                pass
-        if kind == "plugin" and plugin_manager is not None and not plugin_was_registered:
-            try:
-                from charlie.tools import disable_plugin
-
-                disable_plugin(registry, plugin_manager, name)
-            except Exception:
-                pass
         raise

@@ -17,12 +17,97 @@ from charlie.fastpaths import (
 )
 
 
+def test_close_picture_in_picture_window_routes_to_desktop_window_control():
+    match = match_fast_path("Close the picture in picture mode currently on my screen.")
+    assert match is not None
+    assert match.tool_name == "desktop_window"
+    assert match.arguments == {"window": "picture in picture mode", "action": "close"}
+
+
+@pytest.mark.parametrize(
+    ("query", "widget", "visible"),
+    [
+        ("Charlie, show the clock again.", "clock", True),
+        ("Hide the clock widget.", "clock", False),
+        ("Open the music widget.", "music", True),
+        ("Close the music card.", "music", False),
+        ("Show me the weather widget.", "weather", True),
+        ("Close the timer widget.", "timer", False),
+        ("Open the stopwatch widget.", "stopwatch", True),
+    ],
+)
+def test_dashboard_widget_visibility_is_a_deterministic_command(query, widget, visible):
+    match = match_fast_path(query)
+
+    assert match is not None
+    assert match.tool_name == "dashboard_widget_control"
+    assert match.arguments == {"widget": widget, "visible": visible}
+
+
+def test_plain_show_stopwatch_keeps_its_existing_elapsed_time_meaning():
+    match = match_fast_path("Show stopwatch.")
+
+    assert match is not None
+    assert match.tool_name == "stopwatch_control"
+    assert match.arguments == {"action": "read"}
+
+
+@pytest.mark.parametrize(
+    ("query", "seconds", "text"),
+    [
+        ("Set a 10 second timer named acceptance test.", 10, "acceptance test"),
+        ("Start a timer for two minutes.", 120, "Timer finished"),
+        ("Set a timer for 1 hour called tea.", 3600, "tea"),
+    ],
+)
+def test_timer_fastpath_parses_duration_and_optional_label(query, seconds, text):
+    match = match_fast_path(query)
+    assert match is not None
+    assert match.tool_name == "timer_create"
+    assert match.arguments == {"delay_seconds": seconds, "text": text}
+
+
+def test_stopwatch_fastpath_accepts_spoken_self_correction():
+    match = match_fast_path("Stop that stop watch.")
+    assert match is not None
+    assert match.tool_name == "stopwatch_control"
+    assert match.arguments == {"action": "stop"}
+
+
 class TestSystemTelemetryMatching:
     def test_full_system_status_admits_system_workspace(self):
-        match = match_fast_path("Show me the full system status.")
-        assert match is not None
-        assert match.intent == "system_workspace"
-        assert match.semantic_op_id == "system.workspace.read"
+        for query in (
+            "Show me the full system status.",
+            "What's the system status?",
+            "What is my machine health?",
+        ):
+            match = match_fast_path(query)
+            assert match is not None
+            assert match.intent == "system_workspace"
+            assert match.semantic_op_id == "system.workspace.read"
+            assert match.tool_name == "system_diagnostics"
+
+    def test_full_system_status_reply_summarizes_the_collected_vitals(self, monkeypatch):
+        import sys
+        from types import ModuleType, SimpleNamespace
+
+        from charlie.fastpaths import _handle_full_system_status
+
+        fake_psutil = SimpleNamespace(
+            cpu_percent=lambda interval: 62.0,
+            virtual_memory=lambda: SimpleNamespace(percent=84.0),
+            disk_usage=lambda _path: SimpleNamespace(percent=59.0),
+            process_iter=lambda _fields: [],
+        )
+        fake_journal = ModuleType("charlie.task_journal")
+        fake_journal.get_task_journal = lambda: SimpleNamespace(list=lambda **_kwargs: [])
+        monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+        monkeypatch.setitem(sys.modules, "charlie.task_journal", fake_journal)
+
+        result = _handle_full_system_status()
+
+        assert str(result) == "Your PC is using 62% CPU and 84% of its memory; 59% of disk space is used."
+        assert [gauge["value"] for gauge in result.data["vitals"]["gauges"]] == [62.0, 84.0, 59.0]
 
     def test_narrow_system_query_does_not_admit_workspace(self):
         assert match_system_workspace("Show me the current CPU utilization.") is None
@@ -51,6 +136,7 @@ class TestSystemTelemetryMatching:
         assert result.data["value"] is None
         assert result.data["available"] is False
         assert "unavailable" in result.lower()
+
 
     def test_cpu_temperature_reads_cpu_sensor(self, monkeypatch):
         reading = SimpleNamespace(current=67.4)
@@ -159,6 +245,90 @@ class TestSystemTelemetryMatching:
             assert m is not None, f"Failed to match Processes query: {q}"
             assert m.intent == "system_processes"
             assert m.arguments == {"check": "processes"}
+
+
+class TestWeatherTimerStopwatchFastpaths:
+    def test_location_weather_uses_exact_location_tool(self):
+        match = match_fast_path("What's the temperature in Kanpur right now?")
+        assert match is not None
+        assert match.tool_name == "weather_get"
+        assert match.arguments == {"location": "Kanpur"}
+        assert match.target_domain == "weather"
+
+    def test_weather_follow_up_reuses_last_explicit_session_location(self):
+        from charlie.fastpaths import last_explicit_weather_location
+
+        history = [
+            {"role": "user", "content": "What's the weather in Kanpur?"},
+            {"role": "assistant", "content": "Current temperature in Kanpur is 26 °C."},
+            {"role": "user", "content": "How's the weather today?"},
+        ]
+
+        match = match_fast_path(
+            "How's the weather today?",
+            default_weather_location=last_explicit_weather_location(history),
+        )
+
+        assert match is not None
+        assert match.tool_name == "weather_get"
+        assert match.arguments == {"location": "Kanpur"}
+
+    def test_weather_follow_up_uses_widget_location_when_available(self):
+        match = match_fast_path(
+            "How's the weather today?",
+            default_weather_location="Pune",
+        )
+        assert match is not None
+        assert match.tool_name == "weather_get"
+        assert match.arguments == {"location": "Pune"}
+
+    def test_explicit_weather_location_overrides_context(self):
+        match = match_fast_path(
+            "What's the weather in Delhi today?",
+            default_weather_location="Kanpur",
+        )
+        assert match is not None
+        assert match.arguments == {"location": "Delhi"}
+
+    def test_weather_fastpath_does_not_swallow_a_separate_action_as_location(self):
+        assert match_fast_path("What is the weather in Paris and show map") is None
+        assert match_fast_path("Weather in Toronto by transit") is None
+        place_name = match_fast_path("What is the weather in Trinidad and Tobago?")
+        assert place_name is not None
+        assert place_name.arguments == {"location": "Trinidad and Tobago"}
+
+    def test_ambiguous_non_location_or_research_requests_are_not_fastpathed(self):
+        missing_location = match_fast_path("What's the temperature right now?")
+        assert missing_location is not None
+        assert missing_location.intent == "weather_location_required"
+        assert "Which city" in str(missing_location.direct_handler())
+        assert match_fast_path("Research the weather in Kanpur") is None
+
+    def test_reminder_after_minutes_uses_deterministic_duration(self):
+        match = match_fast_path("Remind me to check the oven after five minutes.")
+        assert match is not None
+        assert match.tool_name == "timer_create"
+        assert match.arguments == {"delay_seconds": 300, "text": "check the oven"}
+
+    def test_timer_cancel_requires_explicit_schedule_id(self):
+        timer_id = "0123456789abcdef0123456789abcdef"
+        match = match_fast_path(f"Cancel timer {timer_id}.")
+        assert match is not None
+        assert match.tool_name == "timer_cancel"
+        assert match.arguments == {"schedule_id": timer_id}
+        assert match_fast_path("Cancel my timer") is None
+
+    def test_stopwatch_lifecycle_uses_canonical_tool(self):
+        for query, action in (
+            ("Start stopwatch", "start"),
+            ("Pause the stopwatch", "stop"),
+            ("Reset stopwatch", "reset"),
+            ("How long has the stopwatch been running?", "read"),
+        ):
+            match = match_fast_path(query)
+            assert match is not None
+            assert match.tool_name == "stopwatch_control"
+            assert match.arguments == {"action": action}
 
 
 class TestMediaVolumeMatching:

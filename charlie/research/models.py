@@ -174,9 +174,7 @@ class SourceDocument:
             self.content_hash = hashlib.sha256(self.content.encode("utf-8", "ignore")).hexdigest()
         identity = f"{self.canonical_url or self.url}\0{self.content_hash}"
         self.document_id = (
-            hashlib.sha256(identity.encode("utf-8", "ignore")).hexdigest()[:24]
-            if identity != "\0"
-            else ""
+            hashlib.sha256(identity.encode("utf-8", "ignore")).hexdigest()[:24] if identity != "\0" else ""
         )
 
 
@@ -277,6 +275,9 @@ class ResearchProgress:
     current: int = 0
     total: int = 0
     mode: Optional[ResearchMode] = None
+    source_count: Optional[int] = None
+    evidence_count: Optional[int] = None
+    finding_count: Optional[int] = None
 
 
 @dataclass
@@ -333,6 +334,8 @@ class ResearchReport:
             "error": ResearchTermination.ERROR,
             "no-results": ResearchTermination.PROVIDER_EXHAUSTED,
             "provider-exhausted": ResearchTermination.PROVIDER_EXHAUSTED,
+            "provider-unconfigured": ResearchTermination.PROVIDER_EXHAUSTED,
+            "provider-challenge": ResearchTermination.PROVIDER_EXHAUSTED,
         }.get(self.stop_reason, ResearchTermination.COMPLETED)
 
     def bind_passages(self) -> None:
@@ -348,7 +351,7 @@ class ResearchReport:
                 or item.document_hash != source.content_hash
                 or item.start_offset < 0
                 or item.end_offset > len(source.content)
-                or source.content[item.start_offset:item.end_offset] != item.statement
+                or source.content[item.start_offset : item.end_offset] != item.statement
             ):
                 self.errors.append(f"Evidence passage provenance failed for {item.source_id or 'unknown source'}")
                 continue
@@ -382,6 +385,24 @@ class ResearchReport:
         self.passages = passages
         self.claims = claims
 
+    def validate_facts(self) -> None:
+        """Verify each field independently before it can influence coverage or output."""
+        from charlie.research.citations import validate_claim_support, validate_numeric_grounding
+
+        coverage, claims = self.coverage, self.claims
+        self.coverage = []
+        retained = []
+        try:
+            for fact in self.facts:
+                statement = f"{fact.aspect.replace('_', ' ')}: {fact.value} [{fact.source_id}]"
+                if validate_claim_support(statement, self) and validate_numeric_grounding(statement, self):
+                    retained.append(fact)
+                else:
+                    self.errors.append(f"Unsupported {fact.aspect} claim from {fact.source_id}")
+        finally:
+            self.coverage, self.claims = coverage, claims
+        self.facts = retained
+
     @property
     def successful(self) -> bool:
         return bool(self.search_results or self.sources or self.evidence)
@@ -389,9 +410,7 @@ class ResearchReport:
     def coverage_summary(self) -> str:
         lines = []
         for question in self.coverage:
-            passage_ids = list(dict.fromkeys(
-                question.supporting_claim_ids + question.refuting_claim_ids
-            ))
+            passage_ids = list(dict.fromkeys(question.supporting_claim_ids + question.refuting_claim_ids))
             citations = f" (evidence passages: {', '.join(passage_ids)})" if passage_ids else ""
             if question.conflict:
                 lines.append(
@@ -424,7 +443,9 @@ class ResearchReport:
                 subject = (
                     question.required_fields[1].split(":", 1)[1]
                     if len(question.required_fields) > 1 and question.required_fields[1].startswith("subject:")
-                    else self.brief.topic if self.brief else "The project"
+                    else self.brief.topic
+                    if self.brief
+                    else "The project"
                 )
                 proposition = f"{subject} is licensed under {license_id}"
             for item in self.evidence:
@@ -432,31 +453,37 @@ class ResearchReport:
                     continue
                 statement = " ".join(item.statement.split()).rstrip()
                 lines.append(
-                    f"The evidence contradicts the proposition that {proposition}: "
-                    f"{statement} [{item.source_id}]"
+                    f"The evidence contradicts the proposition that {proposition}: {statement} [{item.source_id}]"
                 )
                 seen.add((item.source_id, statement.casefold()))
         if self.brief and self.brief.entity_kind == "general" and self.coverage:
-            evidence_by_passage = {
-                item.passage_id: item for item in self.evidence if item.passage_id
-            }
+            evidence_by_passage = {item.passage_id: item for item in self.evidence if item.passage_id}
 
-            def append_passages(passage_ids: List[str], limit: Optional[int] = None) -> None:
+            def append_passages(passage_ids: List[str]) -> None:
                 items = [
                     evidence_by_passage[passage_id]
                     for passage_id in passage_ids
-                    if passage_id in evidence_by_passage
-                    and evidence_by_passage[passage_id].source_id in allowed_ids
+                    if passage_id in evidence_by_passage and evidence_by_passage[passage_id].source_id in allowed_ids
                 ]
                 items.sort(key=lambda item: item.relevance, reverse=True)
-                question_seen: set[tuple[str, str]] = set()
-                for item in items[:limit]:
+                claims_by_text: Dict[str, tuple[str, List[str]]] = {}
+                for item in items:
                     statement = re.sub(r"\[S\d+\]", "", " ".join(item.statement.split())).strip()
                     key = (item.source_id, statement.casefold())
-                    if statement and key not in question_seen:
-                        lines.append(f"- {statement} [{item.source_id}]")
-                        question_seen.add(key)
-                        seen.add(key)
+                    if not statement or key in seen:
+                        continue
+                    existing = claims_by_text.get(statement.casefold())
+                    if existing is None:
+                        claims_by_text[statement.casefold()] = (statement, [item.source_id])
+                    elif item.source_id not in existing[1]:
+                        existing[1].append(item.source_id)
+                    seen.add(key)
+                paragraphs = [
+                    f"{statement} {' '.join(f'[{source_id}]' for source_id in source_ids)}"
+                    for statement, source_ids in claims_by_text.values()
+                ]
+                for start in range(0, len(paragraphs), 3):
+                    lines.append(" ".join(paragraphs[start:start + 3]))
 
             for question in self.coverage:
                 fields = question.required_fields
@@ -467,9 +494,7 @@ class ResearchReport:
                 if question.status == "contradicted":
                     continue
                 if question.conflict:
-                    passage_ids = list(dict.fromkeys(
-                        question.supporting_claim_ids + question.refuting_claim_ids
-                    ))
+                    passage_ids = list(dict.fromkeys(question.supporting_claim_ids + question.refuting_claim_ids))
                     if passage_ids:
                         lines.append(f"### Conflicting evidence: {question.question}")
                         append_passages(passage_ids)
@@ -478,29 +503,69 @@ class ResearchReport:
                     label = " — ".join(fields) if fields else question.question
                     if question.supporting_claim_ids:
                         lines.append(f"### {label}")
-                        append_passages(question.supporting_claim_ids, limit=2)
+                        append_passages(question.supporting_claim_ids)
                 elif question.status == "unresolved":
                     lines.append(f"Unresolved: {question.question}")
             if lines:
                 return "\n".join(lines)
+        if self.brief and self.brief.entity_kind == "product":
+            self.validate_facts()
+            from charlie.research.facts import verify_quote
+            from charlie.research.sources import citable_for
+
+            sources = {source.source_id: source for source in self.sources}
+            last_heading = None
+            seen_facts = set()
+            for fact in self.facts:
+                source = sources.get(fact.source_id)
+                key = (fact.candidate, fact.aspect, fact.value.casefold(), fact.source_id)
+                bound = any(
+                    passage.source_id == fact.source_id and verify_quote(fact.quote, passage.text)
+                    for passage in self.passages
+                )
+                if (
+                    source
+                    and fact.candidate
+                    and fact.source_id in allowed_ids
+                    and (not self.brief.aspects or fact.aspect in self.brief.aspects)
+                    and citable_for(fact.aspect, fact.source_class, self.brief.source_policy)
+                    and bound
+                    and verify_quote(fact.quote, source)
+                    and key not in seen_facts
+                ):
+                    if last_heading is None:
+                        lines.append("## Verified findings")
+                    heading = (fact.candidate, fact.source_id)
+                    if heading != last_heading:
+                        lines.append(f"### {fact.candidate} [{fact.source_id}]")
+                        last_heading = heading
+                    lines.append(f"- **{fact.aspect.replace('_', ' ')}:** {fact.value} [{fact.source_id}]")
+                    seen_facts.add(key)
         for item in self.evidence:
+            if self.brief and self.brief.entity_kind == "product" and lines:
+                break
             statement = " ".join(item.statement.split()).rstrip()
             key = (item.source_id, statement.casefold())
             if item.source_id in allowed_ids and statement and key not in seen:
                 lines.append(f"- {statement} [{item.source_id}]")
                 seen.add(key)
         unresolved = self.gaps or [
-            f"Unresolved: {question.question}"
-            for question in self.coverage
-            if question.status == "unresolved"
+            f"Unresolved: {question.question}" for question in self.coverage if question.status == "unresolved"
         ]
         if unresolved:
             if lines:
                 lines.append("")
+            lines.append("## Coverage gaps")
             for gap in unresolved:
                 value = str(gap)
                 if value.casefold().startswith("unresolved:"):
-                    value = value[len("unresolved:"):].strip()
+                    value = value[len("unresolved:") :].strip()
+                if self.brief and self.brief.entity_kind == "product":
+                    for question in self.coverage:
+                        if question.question in value and len(question.required_fields) == 1:
+                            field = question.required_fields[0]
+                            if ":" not in field:
+                                value = value.replace(question.question, field.replace("_", " "))
                 lines.append(f"Unresolved: {value}")
         return "\n".join(lines) or "I couldn't verify a useful answer from the available sources."
 
@@ -512,7 +577,10 @@ class ResearchReport:
             blocks.append("RUNTIME COVERAGE DECISIONS (preserve contradicted and unresolved states):\n" + coverage)
         if self.facts:
             from charlie.research.facts import fact_table
-            blocks.append("VERIFIED FACTS (keep each value bound to its candidate and cited source):\n" + fact_table(self))
+
+            blocks.append(
+                "VERIFIED FACTS (keep each value bound to its candidate and cited source):\n" + fact_table(self)
+            )
         sources_by_id = {source.source_id: source for source in self.sources}
         evidence_by_source = {}
         for item in self.evidence:
@@ -554,7 +622,6 @@ class ResearchReport:
         context = self.prompt_context(max_chars=max_chars)
         if not context:
             return (
-                "Error: No useful research evidence was retrieved. "
-                "Do not claim that the requested facts were verified."
+                "Error: No useful research evidence was retrieved. Do not claim that the requested facts were verified."
             )
         return f"Research mode: {self.mode.value}\n{context}"

@@ -33,7 +33,6 @@ class FastPathMatch:
     target_domain: str = "system"
     confidence: float = 1.0
     direct_handler: Optional[Callable[..., str]] = None
-    verifier_name: Optional[str] = None
 
 
 class FastPathResult(str):
@@ -82,11 +81,33 @@ _PROCESSES_RE = re.compile(
     re.IGNORECASE,
 )
 _FULL_SYSTEM_RE = re.compile(
-    r"\b(?:show|give|report|display)\s+(?:me\s+)?(?:the\s+)?(?:full\s+)?(?:system|machine)\s+"
+    r"\b(?:(?:show|give|report|display)\s+(?:me\s+)?|(?:what(?:'s|\s+is)|how\s+is)\s+)"
+    r"(?:(?:the|my)\s+)?(?:full\s+)?(?:system|machine)\s+"
     r"(?:status|overview|health|diagnostics|telemetry|matrix)\b|"
     r"\bfull\s+system\s+(?:status|overview|health|diagnostics|telemetry|matrix)\b",
     re.IGNORECASE,
 )
+
+_CLOSE_WINDOW_RE = re.compile(
+    r"^\s*(?:charlie[,:]?\s*)?close\s+(?:the\s+)?(?P<target>.+?)\s+"
+    r"(?:window|popup|pop-up|(?:currently\s+)?on\s+(?:my\s+)?screen)\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def match_close_window(query: str) -> Optional[FastPathMatch]:
+    """Route an explicit close-window command to the observed desktop window surface."""
+    match = _CLOSE_WINDOW_RE.match(query.strip())
+    if not match:
+        return None
+    target = re.sub(r"\s+(?:window|popup|pop-up|currently)\s*$", "", match.group("target").strip(), flags=re.I)
+    return FastPathMatch(
+        intent="close_window",
+        semantic_op_id="desktop.window.close",
+        tool_name="desktop_window",
+        arguments={"window": target, "action": "close"},
+        target_domain="desktop",
+    )
 
 
 def _handle_full_system_status() -> FastPathResult:
@@ -152,7 +173,8 @@ def _handle_full_system_status() -> FastPathResult:
         if operations:
             data["operations"] = operations
         return FastPathResult(
-            "Full system status collected from the live host.",
+            f"Your PC is using {cpu:.0f}% CPU and {memory.percent:.0f}% of its memory; "
+            f"{disk.percent:.0f}% of disk space is used.",
             data,
         )
     except Exception as exc:
@@ -377,7 +399,6 @@ def match_media_volume(query: str) -> Optional[FastPathMatch]:
             tool_name="media_control",
             arguments={"action": "set_volume", "percent": val},
             target_domain="media",
-            verifier_name="verify_volume",
         )
     if _MUTE_RE.search(q):
         return FastPathMatch(
@@ -386,7 +407,6 @@ def match_media_volume(query: str) -> Optional[FastPathMatch]:
             tool_name="media_control",
             arguments={"action": "mute"},
             target_domain="media",
-            verifier_name="verify_volume",
         )
     if _UNMUTE_RE.search(q):
         return FastPathMatch(
@@ -395,7 +415,6 @@ def match_media_volume(query: str) -> Optional[FastPathMatch]:
             tool_name="media_control",
             arguments={"action": "unmute"},
             target_domain="media",
-            verifier_name="verify_volume",
         )
     if _VOL_UP_RE.search(q):
         return FastPathMatch(
@@ -404,7 +423,6 @@ def match_media_volume(query: str) -> Optional[FastPathMatch]:
             tool_name="media_control",
             arguments={"action": "volume_up"},
             target_domain="media",
-            verifier_name="verify_volume",
         )
     if _VOL_DOWN_RE.search(q):
         return FastPathMatch(
@@ -413,7 +431,6 @@ def match_media_volume(query: str) -> Optional[FastPathMatch]:
             tool_name="media_control",
             arguments={"action": "volume_down"},
             target_domain="media",
-            verifier_name="verify_volume",
         )
     if _PLAY_PAUSE_RE.search(q):
         return FastPathMatch(
@@ -525,7 +542,6 @@ def match_focus_app(query: str) -> Optional[FastPathMatch]:
         arguments={"title": app},
         target_domain="desktop",
         direct_handler=lambda: _handle_focus_app(app),
-        verifier_name="verify_app_focus",
     )
 
 
@@ -618,17 +634,206 @@ def match_direct_url(query: str) -> Optional[FastPathMatch]:
         arguments={"url": norm_url},
         target_domain="browser",
         direct_handler=lambda: _handle_direct_url(norm_url),
-        verifier_name="verify_browser_navigate",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 7. Weather, timers, and stopwatch
+# ---------------------------------------------------------------------------
+_WEATHER_QUERY_RE = re.compile(
+    r"^\s*(?:charlie[,:]?\s*)?(?:(?:what(?:'s|\s+is)\s+)?(?:the\s+)?(?:current\s+)?"
+    r"(?:weather|temperature)|how(?:'s|\s+is)\s+the\s+weather)"
+    r"(?:\s+(?:today|now|currently))?(?:\s+(?:in|for)\s+(.+?))?"
+    r"(?:\s+(?:today|now|currently|right\s+now))?\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+_WEATHER_MIXED_ACTION_RE = re.compile(
+    r"\b(?:and\s+then|then|and)\s+(?:please\s+)?(?:show|open|display|find|plan|give|take|navigate|route|map)\b"
+    r"|\b(?:by|via)\s+(?:public\s+)?(?:transit|bus|train|car|foot|walking|driving)\b",
+    re.IGNORECASE,
+)
+_MINUTES = r"(?P<minutes>\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)"
+_DURATION_AMOUNT = r"\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten"
+_REMIND_AFTER_RE = re.compile(
+    rf"^\s*(?:charlie[,:]?\s*)?remind\s+me(?:\s+to\s+(?P<text>.+?))?\s+(?:in|after)\s+{_MINUTES}\s+minutes?\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+_TIMER_FOR_RE = re.compile(
+    rf"^\s*(?:charlie[,:]?\s*)?(?:set|start)\s+(?:a\s+)?(?:timer\s+for\s+"
+    rf"(?P<for_amount>{_DURATION_AMOUNT})\s+(?P<for_unit>seconds?|minutes?|hours?)|"
+    rf"(?P<before_amount>{_DURATION_AMOUNT})\s+(?P<before_unit>seconds?|minutes?|hours?)\s+timer)"
+    r"(?:\s+(?:named|called)\s+(?P<text>.+?))?\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+_TIMER_CANCEL_RE = re.compile(
+    r"^\s*(?:charlie[,:]?\s*)?(?:cancel|stop)\s+(?:the\s+)?timer\s+([a-f0-9]{32})\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+_STOPWATCH_RE = re.compile(
+    r"^\s*(?:charlie[,:]?\s*)?(?P<action>start|resume|stop|pause|reset|read|show|check)"
+    r"\s+(?:(?:the|that)\s+)?stop\s*watch\s*[.!?]*\s*$|"
+    r"^\s*(?:what(?:'s|\s+is)|how\s+long\s+has)\s+(?:the\s+)?(?:elapsed\s+time\s+on\s+)?"
+    r"stop\s*watch(?:\s+been\s+running)?\s*\??\s*$",
+    re.IGNORECASE,
+)
+_DASHBOARD_WIDGET_RE = re.compile(
+    r"^\s*(?:charlie[,:]?\s*)?(?P<action>show|open|display|hide|close|dismiss|reopen|restore)\s+"
+    r"(?:me\s+)?(?:(?:the|my)\s+)?(?P<target>.+?)\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+_MINUTE_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
+
+
+def match_weather_timer_stopwatch(
+    query: str, *, default_weather_location: Optional[str] = None
+) -> Optional[FastPathMatch]:
+    q = query.strip()
+    match = _WEATHER_QUERY_RE.match(q)
+    if match and not _WEATHER_MIXED_ACTION_RE.search(match.group(1) or ""):
+        location = (match.group(1) or default_weather_location or "").strip().rstrip("?.!")
+        if location:
+            return FastPathMatch(
+                intent="current_weather",
+                semantic_op_id="weather.current.read",
+                tool_name="weather_get",
+                arguments={"location": location},
+                target_domain="weather",
+            )
+        return FastPathMatch(
+            intent="weather_location_required",
+            semantic_op_id="weather.current.read",
+            tool_name="",
+            target_domain="weather",
+            direct_handler=lambda: "Which city or location should I check the weather for?",
+        )
+
+    match = _REMIND_AFTER_RE.match(q)
+    if match:
+        amount = match.group("minutes").casefold()
+        minutes = float(_MINUTE_WORDS[amount]) if amount in _MINUTE_WORDS else float(amount)
+        delay_seconds = minutes * 60
+        reminder = match.groupdict().get("text")
+    else:
+        match = _TIMER_FOR_RE.match(q)
+        if not match:
+            match = None
+        else:
+            amount = (match.group("for_amount") or match.group("before_amount")).casefold()
+            amount_value = float(_MINUTE_WORDS[amount]) if amount in _MINUTE_WORDS else float(amount)
+            unit = (match.group("for_unit") or match.group("before_unit")).casefold().rstrip("s")
+            delay_seconds = amount_value * {"second": 1, "minute": 60, "hour": 3600}[unit]
+            reminder = match.group("text")
+    if match:
+        return FastPathMatch(
+            intent="create_timer",
+            semantic_op_id="calendar.timer.create",
+            tool_name="timer_create",
+            arguments={"delay_seconds": delay_seconds, "text": reminder or "Timer finished"},
+            target_domain="calendar",
+        )
+
+    match = _TIMER_CANCEL_RE.match(q)
+    if match:
+        return FastPathMatch(
+            intent="cancel_timer",
+            semantic_op_id="calendar.timer.cancel",
+            tool_name="timer_cancel",
+            arguments={"schedule_id": match.group(1)},
+            target_domain="calendar",
+        )
+
+    match = _STOPWATCH_RE.match(q)
+    if match:
+        action = (match.groupdict().get("action") or "read").casefold()
+        action = {"resume": "start", "pause": "stop", "show": "read", "check": "read"}.get(action, action)
+        return FastPathMatch(
+            intent=f"stopwatch_{action}",
+            semantic_op_id="time.stopwatch.control",
+            tool_name="stopwatch_control",
+            arguments={"action": action},
+            target_domain="tools",
+        )
+    return None
+
+
+def last_explicit_weather_location(history: list[dict[str, Any]]) -> Optional[str]:
+    for message in reversed(history):
+        if message.get("role") != "user":
+            continue
+        match = _WEATHER_QUERY_RE.match(str(message.get("content") or "").strip())
+        if not match or not match.group(1):
+            continue
+        location = match.group(1).strip().rstrip("?.!")
+        if location and not _WEATHER_MIXED_ACTION_RE.search(location):
+            return location
+    return None
+
+
+def match_dashboard_widget_visibility(query: str) -> Optional[FastPathMatch]:
+    match = _DASHBOARD_WIDGET_RE.match(query)
+    if not match:
+        return None
+    target_text = match.group("target").casefold().strip()
+    has_widget_surface = bool(re.search(r"\s+(?:widgets?|cards?)\s*[.!?]*\s*$", target_text, re.I))
+    target = target_text
+    target = re.sub(r"\s+(?:widgets?|cards?)$", "", target)
+    target = re.sub(r"^(?:all\s+)?", "", target)
+    target = re.sub(r"\s+(?:again|back)$", "", target)
+    target = re.sub(r"\s+", " ", target)
+    widget = {
+        "clock": "clock",
+        "time": "clock",
+        "weather": "weather",
+        "temperature": "weather",
+        "timer": "timer",
+        "timers": "timer",
+        "stopwatch": "stopwatch",
+        "stop watch": "stopwatch",
+        "music": "music",
+        "media": "music",
+        "music player": "music",
+        "media player": "music",
+        "now playing": "music",
+        "system status": "system_status",
+        "system health": "system_status",
+    }.get(target)
+    if widget is None or (widget != "clock" and not has_widget_surface):
+        return None
+    action = match.group("action").casefold()
+    visible = action in {"show", "open", "display", "reopen", "restore"}
+    return FastPathMatch(
+        intent=f"{ 'show' if visible else 'hide' }_{widget}_widget",
+        semantic_op_id="dashboard.widget.visibility",
+        tool_name="dashboard_widget_control",
+        arguments={"widget": widget, "visible": visible},
+        target_domain="tools",
     )
 
 
 # ---------------------------------------------------------------------------
 # Master Fast-Path Matcher
 # ---------------------------------------------------------------------------
-def match_fast_path(query: str) -> Optional[FastPathMatch]:
+def match_fast_path(
+    query: str, *, default_weather_location: Optional[str] = None
+) -> Optional[FastPathMatch]:
     """Pure matcher: returns FastPathMatch if query matches a deterministic intent, else None."""
     if not query or len(query.strip()) == 0:
         return None
+
+    m = match_dashboard_widget_visibility(query)
+    if m:
+        return m
+
+    m = match_close_window(query)
+    if m:
+        return m
+
+    m = match_weather_timer_stopwatch(query, default_weather_location=default_weather_location)
+    if m:
+        return m
 
     # 1. Full system workspace before narrower telemetry matchers.
     m = match_system_workspace(query)

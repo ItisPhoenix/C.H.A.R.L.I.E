@@ -1,22 +1,27 @@
 """OpenAPI / GPT Actions adapter.
 
 Parses an OpenAPI 3.x spec (the same format GPT Actions and the legacy
-OpenAI plugin manifest use) and registers one charlie.tools.registry tool
-per operation that makes the corresponding HTTP call via httpx.
+OpenAI tool manifest use) and registers one charlie.tools.registry tool
+per operation that makes a guarded public HTTP call.
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from urllib.parse import urljoin, urlparse
 
-import httpx
 import yaml
 
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9_]")
 _HTTP_METHODS = ("get", "head", "options", "post", "put", "patch", "delete")
-_READ_ONLY_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_DESTINATION_HEADERS = frozenset({
+    "host", ":authority", ":scheme", "forwarded", "x-forwarded-host",
+    "x-forwarded-proto", "proxy-authorization", "proxy-connection",
+})
+_DESTINATION_PARAMETERS = frozenset({"host", "authority", "url", "base_url", "server", "server_url"})
 
 
 @dataclass
@@ -127,20 +132,45 @@ def _call_operation(
     for key, value in kwargs.items():
         location = param_locations.get(key, "query")
         if location == "path":
+            if key.casefold() in _DESTINATION_PARAMETERS:
+                return "OpenAPI call refused: destination override parameters are not allowed."
             path = path.replace("{" + key + "}", str(value))
         elif location == "header":
+            if key.casefold() in _DESTINATION_HEADERS or key.casefold() in _DESTINATION_PARAMETERS:
+                return "OpenAPI call refused: destination override headers are not allowed."
             call_headers[key] = str(value)
         else:
             query[key] = value
-    url = f"{base_url.rstrip('/')}{path}"
+    if any(key.casefold() in _DESTINATION_HEADERS for key in call_headers):
+        return "OpenAPI call refused: destination override headers are not allowed."
+    url = urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
     try:
-        resp = httpx.request(
-            op.method, url, params=query or None, json=body, headers=call_headers, timeout=timeout
-        )
-        resp.raise_for_status()
-        return resp.text[:10000]
-    except httpx.HTTPError as exc:
-        return f"OpenAPI call error: {exc}"
+        from charlie.research.fetch import _get_browser_shaped, validate_public_url
+
+        validated_base = validate_public_url(base_url)
+        validated_url = validate_public_url(url)
+        base_parts = urlparse(validated_base)
+        target_parts = urlparse(validated_url)
+        if (target_parts.scheme, target_parts.hostname, target_parts.port) != (
+            base_parts.scheme, base_parts.hostname, base_parts.port
+        ):
+            return "OpenAPI call refused: operation path changed the declared destination."
+        status, text, _ = asyncio.run(_get_browser_shaped(
+            validated_url,
+            timeout_s=timeout,
+            method=op.method,
+            headers=call_headers,
+            params=query or None,
+            json_body=body,
+            follow_redirects=False,
+        ))
+        if 300 <= status < 400:
+            return "OpenAPI call refused: redirects are disabled for imported operations."
+        if status >= 400:
+            return f"OpenAPI call error: HTTP {status}"
+        return text[:10000]
+    except Exception as exc:
+        return f"OpenAPI call error: {type(exc).__name__}"
 
 
 def register_openapi_operations(
@@ -151,8 +181,12 @@ def register_openapi_operations(
     timeout: float = 15.0,
 ) -> List[str]:
     """Register one registry tool per operation. Each call makes the real
-    HTTP request via httpx against spec.base_url. Returns registered names."""
+    HTTP request through the pinned public-web transport against spec.base_url.
+    Returns registered names."""
     registered: List[str] = []
+    for header in (headers or {}):
+        if header.casefold() in _DESTINATION_HEADERS or header.casefold() in _DESTINATION_PARAMETERS:
+            raise ValueError("OpenAPI destination override headers are not allowed")
     for op in spec.operations:
         tool_name = f"{prefix}{_slugify(op.operation_id)}"
         param_locations = {p["name"]: p.get("in", "query") for p in op.parameters if p.get("name")}
@@ -165,7 +199,8 @@ def register_openapi_operations(
             description=f"[{spec.title}] {op.description or f'{op.method} {op.path}'}",
             schema=_operation_schema(op),
             owner="extensions",
-            risk_class="safe" if op.method.upper() in _READ_ONLY_METHODS else "security_sensitive",
+            risk_class="security_sensitive",
+            required_leases=("network",),
         )(_invoke)
         registered.append(tool_name)
     return registered

@@ -12,7 +12,7 @@ from charlie import core, router
 from charlie.autonomy import Requirement, RiskClass
 from charlie.config import Config
 from charlie.fastpaths import FastPathResult
-from charlie.research.models import Citation, EvidenceItem, ResearchMode, ResearchReport, SourceDocument
+from charlie.research.models import ResearchMode, ResearchReport, SourceDocument
 from charlie.research.router import ResearchDecision
 from charlie.turn_contracts import IntentDecision, ResultEnvelope, TurnContractError, TurnRequest
 
@@ -70,6 +70,260 @@ def test_tool_scope_accepts_requested_facts_and_suppresses_shell_detours() -> No
         "How do I close Notepad?",
         {"name": "desktop_close_app", "arguments": {"app": "notepad"}},
     )
+
+
+def test_tool_scope_allows_notepad_save_shortcut_only_for_requested_save() -> None:
+    save = {"name": "desktop_key", "arguments": {"keys": "ctrl+s"}}
+    save_as = {"name": "desktop_key", "arguments": {"keys": "ctrl+shift+s"}}
+    destructive = {"name": "desktop_key", "arguments": {"keys": "ctrl+alt+delete"}}
+
+    request = "Open Notepad, write a note, and save it on the desktop."
+    assert core._tool_call_matches_request_scope(request, save)
+    assert core._tool_call_matches_request_scope(request, save_as)
+    assert not core._tool_call_matches_request_scope(request, destructive)
+    assert not core._tool_call_matches_request_scope("How do I save a note in Notepad?", save)
+
+
+def test_tool_scope_allows_opening_the_explicitly_named_app_for_its_requested_task() -> None:
+    request = "Use Notepad to create a short note about yourself and save it on the Desktop."
+    assert core._tool_call_matches_request_scope(
+        request,
+        {"name": "desktop_open_app", "arguments": {"app": "notepad"}},
+    )
+    assert not core._tool_call_matches_request_scope(
+        request,
+        {"name": "desktop_open_app", "arguments": {"app": "calculator"}},
+    )
+
+
+def test_tool_scope_allows_only_a_freshly_observed_save_control():
+    request = "Save the current Notepad note on the desktop."
+    observed = ResultEnvelope(status="completed", result='[4] Button "Save"')
+    observation_call = {"name": "desktop_observe", "arguments": {}}
+    save_button = {"name": "desktop_click", "arguments": {"mark_id": 4}}
+    unrelated_button = {"name": "desktop_click", "arguments": {"mark_id": 5}}
+
+    assert core._tool_call_matches_request_scope(
+        request, save_button, verified_results=[(observation_call, observed)]
+    )
+    assert not core._tool_call_matches_request_scope(
+        request, unrelated_button, verified_results=[(observation_call, observed)]
+    )
+    assert not core._tool_call_matches_request_scope(request, save_button)
+
+
+def test_tool_scope_allows_only_fresh_text_targets_for_requested_writing():
+    request = "Open Notepad and create a new short note about Charlie."
+    observed = ResultEnvelope(
+        status="completed",
+        result=(
+            '[3] Button "New tab"\n'
+            '[4] Document "(unlabeled)"\n'
+            '[5] Button "Delete file"\n'
+            '[6] AXButton "Add new tab (Ctrl+N)"\n'
+            '[7] Button "Close new tab"\n'
+            '[8] TabItem "Draft"'
+        ),
+    )
+    observation_call = {"name": "desktop_observe", "arguments": {}}
+    previous = [(observation_call, observed)]
+    text_call = {"name": "desktop_type", "arguments": {"mark_id": 4, "text": "A newly authored note"}}
+    assert core._tool_call_matches_request_scope(request, text_call, verified_results=previous)
+    assert not core._tool_call_matches_request_scope("How do I create a note?", text_call, verified_results=previous)
+
+    assert core._tool_call_matches_request_scope(
+        request,
+        {"name": "desktop_click", "arguments": {"mark_id": 3}},
+        verified_results=previous,
+    )
+    assert core._tool_call_matches_request_scope(
+        request,
+        {"name": "desktop_click", "arguments": {"mark_id": 4}},
+        verified_results=previous,
+    )
+    assert core._tool_call_matches_request_scope(
+        request, {"name": "desktop_click", "arguments": {"mark_id": 6}}, verified_results=previous,
+    )
+    assert not core._tool_call_matches_request_scope(
+        request, {"name": "desktop_click", "arguments": {"mark_id": 7}}, verified_results=previous,
+    )
+    assert core._tool_call_matches_request_scope(
+        request, {"name": "desktop_click", "arguments": {"mark_id": 8}}, verified_results=previous,
+    )
+    assert not core._tool_call_matches_request_scope(
+        request,
+        {"name": "desktop_click", "arguments": {"mark_id": 5}},
+        verified_results=previous,
+    )
+    assert not core._tool_call_matches_request_scope(
+        request,
+        {"name": "desktop_click", "arguments": {"mark_id": 3}},
+    )
+    assert not core._tool_call_matches_request_scope(
+        "How do I write a note in Notepad?",
+        {"name": "desktop_click", "arguments": {"mark_id": 3}},
+        verified_results=previous,
+    )
+    assert not core._tool_call_matches_request_scope(
+        "Write text into the current Notepad document.",
+        {"name": "desktop_click", "arguments": {"mark_id": 3}},
+        verified_results=previous,
+    )
+
+
+def test_scope_context_carries_task_only_after_a_selected_clarification():
+    history = [
+        {"role": "user", "content": "Open Notepad and write a short note about Charlie."},
+        {
+            "role": "assistant",
+            "content": "Should I finish the Notepad note first, or start Twitter trends?",
+        },
+    ]
+
+    assert core._scope_request_after_confirmed_clarification(history, "Notepad note first") == (
+        "Open Notepad and write a short note about Charlie.\nNotepad note first"
+    )
+    assert core._scope_request_after_confirmed_clarification(history, "yes") == "yes"
+    assert core._scope_request_after_confirmed_clarification(history, "No, Notepad note first") == "No, Notepad note first"
+    assert core._scope_request_after_confirmed_clarification(history, "What's the weather?") == "What's the weather?"
+
+
+def test_blocked_action_reply_does_not_describe_observation_as_execution():
+    observed = ResultEnvelope(status="completed", result="Untitled - Notepad")
+    reply = core._scope_blocked_action_reply(
+        "Write a note in Notepad.",
+        [({"name": "desktop_windows", "arguments": {}}, observed)],
+    )
+    assert "couldn't run" in reply
+    assert "verify" not in reply
+    assert "Verified so far" not in reply
+    assert core._scope_blocked_action_reply("How do I write a note in Notepad?", []) == ""
+
+
+def test_tool_scope_allows_requested_window_focus_and_new_document_shortcut_only_when_grounded():
+    request = "Open Notepad and create a new short note about Charlie.\nNotepad note first"
+    windows_call = {"name": "desktop_windows", "arguments": {}}
+    windows = ResultEnvelope(status="completed", result="Untitled - Notepad\nResearch tab - Chrome")
+    observed_windows = [(windows_call, windows)]
+
+    assert core._tool_call_matches_request_scope(
+        request,
+        {"name": "desktop_focus", "arguments": {"window": "Notepad"}},
+        verified_results=observed_windows,
+    )
+    assert core._tool_call_matches_request_scope(
+        request,
+        {"name": "desktop_focus", "arguments": {"window": "Untitled - Notepad"}},
+        verified_results=observed_windows,
+    )
+    assert not core._tool_call_matches_request_scope(
+        request,
+        {"name": "desktop_focus", "arguments": {"window": "Chrome"}},
+        verified_results=observed_windows,
+    )
+    assert not core._tool_call_matches_request_scope(
+        request,
+        {"name": "desktop_focus", "arguments": {"window": "Notepad"}},
+    )
+
+    focus_call = {"name": "desktop_focus", "arguments": {"window": "Notepad"}}
+    focus = ResultEnvelope(
+        status="completed",
+        result="Opened the app and confirmed its exact window through bounded Cua.",
+    )
+    focused = observed_windows + [(focus_call, focus)]
+    assert core._tool_call_matches_request_scope(
+        request,
+        {"name": "desktop_key", "arguments": {"keys": "ctrl+n"}},
+        verified_results=focused,
+    )
+    assert not core._tool_call_matches_request_scope(
+        request,
+        {"name": "desktop_key", "arguments": {"keys": "ctrl+a"}},
+        verified_results=focused,
+    )
+    assert not core._tool_call_matches_request_scope(
+        request,
+        {"name": "desktop_key", "arguments": {"keys": "ctrl+n"}},
+        verified_results=observed_windows,
+    )
+    assert not core._tool_call_matches_request_scope(
+        "Write text in the current Notepad document.",
+        {"name": "desktop_key", "arguments": {"keys": "ctrl+n"}},
+        verified_results=focused,
+    )
+
+
+def test_scope_filter_keeps_observation_dependencies_but_requires_dispatch_readback():
+    request = "Open Notepad and create a new note."
+    observe = {"name": "desktop_windows", "arguments": {}}
+    focus = {"name": "desktop_focus", "arguments": {"window": "Untitled - Notepad"}}
+    unrelated = {"name": "desktop_focus", "arguments": {"window": "Chrome"}}
+    allowed, suppressed = core._filter_tool_calls_to_request_scope([observe, focus, unrelated], request)
+    assert allowed == [observe, focus]
+    assert suppressed == 1
+    reversed_allowed, reversed_suppressed = core._filter_tool_calls_to_request_scope([focus, observe], request)
+    assert reversed_allowed == [focus, observe]
+    assert reversed_suppressed == 0
+    assert not core._tool_call_matches_request_scope(request, focus, verified_results=[])
+
+
+def test_timer_update_can_list_existing_schedules_as_its_read_prerequisite():
+    request = "Relabel my existing timer to Take Medicine."
+
+    assert core._tool_call_matches_request_scope(
+        request,
+        {"name": "automation_list", "arguments": {}},
+    )
+    assert core._tool_call_matches_request_scope(
+        request,
+        {"name": "automation_update", "arguments": {"schedule_id": "known-from-list", "text": "Take Medicine"}},
+    )
+    assert not core._tool_call_matches_request_scope(
+        "What time is it?",
+        {"name": "automation_list", "arguments": {}},
+    )
+
+
+def test_tool_scope_allows_save_dialog_navigation_only_from_fresh_observation():
+    request = "Save the current Notepad note on the Desktop as About Charlie.txt."
+    windows = ResultEnvelope(status="completed", result="Save as\n*Untitled - Notepad")
+    window_call = {"name": "desktop_windows", "arguments": {}}
+    save_as_focus = {"name": "desktop_focus", "arguments": {"window": "Save as"}}
+    unrelated_focus = {"name": "desktop_focus", "arguments": {"window": "Browser"}}
+    enter_key = {"name": "desktop_key", "arguments": {"keys": "enter"}}
+
+    assert core._tool_call_matches_request_scope(
+        request, save_as_focus, verified_results=[(window_call, windows)]
+    )
+    assert core._tool_call_matches_request_scope(
+        request, enter_key, verified_results=[(window_call, windows)]
+    )
+    assert not core._tool_call_matches_request_scope(request, save_as_focus)
+    assert not core._tool_call_matches_request_scope(
+        request, unrelated_focus, verified_results=[(window_call, windows)]
+    )
+    assert not core._tool_call_matches_request_scope(request, enter_key)
+
+    explicit_request = "In Notepad's open Save As dialog, save the note on my Desktop."
+    assert core._tool_call_matches_request_scope(explicit_request, save_as_focus)
+
+
+def test_tool_scope_allows_only_observed_desktop_folder_or_save_button():
+    request = "Save the current Notepad note on the Desktop as About Charlie.txt."
+    observation = ResultEnvelope(
+        status="completed",
+        result='[12] TreeItem "Desktop (OneDrive)"\n[19] Button "Save"',
+    )
+    observe_call = {"name": "desktop_observe", "arguments": {}}
+    desktop_click = {"name": "desktop_click", "arguments": {"mark_id": 12}}
+    save_click = {"name": "desktop_click", "arguments": {"mark_id": 19}}
+    unrelated_click = {"name": "desktop_click", "arguments": {"mark_id": 13}}
+
+    previous = [(observe_call, observation)]
+    assert core._tool_call_matches_request_scope(request, desktop_click, verified_results=previous)
+    assert core._tool_call_matches_request_scope(request, save_click, verified_results=previous)
+    assert not core._tool_call_matches_request_scope(request, unrelated_click, verified_results=previous)
 
 
 def test_tool_scope_uses_verified_result_provenance_for_a_navigation_target() -> None:
@@ -275,19 +529,27 @@ async def test_system_metric_turn_records_system_fastpath_decision(
 async def test_research_turn_records_research_and_live_freshness(
     monkeypatch: pytest.MonkeyPatch, brain_config: Config
 ) -> None:
+    from charlie.research.citations import assign_citations
+    from charlie.research.evidence import build_evidence
+
     request = _request("Research the latest NVIDIA security news")
     # Mirror real engine output: a terminal "evidence-sufficient" report with fetched
     # evidence. A report without evidence must now refuse instead of being synthesized.
+    source = SourceDocument(
+        source_id="S1",
+        url="https://example.com/advisory",
+        title="Advisory",
+        content="NVIDIA security news was summarized by the cited advisory.",
+    )
     report = ResearchReport(
         query=request.input,
         mode=ResearchMode.STANDARD,
-        sources=[SourceDocument(source_id="S1", url="https://example.com/advisory", title="Advisory")],
-        evidence=[EvidenceItem(source_id="S1", statement="Fetched statement.")],
-        citations=[Citation(
-            source_id="S1", url="https://example.com/advisory", title="Advisory", domain="example.com"
-        )],
+        sources=[source],
+        evidence=build_evidence([source], request.input, policy="any_reputable"),
+        citations=assign_citations([source]),
         stop_reason="evidence-sufficient",
     )
+    report.bind_passages()
     decisions: list[IntentDecision] = []
     brain = core.Brain(brain_config, on_intent_decision=decisions.append, register_panic_hotkey=False)
 
@@ -295,7 +557,7 @@ async def test_research_turn_records_research_and_live_freshness(
         return report
 
     async def fake_completion(_payload: dict[str, Any], _generation: int) -> tuple[str, list[dict[str, Any]]]:
-        return "Research answer", []
+        return "NVIDIA security news was summarized by the cited advisory [S1].", []
 
     monkeypatch.setattr(brain, "_run_research_for_turn", fake_research)
     monkeypatch.setattr(brain, "_stream_completion", fake_completion)
@@ -304,7 +566,7 @@ async def test_research_turn_records_research_and_live_freshness(
     finally:
         await brain.close()
 
-    assert chunks == ["Research answer"]
+    assert chunks == ["NVIDIA security news was summarized by the cited advisory [S1]."]
     assert len(decisions) == 1
     assert decisions[0].intent == "research"
     assert decisions[0].capabilities == ("research",)

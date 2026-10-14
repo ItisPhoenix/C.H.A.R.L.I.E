@@ -229,7 +229,7 @@ class WindowsMediaAdapter:
                 "artist": properties.artist or "",
                 "album": properties.album_title or "",
                 "app": session.source_app_user_model_id or "",
-                "status": str(playback.playback_status).split(".")[-1].lower(),
+                "status": playback.playback_status.name.lower(),
                 "position_seconds": _seconds(timeline.position),
                 "duration_seconds": _seconds(timeline.end_time),
                 "art_uri": await _thumbnail_data_uri(properties.thumbnail),
@@ -273,6 +273,7 @@ class WindowsMediaAdapter:
             session = manager.get_current_session()
             if session is None:
                 return {"ok": False, "available": False, "reason": "No controllable media session"}
+            previous_status = session.get_playback_info().playback_status.name.lower() if action == "play_pause" else None
             method_name = _PLAYBACK_ACTIONS[action]
             result = await getattr(session, method_name)()
             if not result:
@@ -282,6 +283,27 @@ class WindowsMediaAdapter:
                     "action": action,
                     "verified": False,
                     "reason": "Media session rejected the action",
+                }
+            if action == "play_pause":
+                expected_status = {"playing": "paused", "paused": "playing"}.get(previous_status)
+                status = None
+                for attempt in range(3):
+                    try:
+                        status = session.get_playback_info().playback_status.name.lower()
+                    except Exception:
+                        logger.info("Windows playback status readback unavailable", exc_info=True)
+                    if status == expected_status and expected_status is not None:
+                        break
+                    if attempt < 2:
+                        await asyncio.sleep(0.1)
+                verified = expected_status is not None and status == expected_status
+                return {
+                    "ok": True,
+                    "available": True,
+                    "action": action,
+                    "status": status,
+                    "verified": verified,
+                    "reason": "Playback state changed and was confirmed" if verified else "Playback command accepted; resulting playback state could not be confirmed",
                 }
             return {
                 "ok": True,

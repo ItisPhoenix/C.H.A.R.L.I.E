@@ -40,6 +40,30 @@ class RuntimeStatus(StrEnum):
     STOPPED = "stopped"
 
 
+class HealthState(StrEnum):
+    """Authoritative aggregate health verdict shared by every health owner.
+
+    ``HealthStatus`` and ``RuntimeStatus`` answer "what is this subsystem or
+    runtime doing right now". ``HealthState`` answers the different question
+    "is this system healthy overall", and is the only place that verdict is
+    allowed to take a value. It lives here rather than in a consumer so a
+    subsystem owner, the main runtime aggregate, and ``CharlieDoctor`` cannot
+    each mint their own competing status vocabulary.
+
+    The two lifecycle enums deliberately have no ``HEALTHY`` member: a
+    subsystem reporting ``RUNNING`` is evidence about that subsystem, not a
+    verdict about the system.
+
+    ``charlie.doctor.DoctorStatus`` is an alias of this type, so diagnostic
+    reports and runtime-truth snapshots speak one language.
+    """
+
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    UNHEALTHY = "unhealthy"
+    UNKNOWN = "unknown"
+
+
 _PUBLIC_DETAILS: Dict[HealthStatus, str] = {
     HealthStatus.STARTING: "Starting",
     HealthStatus.RUNNING: "Running",

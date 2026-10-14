@@ -234,9 +234,16 @@ def test_vad_pre_roll_keeps_each_onset_frame_once_and_preserves_order():
 
 
 def test_vad_endpoint_uses_conservative_timeout_without_shortening_minimum():
-    assert VoiceEngine._should_end_speech(1.29, 1.0, 1.3, 0.35, 45.0) is False
-    assert VoiceEngine._should_end_speech(1.3, 1.0, 1.3, 0.35, 45.0) is True
-    assert VoiceEngine._should_end_speech(0.0, 45.0, 1.3, 0.35, 45.0) is True
+    assert VoiceEngine._should_end_speech(1.79, 1.0, 1.8, 0.35) is False
+    assert VoiceEngine._should_end_speech(1.8, 1.0, 1.8, 0.35) is True
+    assert VoiceEngine._should_end_speech(0.0, 45.0, 1.8, 0.35) is False
+    assert VoiceEngine._should_end_speech(0.0, 90.0, 1.8, 0.35) is False
+
+
+def test_vad_capture_default_keeps_a_clause_pause_before_ending_speech():
+    from charlie.config import Config
+
+    assert Config.__dataclass_fields__["vad_silence_timeout"].default == pytest.approx(1.8)
 
 
 @pytest.mark.parametrize(

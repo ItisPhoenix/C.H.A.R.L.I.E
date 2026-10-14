@@ -140,6 +140,12 @@ def test_fetched_research_report_survives_later_snippet_only_report():
 
     assert _prefer_research_report(fetched, snippets) is fetched
 
+    from charlie.core import publish_turn_research_reports
+    delivered = []
+    publish_turn_research_reports([fetched, snippets], "Verified answer", delivered.append)
+    assert delivered == [fetched]
+    assert fetched.answer == "Verified answer"
+
 
 def test_automation_timezone_defaults_to_configured_local_zone_without_user_zone():
     normalized = _normalize_automation_timezone(
@@ -494,13 +500,11 @@ class TestCapabilitiesBlock:
         assert "Memory" in block
         assert "overrides any conflicting claim" in block
 
-    def test_stable_tier_includes_roster(self):
-        from charlie.capabilities import build_capability_roster
-        from charlie.config import Config
+    def test_stable_tier_does_not_duplicate_dynamic_capability_schemas(self):
         from charlie.prompt_builder import build_stable_tier as _build_stable_tier
-        block = build_capability_roster(self._registry_with(), Config())
-        stable = _build_stable_tier("Test soul text.", block)
-        assert "Memory" in stable
+
+        stable = _build_stable_tier("Test soul text.", use_native_tools=True)
+        assert "YOUR ACTUAL CAPABILITIES" not in stable
         assert "Test soul text." in stable
 
     def test_roster_omits_desktop_control_when_disabled(self):
@@ -511,8 +515,7 @@ class TestCapabilitiesBlock:
         block = build_capability_roster(self._registry_with(desktop=True), cfg)
         assert "Desktop control" not in block
 
-    def test_stable_tier_default_second_arg_matches_old_single_arg_call(self):
-        """Existing callers passing only soul_text must still work unchanged."""
+    def test_stable_tier_accepts_only_the_stable_identity_input(self):
         from charlie.prompt_builder import build_stable_tier as _build_stable_tier
         stable = _build_stable_tier("Test soul text.")
         assert "Test soul text." in stable
@@ -536,8 +539,7 @@ class TestRebuildStableTier:
     config in place but only rebuilt _context_tier -- capability claims baked
     into _stable_tier kept describing the OLD config until process restart."""
 
-    def test_rebuild_stable_tier_reflects_new_config(self):
-        import charlie.capabilities as capabilities_module
+    def test_rebuild_stable_tier_does_not_embed_dynamic_capability_roster(self):
         brain = _make_brain(use_native_tools=True)
         brain.config.desktop_control_enabled = False
         brain.config.mcp_enabled = False
@@ -547,12 +549,10 @@ class TestRebuildStableTier:
         assert "Desktop control" not in before
 
         brain.config.desktop_control_enabled = True
-        with patch.object(capabilities_module, "_DESKTOP_AVAILABLE", True):
-            brain.rebuild_stable_tier()
+        brain.rebuild_stable_tier()
         after = brain._stable_tier
 
-        assert after != before
-        assert "Desktop control" in after
+        assert after == before
 
 
 class TestVisualContentQueryFastPath:

@@ -1,22 +1,29 @@
-import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useId, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type Dispatch, type SetStateAction } from "react";
 import { BorderBeam } from "border-beam";
 import { Liquid } from "liquid-gooey";
 import { ChatCircleText } from "@phosphor-icons/react/dist/csr/ChatCircleText";
+import { X } from "@phosphor-icons/react/dist/csr/X";
 import { GearSix } from "@phosphor-icons/react/dist/csr/GearSix";
 import { MicrophoneSlash } from "@phosphor-icons/react/dist/csr/MicrophoneSlash";
 import { Pulse } from "@phosphor-icons/react/dist/csr/Pulse";
+import { Play } from "@phosphor-icons/react/dist/csr/Play";
+import { Pause } from "@phosphor-icons/react/dist/csr/Pause";
+import { SkipBack } from "@phosphor-icons/react/dist/csr/SkipBack";
+import { SkipForward } from "@phosphor-icons/react/dist/csr/SkipForward";
+import { CaretDown } from "@phosphor-icons/react/dist/csr/CaretDown";
 import type { OrbState } from "thinking-orbs";
 import { VoiceBeam } from "voice-glow";
-import { loadScene, orbStateForEvent, parseRuntimeEvent, postCommand, postRuntimeCommand, type ResearchResultData, type ResearchSource, type RuntimeEvent, type RuntimeSetting, type SceneSnapshot } from "./runtime";
+import { loadScene, orbStateForEvent, parseRuntimeEvent, pendingTextCommandId, postCommand, postRuntimeCommand, type DashboardWidgets, type ResearchResultData, type RuntimeEvent, type RuntimeSetting, type SceneSnapshot } from "./runtime";
 import { readDashboardViewState, writeDashboardViewState, type DashboardViewState } from "./sessionView";
 import { SettingsSectionNav, type SettingsSectionId } from "./SettingsSectionNav";
 import { ResearchTabs } from "./ResearchTabs";
+import { ResearchPanel } from "./ResearchPanel";
 import { Microphone } from "@phosphor-icons/react/dist/csr/Microphone";
 import { CrispThinkingOrb } from "./CrispThinkingOrb";
 
 type ActivityItem = RuntimeEvent & { key: string };
 type CaptionLine = { id: string; text: string; kind: "stt" | "tts" };
-type ChatBubble = { id: string; role: "you" | "charlie"; text: string };
+type ChatBubble = { id: string; role: "you" | "charlie"; text: string; turnId?: string };
 type FrontendSettings = {
   reducedMotion: boolean;
   captions: boolean;
@@ -72,6 +79,11 @@ const ACTIVITY_TYPES = new Set([
   "browser_task_done",
   "alert",
 ]);
+const SESSION_OWNED_EVENT_TYPES = new Set([
+  ...[...ACTIVITY_TYPES].filter((type) => type !== "alert"),
+  "transcript",
+  "token",
+]);
 
 export function App() {
   const [settings, setSettings] = useState(readFrontendSettings);
@@ -86,6 +98,7 @@ export function App() {
   const [commandNotice, setCommandNotice] = useState("");
   const [captionLines, setCaptionLines] = useState<CaptionLine[]>([]);
   const [captionSpeaker, setCaptionSpeaker] = useState<CaptionLine["kind"]>("stt");
+  const [reminderNotice, setReminderNotice] = useState("");
   const [approvalBusy, setApprovalBusy] = useState(false);
   const [approvalError, setApprovalError] = useState("");
   const [chatBubbles, setChatBubbles] = useState<ChatBubble[]>([]);
@@ -94,6 +107,8 @@ export function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [researchOpen, setResearchOpen] = useState(false);
+  const [researchProgress, setResearchProgress] = useState<RuntimeEvent | null>(null);
+  const completedResearchTurns = useRef(new Set<string>());
   const [selectedResearchResultId, setSelectedResearchResultId] = useState<string | null>(null);
   const [dismissedResearchResultIds, setDismissedResearchResultIds] = useState<string[]>([]);
   const [viewHydratedSessionId, setViewHydratedSessionId] = useState<string | null>(null);
@@ -102,19 +117,40 @@ export function App() {
   const researchResults = scene?.researchResults?.length
     ? scene.researchResults
     : scene?.researchResult ? [scene.researchResult] : [];
-  const selectedResearchResult = researchResults.find((result) => result.id === selectedResearchResultId)
-    ?? scene?.researchResult;
+  const selectedResearchResult = selectedResearchResultId
+    ? researchResults.find((result) => result.id === selectedResearchResultId)
+    : scene?.researchResult;
   const [settingsOpen, setSettingsOpen] = useState(false);
   const clearCaptionTimer = useRef<number | undefined>(undefined);
+  const clearReminderTimer = useRef<number | undefined>(undefined);
   const audioLevelRef = useRef(0);
   const ttsBufferRef = useRef("");
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const [composerWidth, setComposerWidth] = useState(371);
+  const messageEditGenerationRef = useRef(0);
   const replyId = useRef<string | null>(null);
   const presenceRef = useRef<HTMLButtonElement>(null);
   const seenEventIds = useRef(new Set<string>());
   const hydratedSessionRef = useRef<string | null>(null);
   const pendingResearchOpenRef = useRef<string | null>(null);
+  const currentSessionIdRef = useRef<string | null>(null);
+  const currentSceneRef = useRef<SceneSnapshot | null>(null);
+  const sceneRequestGenerationRef = useRef(0);
+
+  async function refreshScene(isActive: () => boolean = () => true): Promise<SceneSnapshot | null> {
+    const requestGeneration = ++sceneRequestGenerationRef.current;
+    const requestedSessionId = currentSessionIdRef.current;
+    const snapshot = await loadScene();
+    const activeSessionId = currentSessionIdRef.current;
+    const acceptedScene = currentSceneRef.current;
+    if (!isActive() || requestGeneration !== sceneRequestGenerationRef.current) return acceptedScene;
+    if (activeSessionId !== requestedSessionId && activeSessionId !== null) return acceptedScene;
+    if (requestedSessionId === null && activeSessionId !== null && snapshot.sessionId !== activeSessionId) return acceptedScene;
+    currentSessionIdRef.current = snapshot.sessionId ?? null;
+    currentSceneRef.current = snapshot;
+    setScene(snapshot);
+    return snapshot;
+  }
 
   useEffect(() => {
     if (!scene?.sessionId || viewHydratedSessionId === scene.sessionId) return;
@@ -138,6 +174,12 @@ export function App() {
     setSelectedResearchResultId(restored.selectedResearchResultId);
     setDismissedResearchResultIds(restored.dismissedResearchResultIds);
     setChatBubbles(scene.conversationHistory ?? []);
+    completedResearchTurns.current = new Set((scene.activity ?? [])
+      .filter((event) => event.type === "research_result" && event.turnId)
+      .map((event) => event.turnId!));
+    setResearchProgress(scene.activeTurnId
+      ? [...(scene.activity ?? [])].reverse().find((event) => event.type === "research_progress" && event.turnId === scene.activeTurnId) ?? null
+      : null);
     setActivity((current) => {
       const seen = new Set(current.map((item) => item.key));
       const restored = [...(scene.activity ?? [])].reverse().flatMap((item, index) => {
@@ -167,21 +209,23 @@ export function App() {
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* Preferences are optional. */ }
   }, [settings]);
 
-  function addChatBubble(role: ChatBubble["role"], text: string, id: string = crypto.randomUUID()) {
+  function addChatBubble(role: ChatBubble["role"], text: string, id: string = crypto.randomUUID(), turnId?: string) {
     const clean = text.trim();
     if (!clean) return;
-    setChatBubbles((bubbles) => bubbles.some((bubble) => bubble.id === id) ? bubbles : [...bubbles, { id, role, text: clean }]);
+    setChatBubbles((bubbles) => bubbles.some((bubble) => bubble.id === id) ? bubbles : [...bubbles, { id, role, text: clean, ...(turnId !== undefined ? { turnId } : {}) }]);
   }
 
-  function appendCharlieBubble(text: string) {
+  function appendCharlieBubble(text: string, turnId?: string) {
     if (!text) return;
-    const id = replyId.current ?? (replyId.current = crypto.randomUUID());
+    const id = turnId ? `turn:${turnId}` : replyId.current ?? crypto.randomUUID();
+    replyId.current = id;
     setChatBubbles((bubbles) => {
+      if (turnId && bubbles.some((bubble) => bubble.role === "charlie" && bubble.turnId === turnId && bubble.id.startsWith("research:"))) return bubbles;
       const next = [...bubbles];
       const index = next.findIndex((bubble) => bubble.id === id);
-      if (index >= 0) next[index] = { ...next[index], text: `${next[index].text}${text}` };
+      if (index >= 0) next[index] = { ...next[index], ...(turnId !== undefined ? { turnId } : {}), text: `${next[index].text}${text}` };
       else {
-        next.push({ id, role: "charlie", text });
+        next.push({ id, role: "charlie", text, ...(turnId !== undefined ? { turnId } : {}) });
       }
       return next;
     });
@@ -222,15 +266,16 @@ export function App() {
     let active = true;
     const stream = new EventSource("/api/events");
     stream.onopen = () => {
-      setStreamOpen(false);
-      void loadScene().then((snapshot) => {
-        if (!active) return;
-        setScene(snapshot);
+      setStreamOpen(true);
+      void refreshScene(() => active).then((snapshot) => {
+        if (!active || !snapshot || snapshot.sessionId !== currentSessionIdRef.current) return;
         setActivity((items) => items.filter((item) => item.type !== "tool_approval_request"
           || item.requestId === snapshot.pendingApproval?.requestId));
-        setStreamOpen(true);
+        setSceneError("");
         setOrbState((current) => current === "connecting" ? "breathing" : current);
-      }).catch(() => { if (active) setStreamOpen(false); });
+      }).catch((error: unknown) => {
+        if (active) setSceneError(error instanceof Error ? error.message : "Scene endpoint is unavailable.");
+      });
     };
     stream.onerror = () => {
       if (!active) return;
@@ -242,6 +287,9 @@ export function App() {
       try { raw = JSON.parse(messageEvent.data); } catch { return; }
       const event = parseRuntimeEvent(raw);
       if (!event) return;
+      const sessionOwned = SESSION_OWNED_EVENT_TYPES.has(event.type);
+      const projectSessionEvent = !sessionOwned || Boolean(currentSessionIdRef.current
+        && event.sessionId === currentSessionIdRef.current);
       if (event.id) {
         if (seenEventIds.current.has(event.id)) return;
         seenEventIds.current.add(event.id);
@@ -249,26 +297,59 @@ export function App() {
           seenEventIds.current.delete(seenEventIds.current.values().next().value as string);
         }
       }
+      if (event.type === "alert" && event.channel === "web" && event.text?.startsWith("Reminder:")) {
+        const reminder = event.text.slice("Reminder:".length).trim();
+        setReminderNotice(reminder === "Timer finished" ? reminder : `Reminder: ${reminder}`);
+        if (clearReminderTimer.current !== undefined) window.clearTimeout(clearReminderTimer.current);
+        clearReminderTimer.current = window.setTimeout(() => setReminderNotice(""), 8000);
+      }
       if (event.type === "audio_level" && event.level !== undefined) audioLevelRef.current = event.level;
       if (["speaking_stop", "response_done"].includes(event.type)) audioLevelRef.current = 0;
-      const nextOrbState = orbStateForEvent(event);
+      const nextOrbState = projectSessionEvent ? orbStateForEvent(event) : null;
       if (nextOrbState) setOrbState(nextOrbState);
-      if (event.snapshot) setScene((current) => !current || event.snapshot!.revision > current.revision ? event.snapshot! : current);
-      if (event.type === "transcript" && event.text) {
-        if (!event.partial) addChatBubble("you", event.text);
+      if (event.snapshot?.sessionId === currentSessionIdRef.current) {
+        ++sceneRequestGenerationRef.current;
+        currentSceneRef.current = event.snapshot;
+        setScene(event.snapshot);
+      }
+      if (event.type === "dashboard_widgets" && event.channel === "web" && event.widgets) {
+        setScene((current) => current && event.sessionId === current.sessionId
+          ? { ...current, widgets: event.widgets }
+          : current);
+      }
+      if (event.type === "system_status" && event.systemStatus) {
+        setScene((current) => current?.widgets && !current.widgets.hiddenWidgets?.includes("system_status")
+          ? { ...current, widgets: { ...current.widgets, systemStatus: event.systemStatus } }
+          : current);
+      }
+      if (projectSessionEvent && event.type === "transcript" && event.text) {
+        if (!event.partial) addChatBubble("you", event.text, event.turnId ? `turn:${event.turnId}:you` : undefined, event.turnId);
         addCaption(event.text, "stt", event.partial);
       }
       if (["vad_start", "ptt_start"].includes(event.type)) {
         setCaptionSpeaker("stt");
         if (clearCaptionTimer.current !== undefined) window.clearTimeout(clearCaptionTimer.current);
       }
-      if (event.type === "token" && event.channel !== "telegram" && event.text) {
+      if (projectSessionEvent && event.type === "token" && event.channel !== "telegram" && event.text) {
         ttsBufferRef.current += event.text;
-        appendCharlieBubble(event.text);
+        appendCharlieBubble(event.text, event.turnId);
       }
-      if (event.type === "research_result" && event.channel !== "telegram") {
+      if (projectSessionEvent && event.type === "research_result" && event.channel !== "telegram") {
         if (event.researchResult) {
+          if (event.turnId) completedResearchTurns.current.add(event.turnId);
+          setResearchProgress((current) => !current?.turnId || !event.turnId || current.turnId === event.turnId ? null : current);
           const result = event.researchResult;
+          setChatBubbles((bubbles) => {
+            const inlineBubble: ChatBubble = {
+              id: `research:${result.id}`,
+              role: "charlie",
+              text: result.answer || result.text,
+              ...(event.turnId !== undefined ? { turnId: event.turnId } : {}),
+            };
+            const existing = bubbles.findIndex((bubble) => bubble.id === inlineBubble.id
+              || (event.turnId && bubble.role === "charlie" && bubble.turnId === event.turnId && !bubble.id.startsWith("research:")));
+            return existing < 0 ? [...bubbles, inlineBubble] : bubbles.map((bubble, index) => index === existing ? inlineBubble : bubble);
+          });
           setScene((cur) => {
             if (!cur) return cur;
             const previous = cur.researchResults ?? (cur.researchResult ? [cur.researchResult] : []);
@@ -278,22 +359,26 @@ export function App() {
           openResearchResult(result.id);
         }
       }
-      if (event.type === "result_stored" && event.channel === "web" && event.text) {
+      if (projectSessionEvent && event.type === "research_progress" && event.text && event.channel !== "telegram"
+        && (!event.turnId || !completedResearchTurns.current.has(event.turnId))) {
+        setResearchProgress(event);
+      }
+      if (projectSessionEvent && event.type === "result_stored" && event.channel === "web" && event.text) {
         replyId.current = null;
         addChatBubble("charlie", event.text, `task:${event.resultId ?? event.id}`);
       }
       if (["mic_state", "audio_state", "settings_snapshot"].includes(event.type)) {
-        void loadScene().then(setScene).catch(() => setStreamOpen(false));
+        void refreshScene().catch((error: unknown) => setSceneError(error instanceof Error ? error.message : "Scene endpoint is unavailable."));
       }
       if (["task_snapshot", "background_task", "research_result", "result_stored"].includes(event.type)) {
-        void loadScene().then(setScene).catch(() => setStreamOpen(false));
+        void refreshScene().catch((error: unknown) => setSceneError(error instanceof Error ? error.message : "Scene endpoint is unavailable."));
       }
-      if (event.type === "tool_approval_resolved" && event.requestId) {
+      if (projectSessionEvent && event.type === "tool_approval_resolved" && event.requestId) {
         setActivity((items) => items.filter((item) => item.requestId !== event.requestId));
         setScene((current) => current && current.pendingApproval?.requestId === event.requestId
           ? { ...current, pendingApproval: undefined } : current);
       }
-      if (event.type === "tool_approval_request" && event.channel === "web") {
+      if (projectSessionEvent && event.type === "tool_approval_request" && event.channel === "web") {
         setApprovalError("");
         setScene((current) => current ? { ...current, pendingApproval: event } : current);
       }
@@ -308,13 +393,12 @@ export function App() {
         replyId.current = null;
         ttsBufferRef.current = "";
       }
-      if (ACTIVITY_TYPES.has(event.type)) {
+      if (projectSessionEvent && ACTIVITY_TYPES.has(event.type)) {
         setActivity((items) => [{ ...event, key: event.id ?? `${event.type}-${Date.now()}` }, ...items].slice(0, 40));
       }
     };
-    void loadScene().then((snapshot) => {
-      if (!active) return;
-      setScene((current) => !current || snapshot.revision > current.revision ? snapshot : current);
+    void refreshScene(() => active).then((snapshot) => {
+      if (!active || !snapshot) return;
       setSceneError("");
     }).catch((error: unknown) => {
       if (active) setSceneError(error instanceof Error ? error.message : "Scene endpoint is unavailable.");
@@ -323,6 +407,7 @@ export function App() {
       active = false;
       stream.close();
       if (clearCaptionTimer.current !== undefined) window.clearTimeout(clearCaptionTimer.current);
+      if (clearReminderTimer.current !== undefined) window.clearTimeout(clearReminderTimer.current);
     };
   }, [previewMode]);
 
@@ -377,16 +462,35 @@ export function App() {
     if (!text || sending || !scene || !streamOpen) return;
     setSending(true);
     setCommandNotice("");
-    addChatBubble("you", text);
+    const sessionId = scene.sessionId;
+    if (!sessionId) {
+      setCommandNotice("The active Charlie session is unavailable.");
+      setSending(false);
+      return;
+    }
+    const messageEditGeneration = messageEditGenerationRef.current;
     replyId.current = null;
     setMessage("");
+    let requestId: string | null = null;
     try {
-      const accepted = await postCommand(text);
-      setCommandNotice(accepted ? "Charlie accepted the command." : "Response received; command acceptance was not confirmed.");
+      requestId = pendingTextCommandId(text, sessionId);
+      addChatBubble("you", text, `submit:${requestId}`);
+      const accepted = await postCommand(text, fetch, sessionId);
+      if (!accepted) {
+        setCommandNotice((current) => currentSessionIdRef.current === sessionId
+          ? "Response received; command acceptance was not confirmed." : current);
+        setMessage((current) => currentSessionIdRef.current === sessionId
+          && messageEditGenerationRef.current === messageEditGeneration && current === "" ? text : current);
+      }
     } catch (error) {
       const failure = error instanceof Error ? error.message : "Command could not be sent.";
-      setCommandNotice(failure);
-      addChatBubble("charlie", failure);
+      setCommandNotice((current) => currentSessionIdRef.current === sessionId ? failure : current);
+      const failedRequestId = requestId;
+      if (failedRequestId) setChatBubbles((bubbles) => currentSessionIdRef.current !== sessionId
+        || bubbles.some((bubble) => bubble.id === `submit-error:${failedRequestId}`)
+        ? bubbles : [...bubbles, { id: `submit-error:${failedRequestId}`, role: "charlie", text: failure }]);
+      setMessage((current) => currentSessionIdRef.current === sessionId
+        && messageEditGenerationRef.current === messageEditGeneration && current === "" ? text : current);
     } finally {
       setSending(false);
     }
@@ -406,7 +510,7 @@ export function App() {
   async function sendRuntimeControl(command: Record<string, unknown>) {
     try {
       if (!await postRuntimeCommand(command)) throw new Error("Runtime control was not acknowledged.");
-      setScene(await loadScene());
+      await refreshScene();
       setCommandNotice("");
     } catch (error) {
       setCommandNotice(error instanceof Error ? error.message : "Runtime control failed.");
@@ -417,7 +521,9 @@ export function App() {
     return sendRuntimeControl({ type, [type === "set_mic_state" ? "mic_muted" : "muted"]: muted });
   }
 
-  async function decideApproval(requestId: string, approved: boolean) {
+  async function decideApproval(approval: RuntimeEvent, approved: boolean) {
+    if (approval.channel !== "web" || !approval.requestId) return;
+    const requestId = approval.requestId;
     setApprovalBusy(true);
     setApprovalError("");
     try {
@@ -436,9 +542,43 @@ export function App() {
 
   async function saveRuntimeSettings(updates: Record<string, unknown>) {
     if (!await postRuntimeCommand({ type: "update_settings", updates })) throw new Error("Settings save was not acknowledged.");
-    const updated = await loadScene();
-    setScene(updated);
-    return updated.settings ?? [];
+    const updated = await refreshScene();
+    return updated?.settings ?? [];
+  }
+
+  async function setDashboardWidgetVisibility(widget: "clock" | "weather" | "timer" | "stopwatch" | "music" | "system_status", visible: boolean, widgetId?: string) {
+    try {
+      if (!await postRuntimeCommand({ type: "set_dashboard_widget_visibility", widget, visible, ...(widgetId ? { widget_id: widgetId } : {}) })) {
+        throw new Error(`Charlie did not confirm the ${widget} widget change.`);
+      }
+      await refreshScene();
+      setCommandNotice("");
+    } catch (error) {
+      setCommandNotice(error instanceof Error ? error.message : `The ${widget} widget could not be updated.`);
+      throw error;
+    }
+  }
+
+  async function updateDashboardTimer(scheduleId: string, text: string, delaySeconds: number, deliveryChannel: "web" | "voice") {
+    if (!await postRuntimeCommand({ type: "update_timer", schedule_id: scheduleId, text, delay_seconds: delaySeconds, delivery_channel: deliveryChannel })) {
+      throw new Error("Charlie did not confirm the timer change.");
+    }
+    await refreshScene();
+  }
+
+  async function controlDashboardStopwatch(action: "start" | "stop" | "reset") {
+    if (!await postRuntimeCommand({ type: "stopwatch_control", action })) {
+      throw new Error("Charlie did not confirm the stopwatch change.");
+    }
+    await refreshScene();
+  }
+
+  async function controlDashboardMedia(action: "previous track" | "play/pause" | "next track") {
+    const mediaAction = action === "previous track" ? "prev_track" : action === "next track" ? "next_track" : "play_pause";
+    if (!await postRuntimeCommand({ type: "media_control", action: mediaAction })) {
+      throw new Error("Charlie could not confirm the media command.");
+    }
+    await refreshScene();
   }
 
   function toggleMute() {
@@ -470,6 +610,7 @@ export function App() {
 
   const connected = Boolean(scene && streamOpen);
   const activeTasks = (scene?.tasks ?? []).filter((task) => !["completed", "failed", "cancelled"].includes(task.status)).slice(0, 24);
+  const cancellableTaskIds = new Set(activeTasks.map((task) => task.id));
   const runtimeWorking = sending || scene?.conversationState === "working" || Boolean(scene?.activeTurnId) || activeTasks.length > 0;
   const visibleOrbState = !connected ? "connecting" : runtimeWorking
     ? (["searching", "shaping", "weaving", "composing", "listening"].includes(orbState) ? orbState : workPhase)
@@ -477,13 +618,18 @@ export function App() {
   const focusedActivity = activity.filter((item) => !["tool_call", "tool_result"].includes(item.type));
   const visibleActivity = settings.activityDensity === "expanded" || focusedActivity.length === 0 ? activity : focusedActivity;
   const visibleResearchResults = researchResults.filter((result) => !dismissedResearchResultIds.includes(result.id));
+  const researchTabsHeight = Math.min(360, Math.max(40, visibleResearchResults.length * 48 - 8));
+  const researchProgressSteps = researchProgress?.turnId
+    ? activity.filter((item) => item.type === "research_progress" && item.turnId === researchProgress.turnId).slice(0, 5).reverse()
+    : [];
   const pendingApproval = activity.find((item) => item.type === "tool_approval_request"
     && item.channel === "web" && item.requestId) ?? scene?.pendingApproval;
   return (
     <PageBeam>
-      <main className={`workspace ${chatOpen ? "is-chat-open" : ""} ${drawerOpen ? "is-drawer-open" : ""} ${researchOpen && selectedResearchResult ? "has-research" : ""} ${settings.reducedMotion ? "is-reduced-motion" : ""}`}>
+      <main className={`workspace ${chatOpen ? "is-chat-open" : ""} ${drawerOpen ? "is-drawer-open" : ""} ${!chatOpen && researchOpen && selectedResearchResult ? "has-research" : ""} ${settings.reducedMotion ? "is-reduced-motion" : ""}`} style={{ "--research-tabs-height": `${researchTabsHeight}px` } as CSSProperties}>
       {!connected && <div className="runtime-notice" role="status">Reconnecting to Charlie. Previous messages are historical.</div>}
       {!chatOpen && commandNotice && <div className="runtime-notice" role="status">{commandNotice}</div>}
+      {reminderNotice && <div className="reminder-toast" role="status" aria-live="polite">{reminderNotice}</div>}
       <header className="topbar">
         <a className="wordmark" href="#home" aria-label="Charlie home">CHARLIE</a>
         <div className="connection" role="status" aria-live="polite">
@@ -501,13 +647,13 @@ export function App() {
             <button className="orb-action is-visible" type="button" aria-label="Chat" title="Chat" onClick={openChat}><ChatCircleText size={20} weight="regular" aria-hidden="true" /></button>
           </Liquid.Item>}
           {menuOpen && <Liquid.Item style={{ position: "absolute", left: 238, top: 198 }} x={170} y={-160} transition="bouncy" delay={40}>
-            <button className="orb-action is-visible" type="button" aria-label={micMuted ? "Unmute microphone" : "Mute microphone"} title={micMuted ? "Unmute microphone" : "Mute microphone"} disabled={!scene?.voice?.enabled} onClick={toggleMute}>{micMuted ? <MicrophoneSlash size={20} weight="regular" aria-hidden="true" /> : <Microphone size={20} weight="regular" aria-hidden="true" />}</button>
+            <button className="orb-action orb-action--right is-visible" type="button" aria-label={micMuted ? "Unmute microphone" : "Mute microphone"} title={micMuted ? "Unmute microphone" : "Mute microphone"} disabled={!scene?.voice?.enabled} onClick={toggleMute}>{micMuted ? <MicrophoneSlash size={20} weight="regular" aria-hidden="true" /> : <Microphone size={20} weight="regular" aria-hidden="true" />}</button>
           </Liquid.Item>}
           {menuOpen && <Liquid.Item style={{ position: "absolute", left: 238, top: 198 }} x={-170} y={160} transition="bouncy" delay={80}>
             <button className="orb-action is-visible" type="button" aria-label="Activity" title="Activity" onClick={openActivity}><Pulse size={20} weight="regular" aria-hidden="true" /></button>
           </Liquid.Item>}
           {menuOpen && <Liquid.Item style={{ position: "absolute", left: 238, top: 198 }} x={170} y={160} transition="bouncy" delay={120}>
-            <button className="orb-action is-visible" type="button" aria-label="Settings" title="Settings" onClick={openSettings}><GearSix size={20} weight="regular" aria-hidden="true" /></button>
+            <button className="orb-action orb-action--right is-visible" type="button" aria-label="Settings" title="Settings" onClick={openSettings}><GearSix size={20} weight="regular" aria-hidden="true" /></button>
           </Liquid.Item>}
           <Liquid.Item style={{ position: "absolute", left: 132, top: 92 }}>
             <button ref={presenceRef} className="presence" type="button" aria-expanded={menuOpen} aria-label={menuOpen ? "Close Charlie options" : "Open Charlie options"} onClick={toggleMenu}>
@@ -523,22 +669,25 @@ export function App() {
         </article> : <p className="empty-state">{sceneError}</p>}
       </section>
 
+      <DashboardWidgetsPanel widgets={scene?.widgets} sessionId={scene?.sessionId ?? ""} chatOpen={chatOpen} researching={Boolean(researchProgress?.text)} onWidgetVisibilityChange={setDashboardWidgetVisibility} onUpdateTimer={updateDashboardTimer} onStopwatchAction={controlDashboardStopwatch} onMediaCommand={controlDashboardMedia} />
+
       {settingsOpen && <SettingsPanel settings={settings} setSettings={setSettings} activeSection={activeSettingsSection} onSelectSection={setActiveSettingsSection} voice={scene?.voice} runtimeSettings={scene?.settings} onSaveSettings={saveRuntimeSettings} onVoiceState={setVoiceState} onClose={() => { setSettingsOpen(false); presenceRef.current?.focus(); }} />}
 
       {chatOpen && <div className="voice-composer-shell" style={{ "--composer-width": `${composerWidth}px` } as CSSProperties}>
-        <ChatBubbles bubbles={chatBubbles.filter((bubble) => !bubble.id.startsWith("research:"))} />
+        <ChatBubbles bubbles={chatBubbles} researchResults={researchResults} />
         <VoiceBeam className="voice-composer-beam" type="default" colorVariant="mono" theme="dark" scale={1} level={() => micMuted ? 0 : audioLevelRef.current} processing={runtimeWorking || (!micMuted && visibleOrbState === "working")} strength={0.72} idle={0.42} processingLevel={0.45}>
           <form className="composer composer--open" onSubmit={submit} aria-label="Send a message to Charlie">
             <button className="composer-close" type="button" aria-label="Close Chat" onClick={() => { setChatOpen(false); presenceRef.current?.focus(); }}>×</button>
             <label className="sr-only" htmlFor="message">Message Charlie</label>
-            <textarea ref={messageInputRef} id="message" value={message} rows={1} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder="Talk to Charlie…" autoComplete="off" />
+            <textarea ref={messageInputRef} id="message" value={message} rows={1} onChange={(event) => { messageEditGenerationRef.current += 1; setMessage(event.target.value); }} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder="Talk to Charlie…" autoComplete="off" />
             <button type="submit" disabled={!message.trim() || sending || !connected}>{sending ? "Sending" : "Send"}</button>
             <p className="command-notice sr-only" aria-live="polite">{commandNotice}</p>
           </form>
         </VoiceBeam>
       </div>}
 
-      {!researchOpen && visibleResearchResults.length > 0 && (
+      {researchProgress?.text && <ResearchProgressWidget progress={researchProgress} steps={researchProgressSteps.length ? researchProgressSteps : [researchProgress]} connected={connected} />}
+      {!chatOpen && visibleResearchResults.length > 0 && (
         <ResearchTabs
           results={visibleResearchResults}
           selectedId={selectedResearchResultId}
@@ -547,13 +696,9 @@ export function App() {
         />
       )}
 
-      {researchOpen && selectedResearchResult && (
+      {!chatOpen && researchOpen && selectedResearchResult && (
         <ResearchPanel
           result={selectedResearchResult}
-          results={visibleResearchResults}
-          selectedId={selectedResearchResultId}
-          onSelect={openResearchResult}
-          onDismiss={dismissResearchResult}
           onClose={() => setResearchOpen(false)}
         />
       )}
@@ -562,14 +707,14 @@ export function App() {
         title={pendingApproval.operationPreview || "Allow this action?"}
         reason={pendingApproval.summary || "Charlie needs your approval before continuing."}
         busy={approvalBusy || !connected} error={approvalError}
-        onDecision={(approved) => void decideApproval(pendingApproval.requestId!, approved)}
+        onDecision={(approved) => void decideApproval(pendingApproval, approved)}
       />}
 
       <aside id="activity-panel" className={`activity-panel ${drawerOpen ? "is-open" : ""}`} aria-label="Activity" aria-hidden={!drawerOpen}>
         <div className="drawer-heading"><h2>Activity</h2><button type="button" aria-label="Close activity" onClick={closeActivity}>Close</button></div>
         {activeTasks.length || visibleActivity.length ? <ol className="activity-list">
           {activeTasks.map((task) => <li key={`task-${task.id}`}><strong>{task.title}</strong><span>{task.currentAction || task.status}</span><button type="button" onClick={() => void sendRuntimeControl({ type: "cancel_task", task_id: task.id })}>Cancel task</button>{task.updatedAt && <time dateTime={task.updatedAt}>{task.updatedAt}</time>}</li>)}
-          {visibleActivity.map((item) => <li key={item.key}><strong>{activityLabel(item)}</strong>{item.summary && <span>{item.summary}</span>}{item.type === "tool_approval_request" && item.requestId && <div><button type="button" onClick={() => void sendRuntimeControl({ type: "approve", request_id: item.requestId })}>Approve</button><button type="button" onClick={() => void sendRuntimeControl({ type: "reject", request_id: item.requestId })}>Reject</button></div>}{item.timestamp && <time dateTime={item.timestamp}>{item.timestamp}</time>}</li>)}
+          {visibleActivity.map((item) => <li key={item.key}><strong>{activityLabel(item)}</strong>{item.summary && <span>{item.summary}</span>}{item.type === "tool_approval_request" && item.channel === "web" && item.requestId && <div><button type="button" disabled={approvalBusy || !connected} onClick={() => void decideApproval(item, true)}>Approve</button><button type="button" disabled={approvalBusy || !connected} onClick={() => void decideApproval(item, false)}>Decline</button></div>}{item.taskId && cancellableTaskIds.has(item.taskId) && <div><button type="button" disabled={!connected} onClick={() => void sendRuntimeControl({ type: "cancel_task", task_id: item.taskId })}>Cancel task</button></div>}{item.timestamp && <time dateTime={item.timestamp}>{item.timestamp}</time>}</li>)}
         </ol> : <p className="activity-empty">No activity in this Charlie session yet.</p>}
       </aside>
       {drawerOpen && <button className="drawer-scrim" type="button" aria-label="Close activity" onClick={closeActivity} />}
@@ -658,7 +803,7 @@ function RuntimeSettingsEditor({ id, hidden = false, fields, onSave }: { id: str
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState("");
   const obsolete = new Set(["EXA_API_KEY", "TAVILY_API_KEY", "RESEARCH_CRAWL_ENABLED", "RESEARCH_CRAWL_MAX_DEPTH", "RESEARCH_CRAWL_MAX_PAGES"]);
-  const editable = (fields ?? []).filter((field) => !/^(MCP_|PLUGIN)/.test(field.key) && !obsolete.has(field.key));
+  const editable = (fields ?? []).filter((field) => !obsolete.has(field.key));
   const shown = editable.filter((field) => `${field.label} ${field.key} ${field.group}`.toLowerCase().includes(search.toLowerCase()));
   const groups = [...new Set(shown.map((field) => field.group))];
   const displayValue = (field: RuntimeSetting): string | boolean => field.secret ? "" : field.type === "bool" ? field.value === true : Array.isArray(field.value) ? field.value.join(", ") : String(field.value ?? "");
@@ -716,132 +861,547 @@ function SettingSelect({ label, description, value, onChange, options }: { label
   return <label className="settings-row settings-row--select"><span><strong>{label}</strong><small>{description}</small></span><select value={value} onChange={(event) => onChange(event.target.value)}>{options.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select></label>;
 }
 
-function ChatBubbles({ bubbles }: { bubbles: ChatBubble[] }) {
+export function ChatBubbles({ bubbles, researchResults = [] }: { bubbles: ChatBubble[]; researchResults?: ResearchResultData[] }) {
+  const completedResearchTurns = new Set(researchResults.map((result) => result.turnId).filter((turnId): turnId is string => Boolean(turnId)));
+  const displayBubbles = bubbles.filter((bubble) => !(bubble.role === "charlie" && bubble.turnId
+    && completedResearchTurns.has(bubble.turnId) && !bubble.id.startsWith("research:")));
+  for (const result of researchResults) {
+    const reportBubbleId = `research:${result.id}`;
+    if (displayBubbles.some((bubble) => bubble.id === reportBubbleId)) continue;
+    const reportBubble: ChatBubble = {
+      id: reportBubbleId,
+      role: "charlie",
+      text: result.answer || result.text,
+      ...(result.turnId !== undefined ? { turnId: result.turnId } : {}),
+    };
+    const turnBubbleIndex = result.turnId
+      ? displayBubbles.findIndex((bubble) => bubble.role === "charlie" && bubble.turnId === result.turnId && !bubble.id.startsWith("research:"))
+      : -1;
+    if (turnBubbleIndex >= 0) {
+      displayBubbles[turnBubbleIndex] = reportBubble;
+      continue;
+    }
+    const requestIndex = result.turnId
+      ? displayBubbles.findIndex((bubble) => bubble.role === "you" && bubble.turnId === result.turnId)
+      : -1;
+    const queryIndex = requestIndex >= 0 ? requestIndex : displayBubbles.findIndex((bubble) => bubble.role === "you" && bubble.text === result.query);
+    const nextRequest = queryIndex < 0 ? -1 : displayBubbles.findIndex((bubble, index) => index > queryIndex && bubble.role === "you");
+    displayBubbles.splice(nextRequest < 0 ? displayBubbles.length : nextRequest, 0, reportBubble);
+  }
   const scrollRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { const node = scrollRef.current; if (node) node.scrollTop = node.scrollHeight; }, [bubbles]);
-  if (!bubbles.length) return null;
-  const rich = bubbles.slice(-2).some((bubble) => bubble.role === "charlie" && bubble.text.length > 900);
-  return <div ref={scrollRef} className={`chat-bubbles ${rich ? "is-rich" : ""}`} tabIndex={0} aria-label="Conversation history" aria-live="polite">
-    {bubbles.map((bubble) => <div className={`chat-bubble chat-bubble--${bubble.role}`} key={bubble.id}>{bubble.text.split(/(https?:\/\/[^\s]+)/g).map((part, index) => /^https?:\/\//.test(part) ? <a key={index} href={part} target="_blank" rel="noreferrer">{part}</a> : part)}</div>)}
+  const followOutput = useRef(true);
+  const [showLatest, setShowLatest] = useState(false);
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (node && followOutput.current) node.scrollTop = node.scrollHeight;
+  }, [bubbles, researchResults]);
+  if (!displayBubbles.length) return null;
+  const rich = displayBubbles.some((bubble) => bubble.id.startsWith("research:"))
+    || bubbles.slice(-2).some((bubble) => bubble.role === "charlie" && bubble.text.length > 900);
+  return <div className="chat-thread">
+    <div ref={scrollRef} className={`chat-bubbles ${rich ? "is-rich" : ""}`} tabIndex={0} aria-label="Conversation history" aria-live="polite"
+      onScroll={(event) => {
+        const node = event.currentTarget;
+        followOutput.current = node.scrollHeight - node.scrollTop - node.clientHeight <= 56;
+        setShowLatest(!followOutput.current);
+      }}>
+      {displayBubbles.map((bubble) => {
+      const result = researchResults.find((item) => bubble.id === `research:${item.id}`);
+      return <div className={`chat-bubble chat-bubble--${bubble.role}${result ? " chat-bubble--research" : ""}`} key={bubble.id}>
+        {bubble.role === "charlie" ? <ResearchPanel inline result={result ?? { id: bubble.id, query: "", text: bubble.text }} onClose={() => {}} />
+          : bubble.text}
+      </div>;
+      })}
+    </div>
+    {showLatest && <button type="button" className="chat-latest" onClick={() => {
+      const node = scrollRef.current;
+      if (node) node.scrollTop = node.scrollHeight;
+      followOutput.current = true;
+      setShowLatest(false);
+    }}>Jump to latest</button>}
   </div>;
 }
 
-function ResearchPanel({
-  result,
-  results,
-  selectedId,
-  onSelect,
-  onDismiss,
-  onClose,
-}: {
-  result: ResearchResultData;
-  results: ResearchResultData[];
-  selectedId: string | null;
-  onSelect: (id: string) => void;
-  onDismiss: (id: string) => void;
-  onClose: () => void;
+function formatWidgetDuration(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const remainder = total % 60;
+  return hours
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`
+    : `${minutes}:${String(remainder).padStart(2, "0")}`;
+}
+
+function weatherCodeLabel(code?: number): string {
+  if (code === undefined) return "Current weather";
+  if (code === 0) return "Clear sky";
+  if (code === 1) return "Mostly clear";
+  if (code === 2) return "Partly cloudy";
+  if (code === 3) return "Overcast";
+  if (code === 45 || code === 48) return "Fog";
+  if (code >= 51 && code <= 67 || code >= 80 && code <= 82) return "Rain";
+  if (code >= 71 && code <= 77 || code === 85 || code === 86) return "Snow";
+  if (code >= 95) return "Thunderstorm";
+  return "Current weather";
+}
+
+export function DashboardWidgetsPanel({ widgets, sessionId, chatOpen = false, researching, onWidgetVisibilityChange, onUpdateTimer, onStopwatchAction, onMediaCommand }: {
+  widgets?: DashboardWidgets;
+  sessionId: string;
+  chatOpen?: boolean;
+  researching: boolean;
+  onWidgetVisibilityChange: (widget: "clock" | "weather" | "timer" | "stopwatch" | "music" | "system_status", visible: boolean, widgetId?: string) => Promise<void>;
+  onUpdateTimer: (scheduleId: string, text: string, delaySeconds: number, deliveryChannel: "web" | "voice") => Promise<void>;
+  onStopwatchAction: (action: "start" | "stop" | "reset") => Promise<void>;
+  onMediaCommand: (action: "previous track" | "play/pause" | "next track") => Promise<void>;
 }) {
-  const marker = result.text.lastIndexOf("\n\nSources:\n");
-  const answer = result.answer || (marker >= 0 ? result.text.slice(0, marker) : result.text);
-  // Coverage is rendered from the structured gap list below. Drop the legacy
-  // markdown footer so partial reports do not explain the same gap twice.
-  const rawAnswer = result.gaps?.length
-    ? answer.replace(/\n\s*(?:\*{0,2}Gaps and Notes\*{0,2})\s*:\s*[\s\S]*$/i, "").trim()
-    : answer;
-  const sources: ResearchSource[] = result.sources && result.sources.length > 0 ? result.sources : (
-    marker >= 0 ? result.text.slice(marker + "\n\nSources:\n".length).split("\n").flatMap((line) => {
-      const match = line.match(/^\[(S\d+)\] (.*): (https?:\/\/\S+)$/);
-      if (!match) return [];
-      try {
-        const url = new URL(match[3]);
-        return url.hostname ? [{ id: match[1], title: match[2], url: url.href }] : [];
-      } catch { return []; }
-    }) : []
-  );
-
-  const formatSourceClass = (cls?: string) => {
-    switch (cls) {
-      case "official": return "Official";
-      case "official_store": return "Official Store";
-      case "retailer": return "Retailer Price";
-      case "official_unverified": return "Unverified Official";
-      case "review": return "Review";
-      case "news": return "News";
-      default: return "";
+  type WidgetId = "clock" | "weather" | "stopwatch" | "music" | "system_status" | `timer:${string}`;
+  type Position = { left: number; top: number };
+  type Positions = Partial<Record<WidgetId, Position>>;
+  const [now, setNow] = useState(() => Date.now());
+  const [positions, setPositions] = useState<Positions>({});
+  const [dismissed, setDismissed] = useState<Partial<Record<WidgetId, string>>>({});
+  const [editingTimerId, setEditingTimerId] = useState<string | null>(null);
+  const [timerDraft, setTimerDraft] = useState({ text: "", seconds: "" });
+  const [stopwatchEditing, setStopwatchEditing] = useState(false);
+  const [editError, setEditError] = useState("");
+  const [mediaError, setMediaError] = useState("");
+  const [mediaBusy, setMediaBusy] = useState(false);
+  const widgetRefs = useRef<Partial<Record<WidgetId, HTMLElement | null>>>({});
+  const dragRef = useRef<{ widgetId: WidgetId; pointerId: number; x: number; y: number; left: number; top: number } | null>(null);
+  const positionKey = `charlie-dashboard-widget-positions:${sessionId}`;
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, []);
+  useEffect(() => {
+    try {
+      const saved: unknown = JSON.parse(window.localStorage.getItem(positionKey) ?? "null");
+      const next: Positions = {};
+      if (saved && typeof saved === "object") for (const [key, value] of Object.entries(saved)) {
+        const validId = key === "clock" || key === "weather" || key === "stopwatch" || key === "music" || key === "system_status" || key.startsWith("timer:");
+        if (validId && value && typeof value === "object"
+          && Number.isFinite((value as { left?: unknown }).left)
+          && Number.isFinite((value as { top?: unknown }).top)) {
+          next[key as WidgetId] = { left: (value as Position).left, top: (value as Position).top };
+        }
+      }
+      setPositions(next);
+    } catch { setPositions({}); }
+  }, [positionKey]);
+  function commitPosition(id: WidgetId, position: Position) {
+    setPositions((current) => {
+      const next = { ...current, [id]: position };
+      try { window.localStorage.setItem(positionKey, JSON.stringify(next)); } catch { /* Position is a convenience. */ }
+      return next;
+    });
+  }
+  function dismissWidget(id: WidgetId, signature: string, widget: "clock" | "weather" | "timer" | "stopwatch" | "music" | "system_status", widgetId?: string) {
+    setDismissed((current) => ({ ...current, [id]: signature }));
+    void onWidgetVisibilityChange(widget, false, widgetId).catch(() => {
+      setDismissed((current) => {
+        if (current[id] !== signature) return current;
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
+    });
+  }
+  function editTimer(timer: DashboardWidgets["timers"][number]) {
+    setEditError("");
+    setTimerDraft({
+      text: timer.text === "Timer finished" ? "" : timer.text,
+      seconds: String(Math.max(1, Math.ceil((Date.parse(timer.dueAt) - now) / 1000))),
+    });
+    setEditingTimerId(timer.id);
+  }
+  async function saveTimer(timer: DashboardWidgets["timers"][number]) {
+    const seconds = Number(timerDraft.seconds);
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      setEditError("Enter a duration greater than zero.");
+      return;
     }
+    try {
+      await onUpdateTimer(timer.id, timerDraft.text.trim() || "Timer finished", seconds, timer.deliveryChannel ?? "web");
+      setEditingTimerId(null);
+      setEditError("");
+    } catch (error) {
+      setEditError(error instanceof Error ? error.message : "Timer could not be updated.");
+    }
+  }
+  async function runStopwatchAction(action: "start" | "stop" | "reset") {
+    setEditError("");
+    try { await onStopwatchAction(action); }
+    catch (error) { setEditError(error instanceof Error ? error.message : "Stopwatch could not be updated."); }
+  }
+  async function runMediaCommand(action: "previous track" | "play/pause" | "next track") {
+    setMediaError("");
+    setMediaBusy(true);
+    try { await onMediaCommand(action); }
+    catch (error) { setMediaError(error instanceof Error ? error.message : "Media command was not confirmed."); }
+    finally { setMediaBusy(false); }
+  }
+  const timers = widgets?.timers ?? [];
+  const stopwatch = widgets?.stopwatch;
+  const weather = widgets?.weather;
+  const media = widgets?.media;
+  const systemStatus = widgets?.systemStatus;
+  const hiddenWidgets = new Set(widgets?.hiddenWidgets ?? []);
+  const hiddenWidgetsKey = [...hiddenWidgets].sort().join("|");
+  const hiddenByRuntime = (id: WidgetId) => id === "clock"
+    ? widgets?.clockVisible === false
+    : hiddenWidgets.has(id) || (id.startsWith("timer:") && hiddenWidgets.has("timer"));
+  useEffect(() => {
+    setDismissed((current) => {
+      const next = { ...current };
+      let changed = false;
+      for (const id of Object.keys(next) as WidgetId[]) if (!hiddenByRuntime(id)) {
+        delete next[id];
+        changed = true;
+      }
+      return changed ? next : current;
+    });
+  }, [hiddenWidgetsKey, widgets?.clockVisible]);
+  const hasMediaTrack = Boolean(media?.title || media?.artist) && media?.available !== false;
+  const time = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(now);
+  const date = new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric" }).format(now);
+  const hasClock = widgets?.clockVisible !== false && dismissed.clock !== "clock";
+  const visibleTimers = timers.filter((timer) => !hiddenByRuntime(`timer:${timer.id}`) && dismissed[`timer:${timer.id}`] !== JSON.stringify(timer));
+  const weatherSignature = weather ? JSON.stringify(weather) : "";
+  const stopwatchSignature = stopwatch ? JSON.stringify(stopwatch) : "";
+  const mediaSignature = media ? JSON.stringify(media) : "";
+  const systemStatusSignature = JSON.stringify(systemStatus ?? null);
+  const showWeather = Boolean(weather && !hiddenByRuntime("weather") && dismissed.weather !== weatherSignature);
+  const showStopwatch = Boolean(stopwatch && !hiddenByRuntime("stopwatch") && dismissed.stopwatch !== stopwatchSignature);
+  const showMedia = Boolean(media && !hiddenByRuntime("music") && dismissed.music !== mediaSignature);
+  const showSystemStatus = Boolean(systemStatus && !hiddenByRuntime("system_status") && dismissed.system_status !== systemStatusSignature);
+  const systemMetrics = systemStatus ? [
+    { label: "CPU", value: systemStatus.cpuPercent },
+    { label: "RAM", value: systemStatus.memoryPercent },
+    ...(systemStatus.gpuPercent !== undefined ? [{ label: "GPU", value: systemStatus.gpuPercent }] : []),
+    ...(systemStatus.diskPercent !== undefined ? [{ label: "Disk", value: systemStatus.diskPercent }] : []),
+  ] : [];
+  const activeWidgetIds: WidgetId[] = [
+    ...(hasClock ? ["clock" as const] : []),
+    ...visibleTimers.map((timer) => `timer:${timer.id}` as WidgetId),
+    ...(showWeather ? ["weather" as const] : []),
+    ...(showStopwatch ? ["stopwatch" as const] : []),
+    ...(showMedia ? ["music" as const] : []),
+    ...(showSystemStatus ? ["system_status" as const] : []),
+  ];
+  const activeWidgetKey = activeWidgetIds.join("|");
+  const defaultPosition = (id: WidgetId): Position => {
+    const cardWidth = id === "music" ? 280 : 240;
+    const center = Math.max(8, Math.min(window.innerWidth - cardWidth - 8, (window.innerWidth - cardWidth) / 2));
+    if (window.innerWidth < 760) {
+      if (id === "clock") return { left: center, top: 64 };
+      if (id === "weather") return { left: center, top: 140 };
+      if (id === "stopwatch") return { left: center, top: 216 };
+      if (id === "music") return { left: center, top: 292 };
+      if (id === "system_status") return { left: center, top: 368 + timers.length * 76 };
+      const timerIndex = Math.max(0, timers.findIndex((timer) => id === `timer:${timer.id}`));
+      return { left: center, top: 368 + timerIndex * 76 };
+    }
+    const left = Math.max(8, center - 252);
+    const right = Math.max(8, Math.min(window.innerWidth - cardWidth - 8, center + 252));
+    if (id === "clock") return { left: center, top: 64 };
+    if (id === "weather") return { left, top: 64 };
+    if (id === "stopwatch") return { left: center, top: 136 };
+    if (id === "music") return { left: center, top: 208 };
+    if (id === "system_status") return { left: right, top: timers.length > 3 ? 360 : 208 };
+    const timerIndex = Math.max(0, timers.findIndex((timer) => id === `timer:${timer.id}`));
+    const slots = [
+      { left: right, top: 64 },
+      { left: right, top: 136 },
+      { left, top: 136 },
+      { left: right, top: 280 },
+    ];
+    return slots[timerIndex] ?? { left, top: 208 + Math.floor((timerIndex - 3) / 2) * 76 };
   };
+  const widgetStyle = (id: WidgetId): CSSProperties => chatOpen ? {} : ({ position: "absolute", width: id === "music" ? 280 : 240, ...(positions[id] ?? defaultPosition(id)) });
+  useEffect(() => {
+    setPositions((current) => {
+      const next = { ...current };
+      for (const id of activeWidgetIds) if (!next[id]) next[id] = defaultPosition(id);
+      if (Object.keys(next).length !== Object.keys(current).length) {
+        try { window.localStorage.setItem(positionKey, JSON.stringify(next)); } catch { /* Position is a convenience. */ }
+      }
+      return next;
+    });
+  }, [activeWidgetKey, positionKey]);
+  if (activeWidgetIds.length === 0) return null;
+  function startDrag(id: WidgetId, event: ReactPointerEvent<HTMLElement>) {
+    if (chatOpen || event.button !== 0) return;
+    const rect = widgetRefs.current[id]?.getBoundingClientRect();
+    if (!rect) return;
+    dragRef.current = { widgetId: id, pointerId: event.pointerId, x: event.clientX, y: event.clientY, left: rect.left, top: rect.top };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
 
-  const inline = (text: string) => text.split(/(\*\*[^*]+\*\*|\[S\d+\])/g).map((part, index) => {
-    if (part.startsWith("**")) return <strong key={index}>{part.slice(2, -2)}</strong>;
-    const source = sources.find((item) => `[${item.id}]` === part);
-    return source ? <a className="research-citation" key={index} href={source.url} target="_blank" rel="noreferrer" aria-label={`Source ${source.id}: ${source.title}`}>{part}</a> : part;
-  });
+  function moveByKeyboard(id: WidgetId, event: ReactKeyboardEvent<HTMLElement>) {
+    if (chatOpen) return;
+    const delta = event.shiftKey ? 24 : 8;
+    const movement: Record<string, [number, number]> = {
+      ArrowLeft: [-delta, 0], ArrowRight: [delta, 0], ArrowUp: [0, -delta], ArrowDown: [0, delta],
+    };
+    const offset = movement[event.key];
+    if (!offset) return;
+    event.preventDefault();
+    const rect = widgetRefs.current[id]?.getBoundingClientRect();
+    const current = positions[id] ?? defaultPosition(id);
+    commitPosition(id, {
+      left: Math.max(8, Math.min(window.innerWidth - (rect?.width ?? 240) - 8, current.left + offset[0])),
+      top: Math.max(8, Math.min(window.innerHeight - (rect?.height ?? 80) - 8, current.top + offset[1])),
+    });
+  }
 
-  const blocks = rawAnswer.split(/\n\s*\n/).map((block, index) => {
-    const lines = block.trim().split("\n");
-    if (!block.trim() || /^[-*_]{3,}$/.test(block.trim())) return null;
-    if (lines.length > 1 && lines[0].includes("|") && /^[\s|:-]+$/.test(lines[1])) {
-      const cells = (line: string) => line.replace(/^\s*\||\|\s*$/g, "").split("|").map((cell) => cell.trim());
-      const rows = lines.slice(2).map(cells).filter((row) => row.some((cell) => cell && cell !== "—" && cell !== "-"));
-      return <div className="research-table" key={index}><table><thead><tr>{cells(lines[0]).map((cell, i) => <th key={i}>{inline(cell)}</th>)}</tr></thead><tbody>{rows.map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, i) => <td key={i}>{inline(cell)}</td>)}</tr>)}</tbody></table></div>;
-    }
-    if (lines.every((line) => /^\s*(?:[-*]|\d+[.)])\s+/.test(line))) return <ul key={index}>{lines.map((line, i) => <li key={i}>{inline(line.replace(/^\s*(?:[-*]|\d+[.)])\s+/, ""))}</li>)}</ul>;
-    const recommendation = /^\s*\*{0,2}Recommendation\*{0,2}\s*:/i.test(block);
-    return <div className={recommendation ? "research-recommendation" : undefined} key={index}>{lines.map((line, i) => /^#{1,6}\s+/.test(line) ? <h3 key={i}>{inline(line.replace(/^#{1,6}\s+/, ""))}</h3> : <p key={i}>{inline(line)}</p>)}</div>;
-  });
-
-  return (
-    <article className="research-panel" aria-label="Research answer">
-      <header>
-        <div>
-          <div className="research-header-badges">
-            <span className="research-label">Research</span>
-            {result.partial && <span className="research-badge research-badge--partial">Partial</span>}
-          </div>
-          <h2>{result.query}</h2>
-        </div>
-        <button type="button" onClick={onClose} aria-label="Close research answer">×</button>
-      </header>
-      <ResearchTabs
-        results={results}
-        selectedId={selectedId}
-        onSelect={onSelect}
-        onDismiss={onDismiss}
-        placement="panel"
-      />
-      <div className="research-body">
-        {blocks}
-        {result.gaps && result.gaps.length > 0 && (
-          <div className="research-gaps">
-            <h4>Coverage Notes</h4>
-            <ul>
-              {result.gaps.map((gap, i) => <li key={i}>{gap}</li>)}
-            </ul>
-          </div>
-        )}
-        <details className="research-sources" open>
-          <summary>Sources ({sources.length})</summary>
-          <ol>
-            {sources.map((source) => {
-              const chip = formatSourceClass(source.class);
-              return (
-                <li key={source.id}>
-                  <a href={source.url} target="_blank" rel="noreferrer">
-                    <span className="research-source-id">{source.id}</span>
-                    <span className="research-source-heading">
-                      <strong className="research-source-title">{source.title}</strong>
-                      {chip && <span className={`research-source-chip research-source-chip--${source.class}`}>{chip}</span>}
-                    </span>
-                    <small className="research-source-host">{new URL(source.url).hostname}</small>
-                  </a>
-                </li>
-              );
-            })}
-          </ol>
-        </details>
+  return <aside
+    className={`assistant-widgets ${chatOpen ? "is-chat-open" : ""} ${researching ? "is-progressing" : ""}`}
+    aria-label="Dashboard widgets"
+    aria-description={chatOpen ? "Widgets are arranged beside chat. Close chat to reposition them." : undefined}
+    onPointerMove={(event: ReactPointerEvent<HTMLElement>) => {
+      const drag = dragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      const rect = widgetRefs.current[drag.widgetId]?.getBoundingClientRect();
+      setPositions((current) => ({
+        ...current,
+        [drag.widgetId]: {
+          left: Math.max(8, Math.min(window.innerWidth - (rect?.width ?? 240) - 8, drag.left + event.clientX - drag.x)),
+          top: Math.max(8, Math.min(window.innerHeight - (rect?.height ?? 80) - 8, drag.top + event.clientY - drag.y)),
+        },
+      }));
+    }}
+    onPointerUp={(event: ReactPointerEvent<HTMLElement>) => {
+      const drag = dragRef.current;
+      if (drag?.pointerId === event.pointerId) {
+        const rect = widgetRefs.current[drag.widgetId]?.getBoundingClientRect();
+        if (rect) commitPosition(drag.widgetId, { left: rect.left, top: rect.top });
+        dragRef.current = null;
+      }
+    }}
+    onPointerCancel={() => { dragRef.current = null; }}
+  >
+    {hasClock && <section
+      ref={(node) => { widgetRefs.current.clock = node; }}
+      data-widget-id="clock"
+      className="assistant-widget assistant-widget--clock"
+      style={widgetStyle("clock")}
+      aria-label="Local clock"
+    >
+      <div
+        className="assistant-widget__drag"
+        role="button"
+        tabIndex={0}
+        aria-label="Move clock widget; use arrow keys to reposition"
+        aria-disabled={chatOpen}
+        title={chatOpen ? "Close chat to reposition" : "Drag to move · arrow keys to reposition"}
+        onPointerDown={(event: ReactPointerEvent<HTMLDivElement>) => startDrag("clock", event)}
+        onKeyDown={(event: ReactKeyboardEvent<HTMLDivElement>) => moveByKeyboard("clock", event)}
+      >
+        <span className="assistant-widget__label">LOCAL TIME</span>
+        <span className="assistant-widget__secondary">{date}</span>
       </div>
-    </article>
-  );
+      <time className="assistant-widget__clock" dateTime={new Date(now).toISOString()}>{time}</time>
+      <button className="assistant-widget__close" type="button" aria-label="Close clock widget" title="Close clock widget" onClick={() => dismissWidget("clock", "clock", "clock")}><X size={13} weight="bold" /></button>
+    </section>}
+    {showWeather && weather && <section
+      ref={(node) => { widgetRefs.current.weather = node; }}
+      data-widget-id="weather"
+      className="assistant-widget assistant-widget--weather"
+      style={widgetStyle("weather")}
+      aria-label={`Weather for ${weather.location}`}
+    >
+      <header
+        className="assistant-widget__drag"
+        role="button"
+        tabIndex={0}
+        aria-label="Move weather widget; use arrow keys to reposition"
+        aria-disabled={chatOpen}
+        title={chatOpen ? "Close chat to reposition" : "Drag to move · arrow keys to reposition"}
+        onPointerDown={(event: ReactPointerEvent<HTMLDivElement>) => startDrag("weather", event)}
+        onKeyDown={(event: ReactKeyboardEvent<HTMLDivElement>) => moveByKeyboard("weather", event)}
+      ><span className="assistant-widget__label">{weather.location}</span><span className="assistant-widget__secondary">{weatherCodeLabel(weather.weatherCode)}</span></header>
+      <strong className="assistant-widget__temperature">{weather.temperature}{weather.temperatureUnit}</strong>
+      <div className="assistant-widget__metrics">
+        {weather.feelsLike !== undefined && <span><small>Feels like</small><strong>{weather.feelsLike}{weather.temperatureUnit}</strong></span>}
+        {weather.sunset && <span><small>Sunset</small><strong>{weather.sunset.slice(11, 16)}</strong></span>}
+        {weather.windSpeed !== undefined && <span><small>Wind</small><strong>{weather.windSpeed} {weather.windSpeedUnit}</strong></span>}
+      </div>
+      {weather.observedAt && <span className="assistant-widget__updated">Updated {weather.observedAt.replace("T", " ").slice(0, 16)}</span>}
+      <button className="assistant-widget__close" type="button" aria-label="Close weather widget" title="Close weather widget" onClick={() => dismissWidget("weather", weatherSignature, "weather")}><X size={13} weight="bold" /></button>
+    </section>}
+    {visibleTimers.map((timer) => {
+      const id = `timer:${timer.id}` as WidgetId;
+      const signature = JSON.stringify(timer);
+      const remaining = Math.max(0, Math.ceil((Date.parse(timer.dueAt) - now) / 1000));
+      const unnamed = !timer.text || timer.text === "Timer finished";
+      return <section
+        ref={(node) => { widgetRefs.current[id] = node; }}
+        key={timer.id}
+        data-widget-id={id}
+        className="assistant-widget assistant-widget--timer"
+        style={widgetStyle(id)}
+        aria-label={`Timer ${timer.text === "Timer finished" ? "finishing in" : timer.text}`}
+      >
+      <div
+        className="assistant-widget__drag"
+        role="button"
+        tabIndex={0}
+        aria-label={`Move timer ${timer.text}; use arrow keys to reposition`}
+        aria-disabled={chatOpen}
+        title={chatOpen ? "Close chat to reposition" : "Drag to move · arrow keys to reposition"}
+        onPointerDown={(event: ReactPointerEvent<HTMLDivElement>) => startDrag(id, event)}
+        onKeyDown={(event: ReactKeyboardEvent<HTMLDivElement>) => moveByKeyboard(id, event)}
+      ><span className="assistant-widget__label">TIMER</span></div>
+      {editingTimerId === timer.id ? <form className="assistant-widget__editor" onSubmit={(event) => { event.preventDefault(); void saveTimer(timer); }}>
+        <label>Label <input value={timerDraft.text} maxLength={120} onChange={(event) => setTimerDraft((draft) => ({ ...draft, text: event.target.value }))} placeholder="Optional" /></label>
+        <label>Seconds remaining <input type="number" min="1" step="1" value={timerDraft.seconds} onChange={(event) => setTimerDraft((draft) => ({ ...draft, seconds: event.target.value }))} /></label>
+        <div className="assistant-widget__edit-actions"><button type="submit">Save</button><button type="button" onClick={() => { setEditingTimerId(null); setEditError(""); }}>Cancel</button></div>
+        {editError && <span className="assistant-widget__error" role="alert">{editError}</span>}
+      </form> : <div className="assistant-widget__timer">
+        <span>{unnamed ? "Finishing in" : timer.text}</span><strong>{formatWidgetDuration(remaining)}</strong>
+      </div>}
+      <div className="assistant-widget__actions">
+        {editingTimerId !== timer.id && <button type="button" aria-label={`Edit timer ${timer.text}`} title="Edit timer" onClick={() => editTimer(timer)}>Edit</button>}
+        <button className="assistant-widget__close" type="button" aria-label="Close timer widget" title="Close timer widget" onClick={() => dismissWidget(id, signature, "timer", timer.id)}><X size={13} weight="bold" /></button>
+      </div>
+    </section>;
+    })}
+    {showMedia && media && <section
+      ref={(node) => { widgetRefs.current.music = node; }}
+      data-widget-id="music"
+      className="assistant-widget assistant-widget--music"
+      style={widgetStyle("music")}
+      aria-label="Now playing"
+    >
+      <div
+        className="assistant-widget__drag"
+        role="button"
+        tabIndex={0}
+        aria-label="Move music widget; use arrow keys to reposition"
+        aria-disabled={chatOpen}
+        title={chatOpen ? "Close chat to reposition" : "Drag to move · arrow keys to reposition"}
+        onPointerDown={(event: ReactPointerEvent<HTMLDivElement>) => startDrag("music", event)}
+        onKeyDown={(event: ReactKeyboardEvent<HTMLDivElement>) => moveByKeyboard("music", event)}
+      ><span className="assistant-widget__label">NOW PLAYING</span></div>
+      {hasMediaTrack ? <div className="assistant-widget__media-main">
+        {media.artUri && <img className="assistant-widget__media-art" src={media.artUri} alt="" aria-hidden="true" />}
+        <div className="assistant-widget__media-copy">
+          <strong className="assistant-widget__music-title" title={media.title || "Unknown title"}>{media.title || "Unknown title"}</strong>
+          <span className="assistant-widget__secondary">{media.artist || "Unknown artist"}</span>
+        </div>
+      </div> : <span className="assistant-widget__secondary">{media.adapterAvailable === false ? "Media controls unavailable" : "No active media session"}</span>}
+      <div className="assistant-widget__media-meta" aria-live="polite">
+        {media.app && <span className="assistant-widget__secondary">{media.app}</span>}
+        <span className="assistant-widget__media-status" data-status={media.status}>{media.status.replaceAll("_", " ")}</span>
+      </div>
+      <div className="assistant-widget__media-controls" aria-label="Media controls">
+        <button type="button" aria-label="Previous track" disabled={(!media.available && !hasMediaTrack) || mediaBusy} onClick={() => void runMediaCommand("previous track")}><SkipBack size={15} weight="fill" aria-hidden="true" /></button>
+        <button type="button" aria-label={mediaBusy ? "Updating playback status" : media.status === "playing" ? "Pause playback" : "Resume playback"} aria-busy={mediaBusy} disabled={(!media.available && !hasMediaTrack) || mediaBusy} onClick={() => void runMediaCommand("play/pause")}>
+          {media.status === "playing" ? <Pause size={15} weight="fill" aria-hidden="true" /> : <Play size={15} weight="fill" aria-hidden="true" />}
+        </button>
+        <button type="button" aria-label="Next track" disabled={(!media.available && !hasMediaTrack) || mediaBusy} onClick={() => void runMediaCommand("next track")}><SkipForward size={15} weight="fill" aria-hidden="true" /></button>
+      </div>
+      {mediaError && <span className="assistant-widget__error" role="alert">{mediaError}</span>}
+      <button className="assistant-widget__close" type="button" aria-label="Close media widget" title="Close media widget" onClick={() => dismissWidget("music", mediaSignature, "music")}><X size={13} weight="bold" /></button>
+    </section>}
+    {showStopwatch && stopwatch && <section
+      ref={(node) => { widgetRefs.current.stopwatch = node; }}
+      data-widget-id="stopwatch"
+      className="assistant-widget assistant-widget--stopwatch"
+      style={widgetStyle("stopwatch")}
+      aria-label={`Stopwatch ${stopwatch.state}`}
+    >
+      <div
+        className="assistant-widget__drag"
+        role="button"
+        tabIndex={0}
+        aria-label="Move stopwatch widget; use arrow keys to reposition"
+        aria-disabled={chatOpen}
+        title={chatOpen ? "Close chat to reposition" : "Drag to move · arrow keys to reposition"}
+        onPointerDown={(event: ReactPointerEvent<HTMLDivElement>) => startDrag("stopwatch", event)}
+        onKeyDown={(event: ReactKeyboardEvent<HTMLDivElement>) => moveByKeyboard("stopwatch", event)}
+      ><span className="assistant-widget__label">STOPWATCH</span></div>
+      <strong className="assistant-widget__time">{formatWidgetDuration(stopwatch.elapsedSeconds + (stopwatch.state === "running" ? (now - Date.parse(stopwatch.sampledAt)) / 1000 : 0))}</strong>
+      <span className="assistant-widget__secondary">{stopwatch.state === "running" ? "Running" : "Stopped"}</span>
+      <div className="assistant-widget__actions">
+        <button type="button" aria-label="Edit stopwatch" title="Edit stopwatch" onClick={() => { setStopwatchEditing((editing) => !editing); setEditError(""); }}>Edit</button>
+        <button className="assistant-widget__close" type="button" aria-label="Close stopwatch widget" title="Close stopwatch widget" onClick={() => dismissWidget("stopwatch", stopwatchSignature, "stopwatch")}><X size={13} weight="bold" /></button>
+      </div>
+      {stopwatchEditing && <div className="assistant-widget__edit-actions">
+        <button type="button" aria-label={stopwatch.state === "running" ? "Pause stopwatch" : "Resume stopwatch"} onClick={() => void runStopwatchAction(stopwatch.state === "running" ? "stop" : "start")}>{stopwatch.state === "running" ? "Pause" : "Resume"}</button>
+        <button type="button" aria-label="Reset stopwatch" onClick={() => void runStopwatchAction("reset")}>Reset</button>
+        {editError && <span className="assistant-widget__error" role="alert">{editError}</span>}
+      </div>}
+    </section>}
+    {showSystemStatus && <section
+      ref={(node) => { widgetRefs.current.system_status = node; }}
+      data-widget-id="system_status"
+      className="assistant-widget assistant-widget--system-status"
+      style={widgetStyle("system_status")}
+      aria-label="System status"
+    >
+      <div
+        className="assistant-widget__drag"
+        role="button"
+        tabIndex={0}
+        aria-label="Move system status widget; use arrow keys to reposition"
+        aria-disabled={chatOpen}
+        title={chatOpen ? "Close chat to reposition" : "Drag to move · arrow keys to reposition"}
+        onPointerDown={(event: ReactPointerEvent<HTMLDivElement>) => startDrag("system_status", event)}
+        onKeyDown={(event: ReactKeyboardEvent<HTMLDivElement>) => moveByKeyboard("system_status", event)}
+      ><span className="assistant-widget__label">SYSTEM STATUS</span></div>
+      <div className="assistant-widget__system-metrics" aria-label="Live system usage">
+        {systemMetrics.map(({ label, value }) => <div
+          key={label}
+          className="assistant-widget__system-metric"
+          role="meter"
+          aria-label={`${label} usage`}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={value}
+          aria-valuetext={`${value.toFixed(0)} percent`}
+        >
+          <span className="assistant-widget__system-label">{label}</span>
+          <strong>{value.toFixed(0)}%</strong>
+          <span className="assistant-widget__system-meter" aria-hidden="true"><span style={{ width: `${value}%` }} /></span>
+        </div>)}
+      </div>
+      {systemStatus?.uptimeSeconds !== undefined && <span className="assistant-widget__secondary">Uptime {formatWidgetDuration(Math.floor(systemStatus.uptimeSeconds))}</span>}
+      <button className="assistant-widget__close" type="button" aria-label="Close system status widget" title="Close system status widget" onClick={() => dismissWidget("system_status", systemStatusSignature, "system_status")}><X size={13} weight="bold" /></button>
+    </section>}
+  </aside>;
+}
+
+export function ResearchProgressWidget({ progress, steps = [progress], connected }: { progress: RuntimeEvent; steps?: RuntimeEvent[]; connected: boolean }) {
+  const [collapsed, setCollapsed] = useState(false);
+  const detailsId = useId();
+  return <aside className="research-progress-widget" data-collapsed={collapsed} role="status" aria-label="Research progress" aria-live="polite">
+    <div className="research-progress-heading">
+      {progress.query && <strong>{progress.query}</strong>}
+      <button
+        className="research-progress-toggle"
+        type="button"
+        aria-label={`${collapsed ? "Expand" : "Collapse"} research progress details`}
+        aria-expanded={!collapsed}
+        aria-controls={detailsId}
+        title={`${collapsed ? "Expand" : "Collapse"} research progress details`}
+        onClick={() => setCollapsed((value) => !value)}
+      ><CaretDown size={14} weight="bold" aria-hidden="true" /></button>
+    </div>
+    {(progress.sourceCount !== undefined || progress.evidenceCount !== undefined) && <p className="research-acquisition-summary">
+      {progress.sourceCount !== undefined && `${progress.sourceCount} pages read`}
+      {progress.evidenceCount !== undefined && `${progress.sourceCount !== undefined ? " · " : ""}${progress.evidenceCount} evidence passages`}
+    </p>}
+    {collapsed && progress.text && <p className="research-progress-current">{progress.text}</p>}
+    <ol id={detailsId} className="research-progress-steps" hidden={collapsed}>
+      {steps.map((step, index) => <li key={step.id ?? `${step.stage ?? "research"}-${step.timestamp ?? index}`} aria-current={index === steps.length - 1 ? "step" : undefined}>
+        <span>{step.stage?.replaceAll("_", " ") || "Research"}</span>
+        <p>{step.text}</p>
+      </li>)}
+    </ol>
+    {!connected && <span>Connection lost. Last update: {progress.text}</span>}
+  </aside>;
 }
 
 function OrbPreview() {

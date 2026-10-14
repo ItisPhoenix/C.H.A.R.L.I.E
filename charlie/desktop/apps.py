@@ -186,14 +186,73 @@ def _wait_for_process_exit(process_name: str, timeout_s: float = 0.75) -> bool:
         time.sleep(0.05)
 
 
-def close_apps(matched_apps: list[str], launched_processes: list[str]) -> str:
+def _basename(value: str) -> str:
+    return value.replace("\\", "/").rsplit("/", 1)[-1].casefold()
+
+
+def _close_window_targets(app: str, titles: tuple[str, ...], process: str = "") -> list[dict]:
+    """Live window identities matching an app's resolved titles or exact process name."""
+    try:
+        from charlie.desktop.windows import list_windows, window_identity, window_target_is_current
+
+        wanted_titles = tuple(title.strip().casefold() for title in titles if title.strip())
+        wanted_process = _basename(process)
+        matches: list[dict] = []
+        for item in list_windows():
+            hwnd = int(item.get("hwnd") or 0)
+            title = str(item.get("title") or "")
+            if not hwnd or not title:
+                continue
+            identity = window_identity(hwnd, title)
+            if identity is None or not window_target_is_current(identity):
+                continue
+            by_title = any(wanted in title.casefold() for wanted in wanted_titles)
+            by_process = bool(wanted_process) and wanted_process in {
+                _basename(str(identity.get("process_name") or "")),
+                _basename(str(identity.get("executable") or "")),
+            }
+            if by_title or by_process:
+                matches.append(identity)
+        return matches
+    except Exception:
+        logger.warning("Close target resolution failed for %s (%s)", app, process, exc_info=True)
+        return []
+
+
+def _wait_for_instance_exit(identity: dict, timeout_s: float = 0.75) -> bool:
+    """Wait for the exact resolved PID to terminate, not for a matching name to disappear."""
+    import psutil
+
+    pid = int(identity["pid"])
+    created = float(identity.get("create_time") or 0.0)
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            alive = not created or abs(psutil.Process(pid).create_time() - created) < 0.01
+        except psutil.NoSuchProcess:
+            return True
+        except Exception:
+            alive = True
+        if not alive:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def close_apps(
+    matched_apps: list[str], launched_processes: list[str], *, approved: bool = False
+) -> str:
     """Close resolved apps and report per-app process/window verification."""
     if sys.platform != "win32":
         return f"App closing is only supported on Windows (detected {sys.platform})."
+    if not approved:
+        return f"Closing {format_app_list([str(app) for app in matched_apps])} needs approval; nothing was closed."
 
     success_apps: list[str] = []
     not_running_apps: list[str] = []
     failed_apps: list[str] = []
+    ambiguous_apps: list[str] = []
     for index, app in enumerate(matched_apps):
         key = str(app).strip().casefold()
         entry = APP_REGISTRY.get(key)
@@ -202,20 +261,21 @@ def close_apps(matched_apps: list[str], launched_processes: list[str]) -> str:
             continue
 
         window_closed: Optional[bool] = None
-        for title in entry.close_window_titles:
-            try:
+        if entry.close_window_titles:
+            matches = _close_window_targets(str(app), entry.close_window_titles)
+            if len(matches) > 1:
+                ambiguous_apps.append(str(app))
+                continue
+            if matches:
                 from charlie.desktop import windows as desktop_windows
 
-                if desktop_windows._user32 is None:
-                    break
-                if desktop_windows.find_window(title) is not None:
-                    logger.info("Closing %s through resolved window identity '%s'", app, title)
+                title = str(matches[0].get("title") or "")
+                logger.info("Closing %s through resolved window identity %r", app, title)
+                try:
                     window_closed = desktop_windows.close_window_and_verify(title)
-                    break
-            except Exception:
-                logger.warning("Window close resolution failed for %s", app, exc_info=True)
-                window_closed = False
-                break
+                except Exception:
+                    logger.warning("Window close failed for %s", app, exc_info=True)
+                    window_closed = False
         if window_closed is True:
             success_apps.append(str(app))
             continue
@@ -230,6 +290,22 @@ def close_apps(matched_apps: list[str], launched_processes: list[str]) -> str:
         closed = False
         failed = False
         for process in candidates:
+            matches = _close_window_targets(str(app), (), process)
+            if len(matches) > 1:
+                logger.info("Refusing to close %s: %d live instances match", app, len(matches))
+                ambiguous_apps.append(str(app))
+                break
+            target = matches[0] if matches else None
+            if target is None:
+                try:
+                    running = is_process_running(process)
+                except Exception:
+                    running = False
+                if running:
+                    logger.info("Refusing to close %s: %s runs without one identifiable window", app, process)
+                    failed = True
+                    break
+                continue
             try:
                 result = subprocess.run(
                     ["taskkill", "/IM", process, "/F"],
@@ -239,7 +315,7 @@ def close_apps(matched_apps: list[str], launched_processes: list[str]) -> str:
                 )
                 stderr = (result.stderr or "").lower()
                 if result.returncode == 0:
-                    if _wait_for_process_exit(process):
+                    if _wait_for_instance_exit(target):
                         closed = True
                     else:
                         failed = True
@@ -256,7 +332,7 @@ def close_apps(matched_apps: list[str], launched_processes: list[str]) -> str:
             success_apps.append(str(app))
         elif failed:
             failed_apps.append(str(app))
-        else:
+        elif str(app) not in ambiguous_apps:
             not_running_apps.append(str(app))
 
     parts: list[str] = []
@@ -264,6 +340,10 @@ def close_apps(matched_apps: list[str], launched_processes: list[str]) -> str:
         parts.append(f"{format_app_list(success_apps)} has been closed for you.")
     if not_running_apps:
         parts.append(f"{format_app_list(not_running_apps)} is not currently running.")
+    if ambiguous_apps:
+        parts.append(
+            f"I left {format_app_list(ambiguous_apps)} open because more than one instance matched."
+        )
     if failed_apps:
         parts.append(f"Failed to close {format_app_list(failed_apps)}.")
     return " ".join(parts) or "Error: no app was provided to close."

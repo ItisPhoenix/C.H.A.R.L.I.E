@@ -1,7 +1,7 @@
 """SelfKnowledge Service for Charlie V1.
 
 Authoritatively resolves questions about Charlie's live runtime, capabilities,
-models, codebase implementation, MCP servers, and health using grounded evidence
+models, codebase implementation, and health using grounded evidence
 from RuntimeIntrospector, CapabilityIndex, and CodeIndex.
 """
 
@@ -18,7 +18,7 @@ from charlie.runtime_introspector import RuntimeIntrospector
 logger = logging.getLogger("charlie.self_knowledge")
 
 _SUBSYSTEM_STATUS_PATTERN = re.compile(
-    r"\b(is|are)\s+(mcp(?: servers?)?|eventbus|browser|desktop|vision)\s+"
+    r"\b(is|are)\s+(eventbus|browser|desktop|vision)\s+"
     r"(running|connected|available|healthy|working)\b",
     re.IGNORECASE,
 )
@@ -180,12 +180,6 @@ class SelfKnowledgeService:
             sources.append("runtime.tasks")
             sources.append("runtime.leases")
 
-        # 4. MCP queries
-        if "mcp" in q_lower:
-            mcp_info = self._introspector.get_mcp_info()
-            runtime_facts["mcp"] = mcp_info
-            sources.append("runtime.mcp")
-
         # 5. Memory queries
         if "memory" in q_lower:
             mem_info = self._introspector.get_memory_info()
@@ -203,7 +197,7 @@ class SelfKnowledgeService:
         # 7. Direct subsystem-status queries. These are semantic SelfKnowledge
         # runtime subsystem domains.
         if _SUBSYSTEM_STATUS_PATTERN.search(q_lower):
-            if not re.search(r"\b(mcp|eventbus)\b", q_lower):
+            if not re.search(r"\beventbus\b", q_lower):
                 runtime_facts["subsystems"] = self._introspector.get_subsystem_info()
                 sources.append("runtime.subsystems")
             if "vision" in q_lower:
@@ -272,13 +266,6 @@ class SelfKnowledgeService:
         if not _SUBSYSTEM_STATUS_PATTERN.search(query):
             return None
         q_lower = query.lower()
-
-        if "mcp" in q_lower:
-            mcp = evidence.runtime_facts.get("mcp", self._introspector.get_mcp_info())
-            return (
-                f"MCP subsystem: **{mcp.get('configured_servers', 0)}** servers configured, "
-                f"**{mcp.get('connected_servers', 0)}** currently connected."
-            )
 
         subsystem = next(
             (name for name in ("browser", "desktop", "vision") if name in q_lower),
@@ -370,14 +357,7 @@ class SelfKnowledgeService:
                 text += f"- **Unavailable**: {', '.join(unavail_ids)}"
             parts.append(text)
 
-        # 7. MCP Query
-        elif "mcp" in q_lower:
-            mcp = evidence.runtime_facts.get("mcp", self._introspector.get_mcp_info())
-            cfg_srv = mcp.get("configured_servers", 0)
-            conn_srv = mcp.get("connected_servers", 0)
-            parts.append(f"MCP subsystem: **{cfg_srv}** servers configured, **{conn_srv}** currently connected.")
-
-        # 8. Memory Query
+        # 7. Memory Query
         elif "memory" in q_lower:
             mem = evidence.runtime_facts.get("memory", self._introspector.get_memory_info())
             status = mem.get("status", "available")

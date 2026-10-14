@@ -1,9 +1,10 @@
+import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import pytest
 
-import os
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import charlie.tools as tools_module
 from charlie.session_store import SessionStore
@@ -13,6 +14,7 @@ from charlie.tools import (
     _decompose_query,
     _merge_search_results,
     _needs_decomposition,
+    dashboard_widget_control,
     file_read,
     file_write,
     get_path_gate_reason,
@@ -31,6 +33,50 @@ from charlie.tools import (
 
 def _text(value):
     return value.model_text if hasattr(value, "model_text") else value
+
+
+@pytest.mark.parametrize(
+    ("widget", "visible", "widget_id"),
+    [("music", True, None), ("weather", False, None), ("timer", False, "timer-1"), ("system_status", True, None)],
+)
+def test_dashboard_widget_control_passes_the_target_to_runtime(monkeypatch, widget, visible, widget_id):
+    calls = []
+    monkeypatch.setattr(
+        tools_module,
+        "_dashboard_widget_visibility_callback",
+        lambda *arguments: calls.append(arguments) or {"accepted": True},
+    )
+
+    result = dashboard_widget_control(widget, visible, widget_id)
+
+    assert calls == [(widget, visible, widget_id)]
+    action = "opened" if visible else "closed"
+    assert result.model_text == f"I've {action} the {widget.replace('_', ' ')} card."
+    assert result.structured_data == {
+        "ok": True,
+        "verified": True,
+        "widget": widget,
+        "visible": visible,
+        **({"widget_id": widget_id} if widget_id else {}),
+    }
+
+
+@pytest.mark.parametrize(
+    ("widget", "widget_id"),
+    [("music", "timer-1"), ("timer", " "), ("timer", "x" * 129)],
+)
+def test_dashboard_widget_control_rejects_invalid_timer_targets(monkeypatch, widget, widget_id):
+    calls = []
+    monkeypatch.setattr(
+        tools_module,
+        "_dashboard_widget_visibility_callback",
+        lambda *arguments: calls.append(arguments) or {"accepted": True},
+    )
+
+    result = dashboard_widget_control(widget, False, widget_id)
+
+    assert result.structured_data == {"ok": False}
+    assert not calls
 
 
 def test_registry_registration_and_schema():
@@ -69,7 +115,6 @@ def test_registry_registration_and_schema():
         "desktop_screenshot",
         "desktop_click",
         "desktop_type",
-        "desktop_invoke",
         "desktop_key",
         "desktop_click_at",
         "desktop_move",
@@ -92,6 +137,11 @@ def test_registry_registration_and_schema():
         "automation_get",
         "automation_list",
         "automation_cancel",
+        "timer_create",
+        "timer_cancel",
+        "stopwatch_control",
+        "dashboard_widget_control",
+        "weather_get",
         "charlie_self_query",
         "charlie_doctor_diagnose",
         "charlie_self_extension_propose",
@@ -99,6 +149,15 @@ def test_registry_registration_and_schema():
     assert any(
         d["function"]["parameters"]["required"] == ["query"] for d in definitions
     )
+    widget_schema = next(
+        d["function"]["parameters"]
+        for d in definitions
+        if d["function"]["name"] == "dashboard_widget_control"
+    )
+    assert widget_schema["required"] == ["widget", "visible"]
+    assert widget_schema["properties"]["widget"]["enum"] == [
+        "clock", "weather", "timer", "stopwatch", "music", "system_status"
+    ]
 
 
 def test_list_metadata_covers_every_registered_tool():
@@ -138,10 +197,32 @@ def test_get_tool_param_names_unknown_tool_returns_none():
     assert registry.get_tool_param_names("not_a_real_tool") is None
 
 
-def test_get_tool_names_matches_definitions():
-    assert set(registry.get_tool_names()) == {
+def test_desktop_invoke_remains_internal_and_is_hidden_from_model(monkeypatch):
+    from charlie.capabilities import capability_index
+
+    names = {d["function"]["name"] for d in registry.get_tool_definitions()}
+    assert "desktop_invoke" not in names
+    observe_description = next(
+        d["function"]["description"] for d in registry.get_tool_definitions()
+        if d["function"]["name"] == "desktop_observe"
+    )
+    assert "OCR" not in observe_description
+    assert "desktop_invoke" in registry.get_tool_names()
+    assert "desktop_invoke" not in registry.build_tool_prompt()
+    assert "desktop_invoke" not in {
+        d["function"]["name"] for d in capability_index.filter_schemas(registered_only=True)
+    }
+
+    monkeypatch.setattr("charlie.tools._desktop_ready", lambda: True)
+    monkeypatch.setattr("charlie.computer.backend.get_backend", lambda: type("Backend", (), {"click_mark": lambda self, mark_id: f"clicked {mark_id}"})())
+    assert registry.execute_tool("desktop_invoke", {"mark_id": 4}) == "clicked 4"
+
+
+def test_tool_names_match_definitions_except_internal_compatibility_tools():
+    assert set(registry.get_tool_names()) - {"desktop_invoke"} == {
         d["function"]["name"] for d in registry.get_tool_definitions()
     }
+    assert "desktop_invoke" not in registry.build_tool_prompt()
 
 
 def test_raw_desktop_tools_registered():
@@ -682,16 +763,17 @@ def test_detect_app_launch_ignores_commands_with_real_arguments():
     assert _detect_app_launch("echo hello") is None
 
 
-def test_shell_execute_focuses_already_running_app_instead_of_relaunching(monkeypatch):
+def test_shell_execute_focuses_already_running_app_through_cua(monkeypatch):
     """The actual bug report: Charlie kept trying to relaunch Notepad instead
     of focusing the one already open, burning its tool-call budget."""
     from charlie import tools as tools_module
 
     monkeypatch.setattr("sys.platform", "win32")
     monkeypatch.setattr(tools_module, "is_process_running", lambda name: name == "notepad.exe")
+    focus_calls = []
     monkeypatch.setattr(
-        "charlie.desktop.windows.focus_window",
-        lambda title: f"Focused window: Untitled - Notepad ({title})",
+        tools_module, "desktop_focus",
+        lambda window: focus_calls.append(window) or "Opened the app and confirmed its exact window through bounded Cua.",
     )
     popen_calls = []
     monkeypatch.setattr(
@@ -699,8 +781,22 @@ def test_shell_execute_focuses_already_running_app_instead_of_relaunching(monkey
     )
 
     output = shell_execute("start notepad")
-    assert "Focused window" in _text(output)
+    assert "confirmed its exact window through bounded Cua" in _text(output)
     assert popen_calls == []
+    assert focus_calls == ["notepad"]
+    assert output.structured_data == {"ok": True, "verified": True, "goal_verified": True}
+
+
+def test_shell_execute_does_not_claim_success_when_cua_refuses_focus(monkeypatch):
+    from charlie import tools as tools_module
+
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr(tools_module, "is_process_running", lambda name: name == "notepad.exe")
+    monkeypatch.setattr(tools_module, "desktop_focus", lambda window: "Refused: no exact live window matches that title.")
+
+    output = shell_execute("start notepad")
+    assert output.model_text.startswith("Refused:")
+    assert output.structured_data == {"ok": False, "verified": False, "goal_verified": False}
 
 
 def test_shell_execute_blocks_metacharacters_and_keywords():

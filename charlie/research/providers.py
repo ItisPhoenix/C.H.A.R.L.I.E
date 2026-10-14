@@ -103,6 +103,18 @@ class SearchProvider(Protocol):
     ) -> List[SearchResult]: ...
 
 
+class ProviderChallengeError(RuntimeError):
+    """The provider returned an access challenge instead of a search response."""
+
+
+class ProviderNotConfiguredError(RuntimeError):
+    """The provider has no usable configuration, so it was never queried."""
+
+
+class ProviderUnavailableError(RuntimeError):
+    """The provider is reachable but currently cannot search."""
+
+
 def _domain(url: str) -> str:
     return urlparse(url).netloc.lower()
 
@@ -153,7 +165,7 @@ class SearXNGProvider:
         self, query: str, *, limit: int, domain_filters: Optional[List[str]] = None
     ) -> List[SearchResult]:
         if not self.base_url:
-            return []
+            raise ProviderNotConfiguredError("no instance URL configured")
         from charlie.research.ranking import search_result_matches_query
 
         def has_relevant_results(payload: dict) -> bool:
@@ -210,6 +222,7 @@ class SearXNGProvider:
                 "The instance is reachable but cannot search.",
                 detail,
             )
+            raise ProviderUnavailableError(f"upstream engines suspended ({detail})")
         elif unresponsive:
             logger.info(
                 "SearXNG degraded: %d result(s) from healthy engines; suspended (%s).",
@@ -258,7 +271,7 @@ class YaCyProvider:
         self, query: str, *, limit: int, domain_filters: Optional[List[str]] = None
     ) -> List[SearchResult]:
         if not self.base_url:
-            return []
+            raise ProviderNotConfiguredError("no instance URL configured")
         from charlie.research.ranking import search_result_matches_query
 
         provider_query = _normalise_provider_query(query)
@@ -321,7 +334,7 @@ class ExaProvider:
 
     async def search(self, query: str, *, limit: int, domain_filters: Optional[List[str]] = None) -> List[SearchResult]:
         if not self.api_key:
-            return []
+            raise ProviderNotConfiguredError("no API key configured")
         payload: Dict[str, Any] = {"query": query, "numResults": limit, "contents": {"text": {}}}
         if domain_filters:
             payload["includeDomains"] = domain_filters
@@ -355,7 +368,7 @@ class TavilyProvider:
 
     async def search(self, query: str, *, limit: int, domain_filters: Optional[List[str]] = None) -> List[SearchResult]:
         if not self.api_key:
-            return []
+            raise ProviderNotConfiguredError("no API key configured")
         payload: Dict[str, Any] = {
             "api_key": self.api_key,
             "query": query,
@@ -429,7 +442,7 @@ class DuckDuckGoProvider:
         endpoint = self.endpoint.strip() or os.getenv("RESEARCH_DDG_ENDPOINT", "").strip()
         if not endpoint:
             logger.warning("DuckDuckGo fallback has no endpoint configured")
-            return []
+            raise ProviderNotConfiguredError("no endpoint configured")
         if _CurlAsyncSession is not None:
             # DDG's no-JS endpoint is a browser form POST. curl_cffi keeps the
             # Chrome TLS/HTTP2 fingerprint that the endpoint expects; it does
@@ -455,11 +468,10 @@ class DuckDuckGoProvider:
         lowered = body.lower()
         if any(marker in lowered for marker in _DDG_CHALLENGE_MARKERS):
             logger.warning(
-                "DuckDuckGo served a bot challenge for %r; treating the "
-                "fallback as unavailable rather than as zero results.",
+                "DuckDuckGo served a bot challenge for %r; recording a provider challenge.",
                 query,
             )
-            return []
+            raise ProviderChallengeError("Provider returned an access challenge")
         parser = _DuckDuckGoParser()
         parser.feed(body)
         hits = []
@@ -575,7 +587,7 @@ class BingProvider:
     ) -> List[SearchResult]:
         endpoint = self.endpoint.strip() or os.getenv("RESEARCH_BING_ENDPOINT", "").strip()
         if not endpoint:
-            return []
+            raise ProviderNotConfiguredError("no endpoint configured")
         provider_query = _normalise_provider_query(query)
         params = {"q": provider_query}
         if domain_filters and len(domain_filters) == 1:
@@ -597,7 +609,7 @@ class BingProvider:
         lowered = body.lower()
         if any(marker in lowered for marker in _BING_CHALLENGE_MARKERS):
             logger.warning("Bing HTML fallback returned a challenge for %r", query)
-            return []
+            raise ProviderChallengeError("Provider returned an access challenge")
         parser = _BingParser()
         parser.feed(body)
         from charlie.research.ranking import search_result_matches_query
@@ -669,37 +681,52 @@ async def search_with_fallback(
     domain filter strictly answers with a handful of results and suppresses
     providers that would return far more. Merging keeps the broadest
     evidence set while still degrading gracefully when a provider fails.
+
+    Each outcome carries a stable status: ``ok``, ``empty`` (the provider
+    searched and genuinely found nothing), ``challenge``, ``unconfigured``,
+    ``unavailable`` or ``failed``.
     """
     if not providers:
         return []
 
-    async def run(provider: SearchProvider) -> Tuple[str, List[SearchResult], Optional[str]]:
+    async def run(
+        provider: SearchProvider,
+    ) -> Tuple[str, List[SearchResult], Optional[str], str]:
         try:
             hits = await provider.search(query, limit=limit, domain_filters=domain_filters)
             hits = [hit for hit in hits if _matches_domain_filters(hit.url, domain_filters)]
+        except ProviderChallengeError as exc:
+            logger.warning("Research provider %s returned a challenge for %r", provider.name, query)
+            return provider.name, [], type(exc).__name__, "challenge"
+        except ProviderNotConfiguredError as exc:
+            logger.warning("Research provider %s has no usable configuration for %r", provider.name, query)
+            return provider.name, [], type(exc).__name__, "unconfigured"
+        except ProviderUnavailableError as exc:
+            logger.warning("Research provider %s cannot search for %r: %s", provider.name, query, exc)
+            return provider.name, [], type(exc).__name__, "unavailable"
         except Exception as exc:
             logger.warning("Research provider %s failed for %r", provider.name, query, exc_info=True)
-            return provider.name, [], type(exc).__name__
-        return provider.name, hits, None
+            return provider.name, [], type(exc).__name__, "failed"
+        return provider.name, hits, None, "ok" if hits else "empty"
 
     provider_results = await asyncio.gather(*(run(p) for p in providers))
 
     if outcomes is not None:
-        for name, hits, error in provider_results:
+        for name, hits, error, status in provider_results:
             outcomes.append({
                 "provider": name,
-                "status": "failed" if error else ("ok" if hits else "empty"),
+                "status": status,
                 "result_count": len(hits),
                 "error_class": error,
             })
 
     merged: List[SearchResult] = []
     seen: set = set()
-    contribution_counts = {name: 0 for name, _hits, _error in provider_results}
+    contribution_counts = {name: 0 for name, _hits, _error, _status in provider_results}
     positions = [0] * len(provider_results)
     while len(merged) < limit:
         added_any = False
-        for index, (name, hits, _error) in enumerate(provider_results):
+        for index, (name, hits, _error, _status) in enumerate(provider_results):
             while positions[index] < len(hits):
                 hit = hits[positions[index]]
                 positions[index] += 1

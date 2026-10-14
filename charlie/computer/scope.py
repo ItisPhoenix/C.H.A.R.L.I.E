@@ -181,17 +181,16 @@ class BrowserTaskScope:
         """Remember the last independently verified result for this task."""
         self.last_verified = result
 
-    def close(self) -> None:
+    def close(self) -> bool:
         """Release the browser and end the session. Safe to call more than once."""
         with self._lock:
             browser = self._browser
-            self._browser = None
             self._closed = True
             # Closing the scope also closes admission, so nothing can be dispatched
             # against a runtime that is being torn down.
             self._admission_closed = True
         if browser is None:
-            return
+            return bool(self.cleanup_report is None or self.cleanup_report.get("verified"))
         try:
             result = browser.end_session()
             self.cleanup_report = getattr(browser, "cleanup_report", None)
@@ -199,6 +198,12 @@ class BrowserTaskScope:
                 self.cleanup_report = (getattr(result, "detail", {}) or {}).get("process_cleanup")
         except Exception:
             self.cleanup_report = {"verified": False, "reason": "end_session_exception"}
+        complete = bool(self.cleanup_report and self.cleanup_report.get("verified"))
+        if complete:
+            with self._lock:
+                if self._browser is browser:
+                    self._browser = None
+        return complete
 
     def __enter__(self) -> "BrowserTaskScope":
         return self

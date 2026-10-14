@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Iterable, List, Optional, Set
 
-from charlie.research.facts import normalize_whitespace, verify_quote
+from charlie.research.facts import normalize_whitespace, product_identifiers, verify_quote
 from charlie.research.models import Candidate, ResearchBrief, SourceDocument
 from charlie.research.sources import resolve_brand
 
@@ -42,10 +42,12 @@ _LLM_MODEL_FIRST_RELEASE_RE = re.compile(
 )
 _RELEASE_DATE_RE = re.compile(r"\b20\d{2}-\d{2}-\d{2}\b")
 _FUTURE_OPEN_WEIGHTS_RE = re.compile(
-    r"\b(?:open[- ]?weights?|weights?)\b.{0,50}\b(?:promised|planned|will be released|will be published|expected later)\b|"
+    r"\b(?:open[- ]?weights?|weights?)\b.{0,50}\b(?:promised|planned|will be released|"
+    r"will be published|expected later)\b|"
     r"\b(?:will|would|plan(?:s|ned)? to|promise[sd]? to)\s+(?:release|publish|open[- ]source)\b",
     re.I,
 )
+
 
 def _normalize_candidate_name(name: str) -> str:
     """Normalize model string for deduplication."""
@@ -63,7 +65,9 @@ def _merge_release_candidate(existing: Optional[Candidate], candidate: Candidate
         access = None
     else:
         access = candidate.access or existing.access
-    quoted = candidate if candidate.access and (not existing.access or candidate.access == existing.access) else existing
+    quoted = (
+        candidate if candidate.access and (not existing.access or candidate.access == existing.access) else existing
+    )
     if not quoted.quote:
         quoted = newest
     return Candidate(
@@ -92,6 +96,16 @@ def extract_candidates(
     docs_list = list(documents)
     doc_map = {doc.source_id: doc for doc in docs_list if doc.source_id}
 
+    def quoted_variant_name(name: str, quote: str) -> str:
+        if brief.entity_kind != "product":
+            return name
+        missing = product_identifiers(quote) - product_identifiers(name)
+        for identifier in sorted(missing, key=lambda token: quote.casefold().find(token)):
+            match = re.search(re.escape(identifier), quote, re.I)
+            if match:
+                name += " " + match.group()
+        return name
+
     # 1. Deterministic pattern extraction
     for doc in docs_list:
         text = doc.content
@@ -101,10 +115,12 @@ def extract_candidates(
             # Check laptop pattern
             for match in _LAPTOP_MODEL_PATTERN.finditer(line):
                 brand = match.group(1).title()
-                full_name = _normalize_candidate_name(match.group(0))
+                next_model = _LAPTOP_MODEL_PATTERN.search(line, match.end())
+                local_span = line[match.start() : next_model.start() if next_model else len(line)]
+                quote = normalize_whitespace(local_span[:250])
+                full_name = quoted_variant_name(_normalize_candidate_name(match.group(0)), quote)
                 # Skip if too generic (e.g. just "Lenovo LOQ" with nothing else when longer names exist)
                 norm_key = full_name.lower()
-                quote = normalize_whitespace(line[:250])
                 if norm_key not in candidates_by_key:
                     candidates_by_key[norm_key] = Candidate(
                         name=full_name,
@@ -145,7 +161,7 @@ def extract_candidates(
                             if index + 1 < len(statement_matches)
                             else len(fragment)
                         )
-                        statement = fragment[match.start():context_end]
+                        statement = fragment[match.start() : context_end]
                         release_date = _RELEASE_DATE_RE.search(statement)
                         name = _normalize_candidate_name(match.group("model"))
                         brand = re.split(r"['’]s\b", match.group("brand"), maxsplit=1)[0].strip()
@@ -229,8 +245,9 @@ def extract_candidates(
             # Ensure name or brand appears in quote
             norm_name = _normalize_candidate_name(name)
             norm_quote = normalize_whitespace(quote).lower()
-            if norm_name.lower() not in norm_quote and (brand and brand.lower() not in norm_quote):
+            if norm_name.lower() not in norm_quote:
                 continue
+            norm_name = quoted_variant_name(norm_name, normalize_whitespace(quote[:250]))
 
             norm_key = norm_name.lower()
             if norm_key not in candidates_by_key:

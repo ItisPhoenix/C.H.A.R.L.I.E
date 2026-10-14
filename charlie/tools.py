@@ -7,10 +7,10 @@ No business logic -- just tool I/O.
 import asyncio
 import hashlib
 import http.client
-import inspect
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import socket
@@ -23,7 +23,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote, urljoin, urlsplit
 
 from charlie.config import config
@@ -74,11 +74,26 @@ SHELL_TIMEOUT = 10.0
 _SHELL_KILL_DRAIN_TIMEOUT = 2.0
 _SHELL_POLL_INTERVAL = 0.05
 _SHELL_CANCEL_DRAIN_TIMEOUT = 0.5
+_MODEL_HIDDEN_TOOLS = frozenset({"desktop_invoke"})
 
 # --- SearXNG keyword detection ---
 _TIME_SENSITIVE_KEYWORDS = (
-    "today", "new", "recent", "latest", "breaking", "now", "live", "news",
-    "headline", "headlines", "update", "updates", "score", "scores", "standings", "schedule",
+    "today",
+    "new",
+    "recent",
+    "latest",
+    "breaking",
+    "now",
+    "live",
+    "news",
+    "headline",
+    "headlines",
+    "update",
+    "updates",
+    "score",
+    "scores",
+    "standings",
+    "schedule",
 )
 _NEWS_KEYWORDS = ("news", "headline", "story", "stories")
 
@@ -97,19 +112,25 @@ class ToolExecutionResult:
     result_kind: Optional[str] = None
 
 
+_dashboard_widget_visibility_callback: Optional[Callable[[str, bool, Optional[str]], Any]] = None
+
+
 def configure_runtime_services(
     *,
     self_extension_orchestrator: Any,
     runtime_introspector: Any,
     self_knowledge_service: Any,
     doctor: Any,
+    dashboard_widget_visibility_callback: Optional[Callable[[str, bool, Optional[str]], Any]] = None,
 ) -> None:
     """Install main-owned services used by runtime tools."""
     global _self_extension_orchestrator, _runtime_introspector, _self_knowledge_service, _charlie_doctor
+    global _dashboard_widget_visibility_callback
     _self_extension_orchestrator = self_extension_orchestrator
     _runtime_introspector = runtime_introspector
     _self_knowledge_service = self_knowledge_service
     _charlie_doctor = doctor
+    _dashboard_widget_visibility_callback = dashboard_widget_visibility_callback
 
 
 # Pre-compiled regex for stripping conversational fluff from search queries.
@@ -137,9 +158,8 @@ _WIN_CMD_PATTERNS = [
 
 # Cross-platform volume command translations (wrong OS -> Windows equivalent)
 _AMIXER_SET_RE = re.compile(r"amixer\s+set\s+Master\s+(\d+)\%", re.IGNORECASE)
-_OSCRIPT_VOL_RE = re.compile(
-    r"osascript\s.*[Ss]et\s+[Vv]olume\s+([\d.]+)", re.IGNORECASE
-)
+_OSCRIPT_VOL_RE = re.compile(r"osascript\s.*[Ss]et\s+[Vv]olume\s+([\d.]+)", re.IGNORECASE)
+
 
 class ToolRegistry:
     """Registry of tools the LLM can call."""
@@ -158,6 +178,7 @@ class ToolRegistry:
         cacheable: Optional[bool] = None,
         freshness_sec: Optional[float] = None,
         poll_interval_sec: Optional[float] = None,
+        required_leases: Optional[Tuple[str, ...]] = None,
     ):
         """Keep metadata plain so this module does not import autonomy.py, which imports tools.
         Known built-ins mirror semantic metadata from charlie.capabilities; dynamic tools
@@ -179,18 +200,21 @@ class ToolRegistry:
         def decorator(func: Callable[..., Any]):
             self._tools[name]["func"] = func
             from charlie.capabilities import register_tool_in_index
-            register_tool_in_index(
-                name=name,
-                description=description,
-                schema=schema,
-                func=func,
-                owner=owner or effective_owner,
-                risk_class=risk_class,
-                is_interactive=is_interactive,
-                cacheable=cacheable,
-                freshness_sec=freshness_sec,
-                poll_interval_sec=poll_interval_sec,
-            )
+
+            if name not in _MODEL_HIDDEN_TOOLS:
+                register_tool_in_index(
+                    name=name,
+                    description=description,
+                    schema=schema,
+                    func=func,
+                    owner=owner or effective_owner,
+                    risk_class=risk_class,
+                    is_interactive=is_interactive,
+                    cacheable=cacheable,
+                    freshness_sec=freshness_sec,
+                    poll_interval_sec=poll_interval_sec,
+                    required_leases=required_leases,
+                )
             return func
 
         return decorator
@@ -219,6 +243,7 @@ class ToolRegistry:
         existed = self._tools.pop(name, None) is not None
         if existed:
             from charlie.capabilities import unregister_tool_from_index
+
             unregister_tool_from_index(name)
         return existed
 
@@ -233,13 +258,14 @@ class ToolRegistry:
                 },
             }
             for name, info in self._tools.items()
+            if name not in _MODEL_HIDDEN_TOOLS
         ]
 
     def is_interactive(self, name: str) -> bool:
         return self._tools.get(name, {}).get("is_interactive", False)
 
     def get_tool_names(self) -> List[str]:
-        """All currently registered tool names (built-in + MCP + plugin +
+        """All currently registered tool names (built-in + extension +
         extension) -- used by charlie.core's text-based tool-call parser so
         it recognizes every live tool instead of a hand-maintained subset."""
         return list(self._tools.keys())
@@ -258,11 +284,12 @@ class ToolRegistry:
         """Build a plain-text tool description for the system prompt."""
         lines = []
         for name, info in self._tools.items():
+            if name in _MODEL_HIDDEN_TOOLS:
+                continue
             params = info["schema"].get("properties", {})
             required = set(info["schema"].get("required", []))
             param_parts = [
-                f"{pname}: {pinfo.get('description', '')}"
-                + (" (required)" if pname in required else "")
+                f"{pname}: {pinfo.get('description', '')}" + (" (required)" if pname in required else "")
                 for pname, pinfo in params.items()
             ]
             param_str = ", ".join(param_parts) if param_parts else "no arguments"
@@ -270,64 +297,105 @@ class ToolRegistry:
         return "\n".join(lines)
 
     def execute_tool(self, name: str, arguments: Dict[str, Any]) -> str:
+        return self._execute_registered_tool(name, arguments).model_text
+
+    def validate_arguments(
+        self, name: str, arguments: Dict[str, Any], *, trusted_fields: Tuple[str, ...] = ()
+    ) -> Dict[str, Any]:
+        """Validate JSON tool input against its registered schema before dispatch."""
+        info = self._tools.get(name)
+        if info is None:
+            from charlie.capabilities import capability_index
+
+            operation = capability_index.get_operation(name)
+            schema = operation.parameters_schema if operation is not None else None
+        else:
+            schema = info["schema"]
+        if not isinstance(arguments, dict) or not isinstance(schema, dict):
+            raise ValueError("Tool arguments must be an object for a registered schema")
+        try:
+            def is_json_value(value: Any) -> bool:
+                if value is None or isinstance(value, (str, bool, int)):
+                    return True
+                if isinstance(value, float):
+                    return math.isfinite(value)
+                if isinstance(value, list):
+                    return all(is_json_value(item) for item in value)
+                if isinstance(value, dict):
+                    return all(isinstance(key, str) and is_json_value(item) for key, item in value.items())
+                return False
+
+            if not is_json_value(arguments):
+                raise ValueError("Tool arguments contain values outside JSON")
+            supplied = {key: value for key, value in arguments.items() if key not in trusted_fields}
+            normalized = json.loads(json.dumps(supplied, allow_nan=False))
+            from jsonschema.validators import validator_for
+            from referencing import Registry
+
+            validator_type = validator_for(schema)
+            validator_type.check_schema(schema)
+            validator_type(schema, registry=Registry()).validate(normalized)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Tool arguments are not valid JSON: {exc}") from exc
+        except Exception as exc:
+            from jsonschema.exceptions import ValidationError
+
+            if isinstance(exc, ValidationError):
+                path = "$" + "".join(f"[{part!r}]" for part in exc.absolute_path)
+                raise ValueError(
+                    f"Invalid arguments for '{name}' at {path} ({exc.validator or 'schema'} constraint)"
+                ) from exc
+            raise ValueError(f"Invalid schema or arguments for '{name}' ({type(exc).__name__})") from exc
+        if schema.get("type") == "object" and "additionalProperties" not in schema:
+            unknown = normalized.keys() - schema.get("properties", {}).keys()
+            if unknown:
+                raise ValueError(f"Unknown arguments for '{name}': {', '.join(sorted(unknown))}")
+        return {**normalized, **{key: arguments[key] for key in trusted_fields if key in arguments}}
+
+    def _execute_registered_tool(
+        self, name: str, arguments: Dict[str, Any], *, trusted_fields: Tuple[str, ...] = ()
+    ) -> ToolExecutionResult:
         if name not in self._tools:
             if name == "system_control":
-                return system_control(**arguments).model_text
+                try:
+                    arguments = self.validate_arguments(name, arguments, trusted_fields=trusted_fields)
+                except ValueError as exc:
+                    return ToolExecutionResult(f"Error: {exc}", {"ok": False, "failure_kind": "invalid_arguments"})
+                return system_control(**arguments)
             logger.error("Tool '%s' not found.", name)
-            return f"Error: Tool '{name}' is not registered."
+            return ToolExecutionResult(f"Error: Tool '{name}' is not registered.")
 
+        try:
+            arguments = self.validate_arguments(name, arguments, trusted_fields=trusted_fields)
+        except ValueError as exc:
+            return ToolExecutionResult(f"Error: {exc}", {"ok": False, "failure_kind": "invalid_arguments"})
         func = self._tools[name]["func"]
         try:
-            params = inspect.signature(func).parameters
-            if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
-                arguments = {k: v for k, v in arguments.items() if k in params}
-            logger.info("Executing tool '%s' with arguments: %s", name, arguments)
+            logger.info("Executing tool '%s' with argument names: %s", name, tuple(arguments))
             result = func(**arguments)
             if isinstance(result, ToolExecutionResult):
-                return result.model_text
-            return str(result)
+                return result
+            return ToolExecutionResult(str(result))
         except Exception as e:  # pragma: no cover - defensive
             logger.exception("Error executing tool '%s': %s", name, e)
-            return f"Error executing tool '{name}': {e}"
+            return ToolExecutionResult(f"Error executing tool '{name}': {e}")
 
-    def execute_tool_structured(self, name: str, arguments: Dict[str, Any]) -> ToolExecutionResult:
+    def execute_tool_structured(
+        self, name: str, arguments: Dict[str, Any], *, trusted_fields: Tuple[str, ...] = ()
+    ) -> ToolExecutionResult:
         """Return model text plus structured metadata for structured-capable tools."""
-        # Preserve test/integration adapters that monkeypatch execute_tool directly.
-        if getattr(self.execute_tool, "__func__", None) is not ToolRegistry.execute_tool:
-            return ToolExecutionResult(str(self.execute_tool(name, arguments)))
+        try:
+            arguments = self.validate_arguments(name, arguments, trusted_fields=trusted_fields)
+        except ValueError as exc:
+            return ToolExecutionResult(f"Error: {exc}", {"ok": False, "failure_kind": "invalid_arguments"})
         if name in {"web_search", "web_research"}:
             report = _run_research_report(name, arguments)
             return ToolExecutionResult(report.legacy_text(), report, "research_report")
         if name == "system_control":
             return system_control(**arguments)
-        if name in {
-            "desktop_open_app",
-            "desktop_close_app",
-            "desktop_open_url",
-            "file_write",
-            "shell_execute",
-            "download_public_pdf",
-            "media_control",
-            "media_snapshot",
-            "calendar_list",
-            "calendar_create",
-            "calendar_update",
-            "calendar_delete",
-            "calendar_get",
-            "automation_create",
-            "automation_update",
-            "automation_get",
-            "automation_list",
-            "automation_cancel",
-        }:
-            func = self._tools[name]["func"]
-            if name == "file_write" and func is file_write:
-                return _write_file_atomically(
-                    path=arguments["path"], content=arguments["content"]
-                )
-            result = func(**arguments)
-            return result if isinstance(result, ToolExecutionResult) else ToolExecutionResult(str(result))
-        return ToolExecutionResult(self.execute_tool(name, arguments))
+        if name == "file_write" and self._tools.get(name, {}).get("func") is file_write:
+            return _write_file_atomically(path=arguments["path"], content=arguments["content"])
+        return self._execute_registered_tool(name, arguments, trusted_fields=trusted_fields)
 
     def set_memory_service(self, service: Any) -> None:
         """Inject the process-composed long-term memory facade."""
@@ -510,7 +578,7 @@ def _merge_search_results(results: List[str]) -> str:
 
 @registry.register_tool(
     name="web_search",
-    description="Search the web for up-to-date information.",
+    description="Run a quick web search for an ordinary current-fact lookup and answer directly with source citations.",
     schema={
         "type": "object",
         "properties": {
@@ -530,8 +598,8 @@ def web_search(query: str) -> str:
 @registry.register_tool(
     name="web_research",
     description=(
-        "Research the public web and return bounded evidence with source IDs. "
-        "Use quick, standard, or deep mode; ordinary research does not launch the interactive browser."
+        "Use for an explicitly requested research task. Gather and synthesize multiple fetched sources, "
+        "return supported details with source IDs, and disclose unresolved parts. Ordinary lookups use web_search."
     ),
     schema={
         "type": "object",
@@ -549,21 +617,24 @@ def web_search(query: str) -> str:
 )
 def web_research(query: str, mode: str = "auto", domain: str = "") -> str:
     """Run bounded structured research while retaining string tool compatibility."""
-    return _run_research_report(
-        "web_research", {"query": query, "mode": mode, "domain": domain}
-    ).legacy_text()
+    return _run_research_report("web_research", {"query": query, "mode": mode, "domain": domain}).legacy_text()
 
 
 def _run_research_report(name: str, arguments: Dict[str, Any]):
     from charlie.research.engine import ResearchEngine
 
     query = str(arguments.get("query", ""))
-    engine = ResearchEngine(config)
-    mode = str(arguments.get("mode", "auto"))
-    if name == "web_search":
-        # Fresh claims need fetched sources, including model-generated lookups.
-        decision = engine.decide(query, "auto")
-        mode = decision.mode.value if decision.should_research and decision.mode else "quick"
+    context = get_current_execution_context()
+    progress_callback = getattr(context, "research_progress_callback", None)
+    engine = ResearchEngine(
+        config,
+        cache_scope=getattr(context, "session_id", None),
+        **getattr(context, "research_callbacks", {}),
+    )
+    decision = engine.decide(query, "auto")
+    mode = decision.mode.value if decision.should_research and decision.mode is not None else "quick"
+    if progress_callback and mode != "quick":
+        engine.progress = lambda progress: progress_callback(progress, query)
     domain = str(arguments.get("domain", ""))
     domain_filters = list(dict.fromkeys(part.strip() for part in domain.split(",") if part.strip()))
     return engine.run_sync(query, mode, domain_filters=domain_filters or None)
@@ -573,7 +644,11 @@ def _single_search(query: str) -> str:
     """Compatibility helper retained for callers of the old private function."""
     from charlie.research.engine import ResearchEngine
 
-    return ResearchEngine(config).run_sync(query, "quick").legacy_text()
+    context = get_current_execution_context()
+    return ResearchEngine(config, cache_scope=getattr(context, "session_id", None)).run_sync(
+        query, "quick"
+    ).legacy_text()
+
 
 # --- Shell safety ---
 # Keywords that are always refused outright, no approval can override them:
@@ -737,12 +812,15 @@ def shell_execute(command: str, *, voice_mode: bool = False) -> ToolExecutionRes
     # a chance to fail: if the app's already open, there's nothing to launch.
     app_entry = _detect_app_launch(command)
     if app_entry and sys.platform == "win32" and is_process_running(app_entry.close_process):
-        from charlie.desktop.windows import focus_window
-        focused = focus_window(app_entry.close_process.removesuffix(".exe"))
-        verified = "(verified)" in focused.casefold()
+        focused = desktop_focus(app_entry.close_process.removesuffix(".exe"))
+        if isinstance(focused, ToolExecutionResult):
+            focused = focused.model_text
+        verified = focused.startswith(
+            "Opened the app and confirmed its exact window through bounded Cua."
+        )
         return ToolExecutionResult(
             focused,
-            {"ok": True, "verified": verified, "goal_verified": verified},
+            {"ok": verified, "verified": verified, "goal_verified": verified},
             "terminal_result",
         )
 
@@ -993,7 +1071,7 @@ _DIAGNOSTIC_COMMANDS: Dict[str, str] = {
     ),
     "network": (
         "powershell -NoProfile -Command \"Get-NetAdapter | Where-Object Status -eq 'Up' | "
-        "Select-Object Name,LinkSpeed,Status | Format-Table -AutoSize | Out-String -Width 200\""
+        'Select-Object Name,LinkSpeed,Status | Format-Table -AutoSize | Out-String -Width 200"'
     ),
 }
 
@@ -1027,7 +1105,11 @@ def system_diagnostics(check: str) -> str:
 
     try:
         process = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=SHELL_TIMEOUT,
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=SHELL_TIMEOUT,
         )
         output = (process.stdout or "").strip() or (process.stderr or "").strip()
         if process.returncode and output:
@@ -1085,6 +1167,7 @@ def get_path_gate_reason(path_str: str, *, tool_name: Optional[str] = None) -> O
         return "file path could not be resolved and requires approval" if tool_name else None
 
     from charlie.config import config
+
     path_lower = str(resolved).lower()
     system_root = config.system_root.lower()
     if system_root and system_root in path_lower:
@@ -1120,10 +1203,7 @@ def get_path_gate_reason(path_str: str, *, tool_name: Optional[str] = None) -> O
     if tool_name in {"file_write", "download_public_pdf"} and resolved.is_file():
         return f"overwrite of existing file '{resolved}' requires approval"
     if not within_approved_root:
-        return (
-            f"{tool_name} path '{resolved}' is outside Charlie's workspace, Documents, "
-            "Downloads, and Desktop"
-        )
+        return f"{tool_name} path '{resolved}' is outside Charlie's workspace, Documents, Downloads, and Desktop"
     return None
 
 
@@ -1139,6 +1219,7 @@ def _resolve_user_placeholders(path: str) -> str:
     right after "Users" doesn't match an existing directory, it's swapped for
     the real one too."""
     import getpass
+
     placeholders = {"yourusername", "username", "user"}
     current_user = getpass.getuser()
     parts = path.split("\\")
@@ -1255,9 +1336,7 @@ def _write_file_atomically(path: str, content: str) -> ToolExecutionResult:
         return ToolExecutionResult(f"Error: {e}", {"ok": False, "verified": False}, "file_write")
     except Exception as e:
         logger.exception("File write error: %s", path)
-        return ToolExecutionResult(
-            f"Error writing file: {e}", {"ok": False, "verified": False}, "file_write"
-        )
+        return ToolExecutionResult(f"Error writing file: {e}", {"ok": False, "verified": False}, "file_write")
     finally:
         if temp_path is not None:
             try:
@@ -1343,11 +1422,7 @@ def _open_public_pdf_response(host, host_header, request_target, addresses):
         raise OSError("Could not establish a verified public HTTPS connection.") from last_error
 
     try:
-        request = (
-            f"GET {request_target} HTTP/1.1\r\n"
-            f"Host: {host_header}\r\n"
-            "Connection: close\r\n\r\n"
-        ).encode("ascii")
+        request = (f"GET {request_target} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\n\r\n").encode("ascii")
         sock.sendall(request)
         response = http.client.HTTPResponse(sock)
         try:
@@ -1525,8 +1600,7 @@ def _memory_capacity_error(target: str, entries: list, max_chars: int, new_len: 
     return (
         f"Memory full: {target} at capacity. Cannot add {new_len} chars.\n"
         "Consolidate first: use 'replace' to merge overlapping entries, "
-        "or 'remove' to drop stale ones.\n\n"
-        + _format_capacity(target, entries, max_chars)
+        "or 'remove' to drop stale ones.\n\n" + _format_capacity(target, entries, max_chars)
     )
 
 
@@ -1712,11 +1786,7 @@ def memory(
 
     max_chars = _MEMORY_MAX_CHARS[target]
     path = (
-        config.memory_file
-        if target == "memory"
-        else config.opinions_file
-        if target == "opinions"
-        else config.user_file
+        config.memory_file if target == "memory" else config.opinions_file if target == "opinions" else config.user_file
     )
 
     try:
@@ -1749,10 +1819,7 @@ def memory(
                 return "Error: content is required for replace actions."
             matches = [i for i, e in enumerate(entries) if old_text in e]
             if not matches:
-                return (
-                    f"Error: no entry contains '{old_text}'.\n"
-                    + _format_capacity(target, entries, max_chars)
-                )
+                return f"Error: no entry contains '{old_text}'.\n" + _format_capacity(target, entries, max_chars)
             if len(matches) > 1:
                 return f"Error: '{old_text}' matched {len(matches)} entries. Provide a more specific string."
             entries[matches[0]] = content.strip()
@@ -1761,10 +1828,7 @@ def memory(
                 return "Error: old_text is required for remove actions."
             matches = [i for i, e in enumerate(entries) if old_text in e]
             if not matches:
-                return (
-                    f"Error: no entry contains '{old_text}'.\n"
-                    + _format_capacity(target, entries, max_chars)
-                )
+                return f"Error: no entry contains '{old_text}'.\n" + _format_capacity(target, entries, max_chars)
             if len(matches) > 1:
                 return f"Error: '{old_text}' matched {len(matches)} entries. Provide a more specific string."
             entries.pop(matches[0])
@@ -1872,9 +1936,17 @@ def vector_memory(action: str, content: str) -> str:
         return "Vector memory is not available. Embedding service may be offline."
 
     if action == "remember":
+        context = get_current_execution_context()
+        supplied = " ".join(content.split()).casefold()
+        user_request = " ".join(getattr(context, "user_request", "").split()).casefold()
+        if (
+            not supplied or getattr(context, "request_source", None) != "user"
+            or supplied not in user_request
+        ):
+            return "Error: Only memory content supplied in your own request can be saved through this tool."
         count = _memory_service.remember_semantic(
             text=content,
-            source="user",
+            source=context.request_source,
             session_id="explicit",
             auto_extract=False,
         )
@@ -1997,10 +2069,7 @@ def capabilities() -> str:
 
 @registry.register_tool(
     name="graph_add_fact",
-    description=(
-        "Add a fact to the knowledge graph. "
-        "A fact is a relationship: subject -> predicate -> object."
-    ),
+    description=("Add a fact to the knowledge graph. A fact is a relationship: subject -> predicate -> object."),
     schema={
         "type": "object",
         "properties": {
@@ -2066,8 +2135,7 @@ def graph_query(query: str, subject_filter: str = "") -> str:
 @registry.register_tool(
     name="graph_consolidate",
     description=(
-        "Consolidate the knowledge graph: merge duplicates, "
-        "remove stale facts, and update importance scores."
+        "Consolidate the knowledge graph: merge duplicates, remove stale facts, and update importance scores."
     ),
     schema={
         "type": "object",
@@ -2089,143 +2157,11 @@ def graph_consolidate() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Plugin system bridge
-# ---------------------------------------------------------------------------
-# Plugins are only wired into the LLM when config.plugins_enabled is true
-# (off by default). When active, every plugin action is exposed as a
-# registry tool named `plugin_<action>` so the model can call it directly.
-# The underlying PluginManager/plugins are never instantiated unless the
-# flag is set (the plugins module is otherwise dead weight).
-
-# Maps each plugin action to a human-honest tool description. Keys are the
-# raw plugin tool names (e.g. "fs_read_file") so wrappers can look them up.
-_PLUGIN_ACTION_DESCRIPTIONS: Dict[str, str] = {
-    "fs_list_dir": "List files and subdirectories inside a local directory.",
-    "fs_search": "Search the local filesystem for files matching a glob pattern.",
-    "code_exec_python": (
-        "Execute a snippet of Python in a separate interpreter process. "
-        "Imports are refused, and an AST gate refuses dangerous builtins "
-        "(eval/exec/open/__import__/getattr/setattr/compile/globals/locals/...), "
-        "the __builtins__ namespace handle, and dunder attribute access. "
-        "That gate is a static check, not a hard sandbox: it is pattern-based, "
-        "with no OS-level isolation and no dedicated network control. "
-        "Use only when the user explicitly asks to run code."
-    ),
-}
-
-
-def _build_plugin_manager(
-    allow_dirs: List[str],
-) -> Any:
-    """Construct a fully-populated PluginManager.
-
-    Imports are local so the rest of tools.py never depends on the plugins
-    module unless plugins are actually enabled.
-    """
-    from charlie.plugins import (
-        BrowserPlugin,
-        CalendarPlugin,
-        CodeExecPlugin,
-        FilesystemPlugin,
-        PluginManager,
-    )
-
-    manager = PluginManager()
-    manager.register(FilesystemPlugin(allowed_dirs=allow_dirs))
-    manager.register(BrowserPlugin())
-    manager.register(CalendarPlugin())
-    manager.register(CodeExecPlugin())
-    return manager
-
-
-def enable_plugin(reg: "ToolRegistry", manager: Any, plugin: Any) -> List[str]:
-    """Register one plugin's tools into the shared registry, adding it to
-    `manager` first if it isn't already there. Runtime equivalent of what
-    register_plugin_tools_into() does for every built-in plugin at boot --
-    lets a single plugin be turned on without restarting Charlie."""
-    if manager.get_plugin(plugin.name) is None:
-        manager.register(plugin)
-    registered: List[str] = []
-    for tool_def in plugin.get_tools():
-        action = tool_def["name"]
-        description = _PLUGIN_ACTION_DESCRIPTIONS.get(action, tool_def["description"])
-        reg.register_tool(
-            name=f"plugin_{action}",
-            description=description,
-            schema=tool_def["parameters"],
-            owner="plugins",
-            risk_class="safe" if action in {"fs_list_dir", "fs_search"} else "security_sensitive",
-        )(_make_plugin_runner(manager, action))
-        registered.append(f"plugin_{action}")
-    return registered
-
-
-def disable_plugin(reg: "ToolRegistry", manager: Any, plugin_name: str) -> List[str]:
-    """Remove a plugin's tools from the shared registry and unregister it
-    from `manager`. Returns the removed tool names; empty if it wasn't active."""
-    plugin = manager.get_plugin(plugin_name)
-    if plugin is None:
-        return []
-    removed: List[str] = []
-    for tool_def in plugin.get_tools():
-        full_name = f"plugin_{tool_def['name']}"
-        if reg.unregister_tool(full_name):
-            removed.append(full_name)
-    manager.unregister(plugin_name)
-    return removed
-
-
-def register_plugin_tools_into(reg: "ToolRegistry", cfg: Any) -> Optional[Any]:
-    """Register every built-in plugin's actions into `reg` if
-    `cfg.plugins_enabled` is true.
-
-    Returns the active PluginManager when plugins are enabled, otherwise None.
-    The returned manager is the single source of truth used to execute the
-    registered `plugin_*` tools.
-    """
-    if not getattr(cfg, "plugins_enabled", False):
-        logger.debug("Plugin system disabled (plugins_enabled=false); skipping.")
-        return None
-
-    manager = _build_plugin_manager(getattr(cfg, "plugin_allow_dirs", []))
-    registered: List[str] = []
-    # _build_plugin_manager already called manager.register() for each
-    # built-in plugin, so enable_plugin() here only needs to bridge their
-    # already-registered tools into the shared registry.
-    for plugin in list(manager._plugins.values()):
-        registered.extend(enable_plugin(reg, manager, plugin))
-
-    logger.info(
-        "Plugin system enabled: registered %d plugin tools (plugin_*).",
-        len(registered),
-    )
-    return manager
-
-
-def _make_plugin_runner(manager: Any, action: str) -> Callable[..., str]:
-    """Build a registry-tool wrapper that delegates to a plugin action."""
-
-    def _runner(**arguments: Any) -> str:
-        try:
-            result = manager.call_tool(action, arguments)
-        except Exception as exc:  # surface, never swallow
-            logger.error("Plugin tool %s failed", action, exc_info=True)
-            return f"Error: plugin {action} failed: {exc}"
-        if isinstance(result, dict) and result.get("success") is False:
-            return f"Error: plugin {action} failed: {result.get('error', 'unknown error')}"
-        return str(result)
-
-    _runner.__name__ = f"plugin_{action}"
-    return _runner
-
-
-# ---------------------------------------------------------------------------
 # Desktop control tools (Windows UI Automation) -- gated, off by default.
 # ---------------------------------------------------------------------------
 
 _DESKTOP_DISABLED_MSG = (
-    "Desktop control is disabled (set DESKTOP_CONTROL_ENABLED=true and install "
-    "uiautomation/pyautogui to enable)."
+    "Desktop control is disabled (set DESKTOP_CONTROL_ENABLED=true and install uiautomation/pyautogui to enable)."
 )
 
 
@@ -2233,6 +2169,7 @@ def _desktop_ready() -> bool:
     if not config.desktop_control_enabled:
         return False
     from charlie.desktop import DESKTOP_AVAILABLE
+
     return DESKTOP_AVAILABLE
 
 
@@ -2245,9 +2182,11 @@ def _ocr_fallback_marks(uia_elements: List[Any]) -> List[Any]:
     if len(uia_elements) >= _UIA_RICH_THRESHOLD or not config.desktop_ocr_enabled:
         return uia_elements
     from charlie.desktop import ocr as desktop_ocr
+
     if not desktop_ocr.OCR_AVAILABLE:
         return uia_elements
     from charlie.desktop.uia import merge_ocr_elements
+
     try:
         ocr_elements = desktop_ocr.ocr_marks(desktop_ocr.capture())
     except Exception:
@@ -2272,10 +2211,12 @@ def _grounding_marks(elements: List[Any]) -> List[Any]:
     if len(elements) >= _GROUNDING_FALLBACK_THRESHOLD or not config.vision_enabled:
         return elements
     from charlie.desktop import ocr as desktop_ocr
+
     if not desktop_ocr.OCR_AVAILABLE:
         return elements
     from charlie.desktop import grounding as desktop_grounding
     from charlie.desktop.uia import merge_ocr_elements
+
     try:
         png = desktop_ocr.capture()
         grounded = desktop_grounding.detect(png, config)
@@ -2331,6 +2272,16 @@ def desktop_open_app(apps: list[str] | str, commands: list[str] | str | None = N
 
     result = get_backend().open_app(app_list, command_list)
     verified = result.startswith("Opened the app and confirmed its exact window through bounded Cua.")
+    if verified:
+        failure_kind = None
+    elif "process hint did not match" in result:
+        failure_kind = "invalid_arguments"
+    elif "Executed but not verified" in result:
+        failure_kind = "cua_window_unverified"
+    elif "desktop control runtime unavailable" in result.lower() or "no unique live app window" in result:
+        failure_kind = "unavailable"
+    else:
+        failure_kind = "target_unavailable"
     from charlie.text_utils import format_app_list
 
     reply = f"{format_app_list(app_list)} {'is' if len(app_list) == 1 else 'are'} open." if verified else result
@@ -2339,7 +2290,7 @@ def desktop_open_app(apps: list[str] | str, commands: list[str] | str | None = N
         {
             "ok": verified,
             "verified": verified,
-            "failure_kind": None if verified else "cua_window_unverified",
+            "failure_kind": failure_kind,
             "apps": app_list,
             "verification_detail": result,
         },
@@ -2379,11 +2330,27 @@ def desktop_close_app(apps: list[str] | str, processes: list[str] | str | None =
         return ToolExecutionResult(
             _DESKTOP_DISABLED_MSG, {"ok": False, "failure_kind": "unavailable"}, "desktop_app_close"
         )
-    from charlie.desktop.apps import close_apps
+    from charlie.computer.backend import get_backend
 
-    result = close_apps(app_list, process_list)
-    ok = "failed to close" not in result.lower()
-    return ToolExecutionResult(result, {"ok": ok, "verified": ok, "apps": app_list}, "desktop_app_close")
+    result, verified, failure_kind = get_backend().close_apps(app_list, process_list)
+    from charlie.text_utils import format_app_list
+
+    reply = (
+        f"Closed and verified one selected window for {format_app_list(app_list)}."
+        if verified
+        else f"I couldn't confirm that a matching window for {format_app_list(app_list)} closed."
+    )
+    return ToolExecutionResult(
+        reply,
+        {
+            "ok": verified,
+            "verified": verified,
+            "apps": app_list,
+            "verification_detail": result,
+            "failure_kind": failure_kind,
+        },
+        "desktop_app_close",
+    )
 
 
 @registry.register_tool(
@@ -2433,18 +2400,17 @@ def desktop_open_url(url: str) -> ToolExecutionResult:
     name="desktop_observe",
     description=(
         "Observe the foreground window and return a numbered list of clickable "
-        "UI elements (set-of-marks text, e.g. '[3] Button \"Save\"'). Also OCRs "
-        "the window so on-screen text with no accessible UI tree is included "
-        "(e.g. browser page content, canvases)."
+        "UI elements (set-of-marks text, e.g. '[3] Button \"Save\"'). Standard file-save dialogs surface "
+        "their filename field and Save button first."
     ),
     schema={"type": "object", "properties": {}, "required": []},
 )
 def desktop_observe() -> str:
-        if not _desktop_ready():
-            return _DESKTOP_DISABLED_MSG
-        from charlie.computer.backend import get_backend
+    if not _desktop_ready():
+        return _DESKTOP_DISABLED_MSG
+    from charlie.computer.backend import get_backend
 
-        return get_backend().observe()
+    return get_backend().observe()
 
 
 @registry.register_tool(
@@ -2461,7 +2427,7 @@ def desktop_read_screen() -> str:
         return _DESKTOP_DISABLED_MSG
     from charlie.computer.backend import get_backend
 
-    return get_backend().observe()
+    return get_backend().read_screen()
 
 
 @registry.register_tool(
@@ -2486,7 +2452,8 @@ def desktop_click(mark_id: int) -> str:
 
 @registry.register_tool(
     name="desktop_type",
-    description="Type text into a UI element by its mark id. Refuses password/payment fields.",
+    description=("Enter text into a fresh observed Edit/Document target by mark id. This operation focuses the target "
+                 "itself and checks readback when available; do not click the text field first. Refuses password/payment fields."),
     schema={
         "type": "object",
         "properties": {
@@ -2679,8 +2646,7 @@ def desktop_screenshot() -> str:
 @registry.register_tool(
     name="desktop_windows",
     description=(
-        "List all visible top-level windows by title, for switching between "
-        "apps or finding a window to focus/move."
+        "List all visible top-level windows by title, for switching between apps or finding a window to focus/move."
     ),
     schema={"type": "object", "properties": {}, "required": []},
 )
@@ -2688,6 +2654,7 @@ def desktop_windows() -> str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
     from charlie.desktop.windows import list_windows
+
     windows = list_windows()
     if not windows:
         return "No visible windows found."
@@ -2709,14 +2676,24 @@ def desktop_windows() -> str:
     },
     is_interactive=True,
 )
-def desktop_focus(window: str) -> str:
+def desktop_focus(window: str) -> ToolExecutionResult | str:
     if not _desktop_ready():
         return _DESKTOP_DISABLED_MSG
     from charlie.computer.backend import get_backend
     from charlie.desktop.windows import find_window_identity
 
     target = find_window_identity(window)
-    return get_backend().bind_window_target(target) if target else "Refused: no exact live window matches that title."
+    if target is None:
+        return "Refused: no exact live window matches that title."
+    result = get_backend().bind_window_target(target)
+    # Compatibility bridge: this backend confirmation follows Cua focus and exact-window readback.
+    verified = result == "Opened the app and confirmed its exact window through bounded Cua."
+    return ToolExecutionResult(
+        result,
+        {"ok": verified, "verified": verified, "goal_verified": verified,
+         "window_identity": {key: target[key] for key in ("pid", "window_id") if key in target} if verified else None},
+        "desktop_window",
+    )
 
 
 @registry.register_tool(
@@ -2946,11 +2923,14 @@ def calendar_create(
     reminder_at: str | None = None,
 ) -> ToolExecutionResult:
     from charlie.calendar_runtime import calendar_runtime_required
+    context = get_current_execution_context()
+    delivery_channel = getattr(context, "channel", "local")
 
     return _calendar_tool_result(
         "create",
         lambda: calendar_runtime_required().execute_sync(
-            "create_event", title, start_at, end_at=end_at, reminder_at=reminder_at
+            "create_event", title, start_at, end_at=end_at, reminder_at=reminder_at,
+            delivery_channel=delivery_channel,
         ),
     )
 
@@ -3025,6 +3005,20 @@ def _automation_tool_result(operation: str, action: Callable[[], Any]) -> ToolEx
         result = action()
         data = {"ok": True, **result}
 
+        if operation in {"create", "update", "cancel"}:
+            from charlie.calendar_runtime import calendar_runtime_required
+
+            try:
+                observed = calendar_runtime_required().execute_sync("get_automation", result["id"])
+                fields = ("id", "kind", "text", "status", "recurrence", "timezone", "next_run_at")
+                verified = all(key in observed and observed[key] == result[key] for key in fields if key in result)
+                data["readback"] = observed
+            except Exception as exc:
+                verified = False
+                data["verification_error"] = str(exc)
+            data["verified"] = verified
+            data["verification_status"] = "verified_success" if verified else "executed_unverified"
+
         def describe_schedule(schedule: dict) -> str:
             text = str(schedule.get("text", ""))[:120]
             return (
@@ -3062,20 +3056,29 @@ def _automation_tool_result(operation: str, action: Callable[[], Any]) -> ToolEx
                 operation,
             )
         elif operation == "cancel" and result.get("status") == "cancelled":
-            data["verified"] = True
-            data["verification_status"] = "verified_success"
             message = f"Automation schedule is already cancelled: {describe_schedule(result)}"
         else:
-            data["verified"] = True
-            data["verification_status"] = "verified_success"
             if operation == "create":
-                message = f"Automation schedule created and verified: {describe_schedule(result)}"
+                label = "Reminder set" if result.get("kind") == "reminder" else "Task scheduled"
+                text = str(result.get("text", "")).strip()
+                schedule_id = result.get("id")
+                handle = f" id={schedule_id}" if schedule_id else ""
+                message = f"{label}: {text}.{handle}" if text else f"{label}.{handle}"
+                data["user_text"] = f"{label}."
             elif operation == "update":
-                message = f"Automation schedule updated and verified: {describe_schedule(result)}"
+                label = "Reminder updated" if result.get("kind") == "reminder" else "Task updated"
+                text = str(result.get("text", "")).strip()
+                message = f"{label}: {text}." if text else f"{label}."
             elif operation == "cancel" and result.get("status") == "cancelled":
                 message = f"Automation schedule cancelled and verified: {describe_schedule(result)}"
             else:
                 message = f"Automation schedule state verified: {describe_schedule(result)}"
+        if data.get("verified") is False:
+            message = "Schedule change accepted; saved state could not be verified."
+            if operation == "create":
+                data["user_text"] = "Schedule change accepted; saved state could not be verified."
+                if result.get("id"):
+                    message += f" id={result['id']}."
         return ToolExecutionResult(message, data, operation)
     except KeyError as exc:
         reason = f"Automation schedule not found: {exc.args[0]}"
@@ -3119,11 +3122,14 @@ def automation_create(
     timezone: str = "Asia/Kolkata",
 ) -> ToolExecutionResult:
     from charlie.calendar_runtime import calendar_runtime_required
+    context = get_current_execution_context()
+    delivery_channel = getattr(context, "channel", "local")
 
     return _automation_tool_result(
         "create",
         lambda: calendar_runtime_required().execute_sync(
-            "create_automation", kind, text, first_run_at, recurrence, timezone_name=timezone
+            "create_automation", kind, text, first_run_at, recurrence, timezone_name=timezone,
+            delivery_channel=delivery_channel,
         ),
     )
 
@@ -3223,11 +3229,242 @@ def automation_cancel(schedule_id: str) -> ToolExecutionResult:
     )
 
 
+@registry.register_tool(
+    name="timer_create",
+    description="Start a durable one-shot timer that alerts when its delay expires.",
+    owner="calendar",
+    schema={
+        "type": "object",
+        "properties": {
+            "delay_seconds": {"type": "number", "exclusiveMinimum": 0},
+            "text": {"type": "string", "default": "Timer finished"},
+        },
+        "required": ["delay_seconds"],
+        "additionalProperties": False,
+    },
+)
+def timer_create(delay_seconds: float, text: str = "Timer finished") -> ToolExecutionResult:
+    from charlie.timer_service import create_timer
+
+    context = get_current_execution_context()
+    channel = getattr(context, "channel", "local")
+    result = _automation_tool_result(
+        "create", lambda: create_timer(delay_seconds, text, delivery_channel=channel)
+    )
+    if isinstance(result.structured_data, dict) and result.structured_data.get("verified") is True:
+        seconds = float(delay_seconds)
+        if seconds >= 60 and seconds % 60 == 0:
+            amount = f"{int(seconds // 60)} minute" + ("s" if seconds != 60 else "")
+        else:
+            amount = f"{seconds:g} second" + ("s" if seconds != 1 else "")
+        user_text = f"Timer set for {amount}."
+        structured_data = {**result.structured_data, "user_text": user_text}
+        return ToolExecutionResult(
+            f"{user_text} id={structured_data['id']}.",
+            structured_data,
+            "timer",
+        )
+    return result
+
+
+@registry.register_tool(
+    name="timer_cancel",
+    description="Cancel one durable timer; keep its internal schedule identifier out of the user-facing response.",
+    owner="calendar",
+    schema={
+        "type": "object",
+        "properties": {"schedule_id": {"type": "string"}},
+        "required": ["schedule_id"],
+        "additionalProperties": False,
+    },
+)
+def timer_cancel(schedule_id: str) -> ToolExecutionResult:
+    from charlie.timer_service import cancel_timer
+
+    result = _automation_tool_result("cancel", lambda: cancel_timer(schedule_id))
+    data = result.structured_data
+    if data.get("verified") is True and data.get("status") == "cancelled":
+        message = "Timer cancelled."
+    elif data.get("failure_kind") == "already_completed":
+        message = "That timer has already finished."
+    elif data.get("failure_kind") == "not_found":
+        message = "I couldn't find that timer."
+    elif data.get("failure_kind") == "unavailable":
+        message = "The timer service is unavailable right now."
+    else:
+        message = "The timer could not be cancelled."
+    return ToolExecutionResult(message, data, "timer")
+
+
+_stopwatch = None
+_stopwatch_lock = threading.Lock()
+
+
+@registry.register_tool(
+    name="stopwatch_control",
+    description="Start, stop, reset, or read Charlie's process-local stopwatch.",
+    schema={
+        "type": "object",
+        "properties": {"action": {"type": "string", "enum": ["start", "stop", "reset", "read"]}},
+        "required": ["action"],
+        "additionalProperties": False,
+    },
+)
+def stopwatch_control(action: str) -> ToolExecutionResult:
+    from charlie.stopwatch_service import Stopwatch
+
+    if action not in {"start", "stop", "reset", "read"}:
+        return ToolExecutionResult("Error: action must be start, stop, reset, or read.", {"ok": False}, "stopwatch")
+    global _stopwatch
+    with _stopwatch_lock:
+        if _stopwatch is None:
+            _stopwatch = Stopwatch()
+        stopwatch = _stopwatch
+    elapsed = (
+        stopwatch.start() if action == "start"
+        else stopwatch.stop() if action == "stop"
+        else stopwatch.reset() if action == "reset"
+        else stopwatch.elapsed_seconds()
+    )
+    state = "running" if stopwatch.running else "stopped"
+    message = {
+        "start": "Stopwatch started." if state == "running" else f"Stopwatch is stopped at {elapsed:.1f} seconds.",
+        "stop": f"Stopwatch stopped at {elapsed:.1f} seconds.",
+        "reset": "Stopwatch reset to zero.",
+        "read": f"Stopwatch is {state} at {elapsed:.1f} seconds.",
+    }[action]
+    return ToolExecutionResult(
+        message,
+        {
+            "ok": True,
+            "verified": True,
+            "verification_status": "verified_success",
+            "action": action,
+            "elapsed_seconds": elapsed,
+            "state": state,
+        },
+        "stopwatch",
+    )
+
+
+@registry.register_tool(
+    name="dashboard_widget_control",
+    description="Show or hide an existing clock, weather, timer, stopwatch, music, or system status widget in Charlie's dashboard.",
+    owner="tools",
+    schema={
+        "type": "object",
+        "properties": {
+            "widget": {"type": "string", "enum": ["clock", "weather", "timer", "stopwatch", "music", "system_status"]},
+            "visible": {"type": "boolean"},
+            "widget_id": {"type": "string", "description": "Optional timer ID when changing one timer card."},
+        },
+        "required": ["widget", "visible"],
+        "additionalProperties": False,
+    },
+)
+def dashboard_widget_control(widget: str, visible: bool, widget_id: Optional[str] = None) -> ToolExecutionResult:
+    labels = {"clock": "Clock", "weather": "Weather", "timer": "Timer", "stopwatch": "Stopwatch", "music": "Music", "system_status": "System status"}
+    if not isinstance(widget, str) or widget not in labels or (
+        widget_id is not None
+        and (
+            widget != "timer"
+            or not isinstance(widget_id, str)
+            or not widget_id.strip()
+            or widget_id != widget_id.strip()
+            or len(widget_id) > 128
+        )
+    ):
+        return ToolExecutionResult("That dashboard widget could not be identified.", {"ok": False}, "dashboard_widget")
+    if not isinstance(visible, bool):
+        return ToolExecutionResult("Error: visible must be true or false.", {"ok": False}, "dashboard_widget")
+    callback = _dashboard_widget_visibility_callback
+    if callback is None:
+        return ToolExecutionResult("Dashboard widgets are unavailable right now.", {"ok": False}, "dashboard_widget")
+    try:
+        result = callback(widget, visible, widget_id)
+    except Exception as exc:
+        logger.warning("Dashboard widget visibility update failed: %s", type(exc).__name__)
+        message = f"The {labels[widget].lower()} widget could not be updated."
+        return ToolExecutionResult(message, {"ok": False}, "dashboard_widget")
+    if isinstance(result, dict) and result.get("accepted") is False:
+        message = f"The {labels[widget].lower()} widget could not be updated."
+        return ToolExecutionResult(message, {"ok": False}, "dashboard_widget")
+    details = {"ok": True, "verified": True, "widget": widget, "visible": visible}
+    if widget_id is not None:
+        details["widget_id"] = widget_id
+    message = (
+        f"I've opened the {labels[widget].lower()} card."
+        if visible
+        else f"I've closed the {labels[widget].lower()} card."
+    )
+    return ToolExecutionResult(
+        message,
+        details,
+        "dashboard_widget",
+    )
+
+
+@registry.register_tool(
+    name="weather_get",
+    description="Get current weather for a specific resolved place or latitude,longitude coordinates.",
+    schema={
+        "type": "object",
+        "properties": {"location": {"type": "string", "description": "A place name or latitude,longitude."}},
+        "required": ["location"],
+        "additionalProperties": False,
+    },
+)
+def weather_get(location: str) -> ToolExecutionResult:
+    try:
+        from charlie.weather_service import get_weather
+
+        result = asyncio.run(get_weather(location))
+        current = result["current"]
+        units = result["units"]
+        temperature = current["temperature_2m"]
+        unit = units.get("temperature_2m", "°C")
+        resolved_location = result.get("location")
+        place = (
+            resolved_location.get("name") or location
+            if isinstance(resolved_location, dict)
+            else location
+        )
+        data = {"ok": True, "verified": True, "verification_status": "verified_success", **result}
+        def number(value):
+            return f"{value:g}" if isinstance(value, (int, float)) and not isinstance(value, bool) else str(value)
+
+        summary = f"In {place}, it's {number(temperature)} {unit} right now"
+        if result.get("condition"):
+            summary += f" with {str(result['condition']).lower()} conditions"
+        feels_like = current.get("apparent_temperature")
+        if feels_like is not None:
+            summary += f"; it feels like {number(feels_like)} {unit}"
+        return ToolExecutionResult(
+            f"{summary}.",
+            data,
+            "weather",
+        )
+    except LookupError as exc:
+        return ToolExecutionResult(
+            f"Error: {exc}", {"ok": False, "failure_kind": "location_unresolved", "reason": str(exc)}, "weather"
+        )
+    except ValueError as exc:
+        return ToolExecutionResult(
+            f"Error: {exc}", {"ok": False, "failure_kind": "invalid_arguments", "reason": str(exc)}, "weather"
+        )
+    except Exception as exc:
+        logger.warning("Current weather lookup failed: %s: %s", type(exc).__name__, exc)
+        return ToolExecutionResult(
+            "Current weather is unavailable right now.",
+            {"ok": False, "failure_kind": "provider_unavailable", "reason": type(exc).__name__},
+            "weather",
+        )
+
+
 # --- Browser tools (Playwright + Chrome) -- gated, off by default.
 
 _BROWSER_DISABLED_MSG = (
-    "Browser control is disabled (set BROWSER_ENABLED=true and install the "
-    "browser extra: uv sync --extra browser)."
+    "Browser control is disabled (set BROWSER_ENABLED=true and install the browser extra: uv sync --extra browser)."
 )
 
 
@@ -3235,6 +3472,7 @@ def _browser_ready() -> bool:
     if not config.browser_enabled:
         return False
     from charlie.browser import BROWSER_AVAILABLE
+
     return BROWSER_AVAILABLE
 
 
@@ -3274,6 +3512,7 @@ def browser_read(url: str) -> str:
     if not _browser_ready():
         return _BROWSER_DISABLED_MSG
     from charlie.browser.actions import read_url
+
     result = read_url(url)
     if "error" in result:
         return f"Error: {result['error']}"
@@ -3285,7 +3524,7 @@ def browser_read(url: str) -> str:
     name="charlie_self_query",
     description=(
         "Ask a question about Charlie's own identity, configured models, live capabilities, "
-        "codebase implementation, MCP servers, or runtime health."
+        "codebase implementation or runtime health."
     ),
     schema={
         "type": "object",
@@ -3310,7 +3549,7 @@ def charlie_self_query(question: str) -> str:
     name="charlie_doctor_diagnose",
     description=(
         "Run structured Charlie Doctor diagnostics across all subsystems, verifying "
-        "health, configuration, models, leases, and MCP."
+        "health, configuration, models, and leases."
     ),
     schema={
         "type": "object",
@@ -3352,7 +3591,7 @@ def get_self_extension_approval_callback() -> Optional[Callable[[dict], Optional
 @registry.register_tool(
     name="charlie_self_extension_propose",
     description=(
-        "Propose a controlled self-extension (config update, reusable skill, MCP tool connection, "
+        "Propose a controlled self-extension (config update, reusable skill, "
         "or small Python code tool). The main runtime stages an instructions-only candidate from "
         "a durable owner correction; use this tool for an explicit request to create a skill or "
         "another self-extension. Do not stage one-off facts or sensitive content. Reusable skills "
@@ -3412,9 +3651,7 @@ def charlie_self_extension_propose(prompt: str) -> str:
     return json.dumps(res.to_dict())
 
 
-def _pending_self_extension_approval(
-    req: Any, res: Any
-) -> tuple[Optional[str], tuple[str, ...], str]:
+def _pending_self_extension_approval(req: Any, res: Any) -> tuple[Optional[str], tuple[str, ...], str]:
     """Name the exact argv and digest the guard reviewed for ``req``.
 
     Read from the request's own plan, which is the same object ``AuthorizationGuard._bound``
@@ -3447,14 +3684,3 @@ def pop_pending_vision_image() -> Optional[str]:
     global _pending_vision_image
     url, _pending_vision_image = _pending_vision_image, None
     return url
-
-
-def register_plugin_tools(cfg: Any = None) -> Optional[Any]:
-    """Register plugin tools into the global `registry` if enabled.
-
-    Convenience wrapper used by main.py and the test suite. Returns the
-    active PluginManager (or None when disabled).
-    """
-    if cfg is None:
-        from charlie.config import config as cfg
-    return register_plugin_tools_into(registry, cfg)

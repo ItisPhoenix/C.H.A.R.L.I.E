@@ -86,7 +86,7 @@ def _resolve_runtime_defaults(args: argparse.Namespace) -> argparse.Namespace:
     args.condition_on_previous_text = (
         args.condition_on_previous_text if args.condition_on_previous_text is not None else True
     )
-    args.vad_filter = args.vad_filter if args.vad_filter is not None else True
+    args.vad_filter = args.vad_filter if args.vad_filter is not None else False
     args.repetition_penalty = (
         args.repetition_penalty
         if args.repetition_penalty is not None
@@ -220,7 +220,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--vad-filter",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Override runtime vad_filter (default: true)",
+        help="Override runtime vad_filter (default: false)",
     )
     parser.add_argument("--variants", default=",".join(VARIANT_SETTINGS), help="Comma-separated variant names")
     parser.add_argument("--allow-download", action="store_true", help="Allow Faster-Whisper model download")

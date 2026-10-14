@@ -6,52 +6,14 @@ import logging
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from charlie.mcp_client import mcp_tool_risk_class, server_declared_policy
 from charlie.self_extension.models import ExtensionKind
 
 logger = logging.getLogger("charlie.self_extension.registry")
 
 _DEFAULT_MANIFEST_PATH = Path("data/extensions.json")
 _SECRET_KEYS = frozenset({"api_key", "token", "secret", "password", "auth", "private_key", "key"})
-
-_MCP_DISABLED_REFUSAL = (
-    "MCP server {name!r} cannot be installed: MCP is disabled "
-    "(config.mcp_enabled / MCP_ENABLED=false). Nothing was registered and no "
-    "external process was started."
-)
-
-
-def mcp_enablement_allowed(configured: Optional[bool] = None) -> bool:
-    """The one MCP-enablement predicate for the self-extension subsystem.
-
-    ``charlie.extensions.install`` and main's ``enable`` gate both check
-    ``MCP_ENABLED``, but the self-extension adapters can also reach
-    ``MCPClient.add_server`` / ``enable_server`` directly, and those paths start a
-    subprocess. Enablement therefore has to be checked here too, or the flag is
-    only honoured at some composition roots rather than as an invariant.
-
-    ``None`` means the caller did not state enablement, so the canonical
-    ``Config.mcp_enabled`` decides -- which is itself ``MCP_ENABLED`` and is
-    ``false`` unless it is explicitly turned on. An unstated flag therefore fails
-    closed, never open.
-    """
-    if configured is not None:
-        return bool(configured)
-    try:
-        from charlie.config import Config
-
-        return bool(Config().mcp_enabled)
-    except Exception:
-        logger.warning("Could not resolve MCP enablement; refusing MCP work", exc_info=True)
-        return False
-
-
-def mcp_disabled_refusal(name: str) -> str:
-    """The canonical operator-facing refusal text for a disabled MCP subsystem."""
-    return _MCP_DISABLED_REFUSAL.format(name=str(name))
-
 
 @dataclass
 class RehydrationReport:
@@ -125,11 +87,9 @@ class ExtensionRegistry:
         self,
         manifest_path: Optional[Path] = None,
         capability_index: Optional[Any] = None,
-        mcp_enabled: Optional[bool] = None,
     ) -> None:
         self._manifest_path = manifest_path or _DEFAULT_MANIFEST_PATH
         self._capability_index = capability_index
-        self._mcp_enabled = mcp_enabled
         self._entries: Dict[str, ExtensionEntry] = {}
         self.reload()
 
@@ -144,7 +104,10 @@ class ExtensionRegistry:
                 data = json.load(f)
                 if isinstance(data, dict):
                     for eid, edict in data.items():
-                        self._entries[eid] = ExtensionEntry.from_dict(edict)
+                        try:
+                            self._entries[eid] = ExtensionEntry.from_dict(edict)
+                        except (KeyError, TypeError, ValueError) as exc:
+                            logger.warning("Skipping unsupported extension record %s: %s", eid, exc)
         except Exception as e:
             logger.error("Failed to load extension manifest %s: %s", self._manifest_path, e)
 
@@ -196,12 +159,6 @@ class ExtensionRegistry:
         self,
         capability_index: Any,
         code_worker_module: Any = None,
-        mcp_client: Any = None,
-        tool_registry: Any = None,
-        activate_mcp: bool = True,
-        runtime_extension_operation: Optional[Callable[..., Dict[str, Any]]] = None,
-        *,
-        mcp_enabled: Optional[bool] = None,
     ) -> RehydrationReport:
         """Restore capabilities from the durable manifest into *capability_index*.
 
@@ -213,11 +170,6 @@ class ExtensionRegistry:
           - CODE_SMALL: validates source file exists and content hash matches before
             registering.  Invalid → verification_status=failed, skip registration.
           - SKILL: registers a read-only capability descriptor.
-          - MCP_TOOL: attempts reconnect via mcp_client if available; on failure
-            marks entry verification_status=failed but does NOT remove the entry.
-            ``mcp_enabled`` (this call, else the instance value, else canonical
-            ``MCP_ENABLED``) is checked first, because reconnecting starts a
-            subprocess.
           - No duplicate ownership: re-registration replaces any stale descriptor.
         """
         report = RehydrationReport()
@@ -233,19 +185,6 @@ class ExtensionRegistry:
                     self._rehydrate_code(ext_id, entry, capability_index, code_worker_module)
                 elif kind == ExtensionKind.SKILL:
                     self._rehydrate_skill(ext_id, entry, capability_index)
-                elif kind == ExtensionKind.MCP_TOOL:
-                    if not activate_mcp:
-                        report.details.append({"id": ext_id, "status": "deferred"})
-                        continue
-                    self._rehydrate_mcp(
-                        ext_id,
-                        entry,
-                        capability_index,
-                        mcp_client,
-                        tool_registry,
-                        runtime_extension_operation,
-                        mcp_enabled if mcp_enabled is not None else self._mcp_enabled,
-                    )
                 else:
                     # CONFIG / ARCHITECTURE_LARGE: no runtime capability descriptor needed
                     pass
@@ -256,44 +195,12 @@ class ExtensionRegistry:
                 entry.verification_status = "failed"
                 self._save()
                 report.failed += 1
-                report.details.append({"id": ext_id, "status": "failed", "error": str(exc)})
+                report.details.append({
+                    "id": ext_id,
+                    "status": "failed",
+                    "error": str(exc),
+                })
 
-        return report
-
-    def rehydrate_mcp_runtime(
-        self,
-        runtime_extension_operation: Optional[Callable[..., Dict[str, Any]]],
-    ) -> RehydrationReport:
-        """Restore durable MCP records through main runtime authority."""
-        report = RehydrationReport()
-        for entry in list(self._entries.values()):
-            if not entry.enabled or entry.kind != ExtensionKind.MCP_TOOL:
-                continue
-            meta = entry.metadata or {}
-            try:
-                if runtime_extension_operation is None:
-                    raise RuntimeError("Canonical EXT-1 MCP runtime seam is unavailable")
-                result = runtime_extension_operation(
-                    "install",
-                    entry.name,
-                    str(meta.get("command", "")),
-                    list(meta.get("args", [])),
-                    dict(meta.get("env", {})),
-                )
-                if not isinstance(result, dict) or result.get("success") is not True:
-                    error = result.get("error") if isinstance(result, dict) else "MCP runtime restoration failed"
-                    raise RuntimeError(str(error))
-                entry.declared_tools = [str(name) for name in result.get("tool_names", [])]
-                entry.verification_status = "verified"
-                self._save()
-                report.restored += 1
-                report.details.append({"id": entry.extension_id, "status": "restored"})
-            except Exception as exc:
-                entry.verification_status = "failed"
-                self._save()
-                report.failed += 1
-                report.details.append({"id": entry.extension_id, "status": "failed", "error": str(exc)})
-                logger.warning("Canonical MCP rehydration failed for '%s': %s", entry.name, exc)
         return report
 
     def _rehydrate_code(
@@ -357,7 +264,6 @@ class ExtensionRegistry:
             availability_check=lambda: _mp.exists(),
         )
         capability_index.register_capability(desc)
-
     def _rehydrate_skill(
         self,
         ext_id: str,
@@ -374,122 +280,5 @@ class ExtensionRegistry:
             provenance="extension",  # skills are locally installed extensions
             operations={},
             availability_check=lambda: True,
-        )
-        capability_index.register_capability(desc)
-
-    def _rehydrate_mcp(
-        self,
-        ext_id: str,
-        entry: "ExtensionEntry",
-        capability_index: Any,
-        mcp_client: Any,
-        tool_registry: Any,
-        runtime_extension_operation: Optional[Callable[..., Dict[str, Any]]] = None,
-        mcp_enabled: Optional[bool] = None,
-    ) -> None:
-        from charlie.capabilities import CapabilityDescriptor, CapabilityOperation
-
-        name = entry.name
-        discovered: list = []
-
-        if runtime_extension_operation is not None:
-            meta = entry.metadata or {}
-            result = runtime_extension_operation(
-                "install",
-                entry.name,
-                str(meta.get("command", "")),
-                list(meta.get("args", [])),
-                dict(meta.get("env", {})),
-            )
-            if not isinstance(result, dict) or result.get("success") is not True:
-                error = result.get("error") if isinstance(result, dict) else "MCP runtime restoration failed"
-                raise RuntimeError(str(error))
-            entry.declared_tools = [str(name) for name in result.get("tool_names", [])]
-            self._save()
-            return
-
-        if mcp_client is not None:
-            # The canonical seam above is main-authoritative and enforces MCP_ENABLED
-            # on its own path. This fallback talks to MCPClient directly, which
-            # starts a subprocess, so the flag has to be honoured here or it is
-            # only enforced at some composition roots rather than as an invariant.
-            if not mcp_enablement_allowed(mcp_enabled):
-                raise RuntimeError(mcp_disabled_refusal(name))
-            try:
-                from charlie.mcp_client import MCPServerConfig
-                meta = entry.metadata or {}
-                config = MCPServerConfig(
-                    name=name,
-                    command=meta.get("command", ""),
-                    args=list(meta.get("args", [])),
-                    env=dict(meta.get("env", {})),
-                )
-                mcp_client.add_server(config)
-                if tool_registry is not None:
-                    mcp_client.enable_server(tool_registry, name)
-                discovered = [
-                    t.name
-                    for t in mcp_client.list_tools()
-                    if getattr(t, "server_name", "") == name
-                ]
-            except Exception as exc:
-                logger.warning("MCP rehydration connect failed for '%s': %s", name, exc)
-                if not discovered:
-                    raise
-
-        _client = mcp_client
-        _name = name
-
-        def _avail() -> bool:
-            if _client is None:
-                return False
-            return _client.health_check().get(_name, False)
-
-        # Server-declared hints are untrusted metadata, collected here only so the
-        # risk floor can see an explicit permission *claim*. Advisory hints are
-        # not claims and never change policy.
-        annotations_by_tool: Dict[str, Any] = {}
-        if _client is not None:
-            try:
-                for tool in _client.list_tools():
-                    annotations_by_tool[tool.name] = getattr(tool, "annotations", None)
-            except Exception:
-                annotations_by_tool = {}
-
-        ops: Dict[str, Any] = {}
-        for t in discovered:
-            _t = t
-            policy = _client.tool_policy(f"{name}:{t}") if _client is not None else "ask"
-            if policy == "deny":
-                continue
-
-            def _invoke(_t: str = _t, **kwargs: Any) -> Any:
-                if _client is None:
-                    raise RuntimeError("No MCP client")
-                res = _client.call_tool(_name, _t, kwargs)
-                if res.get("success"):
-                    return res.get("result", "")
-                raise RuntimeError(res.get("error", "MCP tool error"))
-
-            ops[t] = CapabilityOperation(
-                id=f"mcp.{name}.{t}",
-                name=t,
-                description=f"[{name}] MCP tool",
-                parameters_schema={"type": "object"},
-                risk_class=mcp_tool_risk_class(
-                    policy,
-                    declared_policy=server_declared_policy(annotations_by_tool.get(t)),
-                ),
-                func=_invoke,
-            )
-
-        desc = CapabilityDescriptor(
-            id=ext_id,
-            name=name,
-            description=f"MCP server '{name}'",
-            owner="mcp",
-            provenance="mcp",
-            operations=ops,
-            availability_check=_avail,
         )
         capability_index.register_capability(desc)

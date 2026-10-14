@@ -1,0 +1,137 @@
+{
+  "official_sources": {
+    "lenovo": {
+      "tld": "com",
+      "store_paths": ["/in/en/p/", "/in/en/laptops/", "/in/en/d/"],
+      "aliases": ["loq", "legion", "thinkpad", "ideapad", "yoga"]
+    },
+    "asus": {
+      "tld": "com",
+      "domains": ["rog.asus.com"],
+      "store_paths": ["/in/store/", "/in/displays-desktops/", "/in/laptops/"],
+      "aliases": ["tuf", "rog", "zenbook", "vivobook"]
+    },
+    "hp": {
+      "tld": "com",
+      "store_paths": ["/in-en/shop/", "/in-en/products/"],
+      "aliases": ["victus", "omen", "pavilion", "envy", "spectre"]
+    },
+    "dell": {
+      "tld": "com",
+      "store_paths": ["/en-in/shop/"],
+      "aliases": ["alienware", "g15", "g16", "xps", "inspiron"]
+    },
+    "acer": {
+      "tld": "com",
+      "store_paths": ["/in-en/store/"],
+      "aliases": ["predator", "nitro", "aspire", "swift"]
+    },
+    "msi": {
+      "tld": "com",
+      "store_paths": ["/store/"],
+      "aliases": ["katana", "cyborg", "bravo", "thin", "stealth", "raider"]
+    },
+    "apple": {
+      "tld": "com",
+      "store_paths": ["/in/shop/"],
+      "aliases": ["macbook", "mac", "iphone", "ipad"]
+    },
+    "samsung": {
+      "tld": "com",
+      "store_paths": ["/in/"],
+      "aliases": ["galaxy"]
+    },
+    "google": {
+      "tld": "com",
+      "store_paths": ["store.google.com"],
+      "aliases": ["pixel"]
+    },
+    "oneplus": {
+      "tld": "in",
+      "domains": ["oneplus.com"],
+      "store_paths": ["/in/"],
+      "aliases": []
+    },
+    "xiaomi": {
+      "domains": ["mi.com"],
+      "store_paths": ["/in/"],
+      "aliases": ["redmi"]
+    },
+    "microsoft": {
+      "tld": "com",
+      "store_paths": ["/en-in/store/"],
+      "aliases": ["surface"]
+    },
+    "razer": {
+      "tld": "com",
+      "store_paths": ["/razerstore/"],
+      "aliases": ["blade"]
+    },
+    "gigabyte": {
+      "tld": "com",
+      "domains": ["aorus.com"],
+      "aliases": ["aorus"]
+    },
+    "python": {
+      "tld": "org",
+      "aliases": []
+    },
+    "nodejs": {
+      "tld": "org",
+      "aliases": ["node"]
+    },
+    "rust": {
+      "domains": ["rust-lang.org"],
+      "aliases": []
+    },
+    "httpx": {
+      "domains": ["python-httpx.org"],
+      "aliases": []
+    },
+    "aiohttp": {
+      "tld": "org",
+      "aliases": []
+    },
+    "owasp": {
+      "tld": "org",
+      "aliases": []
+    },
+    "portswigger": {
+      "tld": "net",
+      "aliases": []
+    },
+    "searxng": {
+      "tld": "org",
+      "aliases": []
+    },
+    "crawl4ai": {
+      "tld": "com",
+      "aliases": []
+    },
+    "scrapling": {
+      "domains": ["scrapling.readthedocs.io"],
+      "aliases": []
+    },
+    "w3c": {
+      "domains": ["w3.org"],
+      "aliases": ["world wide web consortium"]
+    },
+    "nasa": {
+      "tld": "gov",
+      "domains": ["science.nasa.gov"],
+      "aliases": ["national aeronautics and space administration"]
+    },
+    "cpsc": {
+      "tld": "gov",
+      "aliases": ["consumer product safety commission"]
+    },
+    "faa": {
+      "tld": "gov",
+      "aliases": ["federal aviation administration"]
+    },
+    "tsa": {
+      "tld": "gov",
+      "aliases": ["transportation security administration"]
+    }
+  }
+}

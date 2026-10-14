@@ -13,6 +13,7 @@ import sys
 import time
 import threading
 from collections import OrderedDict
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 # Windows event-loop policy (must precede zmq/asyncio imports)
@@ -184,7 +185,6 @@ from charlie.attention import AttentionLevel
 from charlie.watchers import (
     WatcherRegistry,
     cpu_ram_watcher,
-    mcp_health_watcher,
     path_change_watcher,
     repeated_tool_failure_watcher,
     stalled_task_watcher,
@@ -224,8 +224,6 @@ _runtime_health = HealthRegistry(
         "brain",
         "llm",
         "memory",
-        "plugins",
-        "mcp",
         "telegram",
         "voice",
         "voice_capture",
@@ -242,6 +240,7 @@ _MEDIA_RESULT_CACHE_MAX = 512
 _CALENDAR_RESULT_CACHE_MAX = 512
 _SETTINGS_RESULT_CACHE_MAX = 512
 _EXTENSION_RESULT_CACHE_MAX = 512
+_WEB_TEXT_COMMAND_CACHE_MAX = 512
 from charlie.runtime_identity import git_build_identity
 
 _SOURCE_IDENTITY, _SOURCE_DIRTY = git_build_identity(Path(__file__).resolve().parent)
@@ -330,85 +329,6 @@ def _telegram_approval_reason(tool_name: str, risk_class: Any, reason: str = "")
     return "This action may change something on your PC. Please review it before approving."
 
 
-def _reload_plugin_tools_state(
-    runtime_config: Any,
-    current_manager: Any,
-    *,
-    registry: Any,
-    register_plugin_tools: Callable[[Any], Any],
-    empty_manager_factory: Callable[[], Any],
-    set_health: Callable[[str, HealthStatus], None],
-) -> tuple[bool, str, Any]:
-    """Reload plugin tools and return the manager that owns their closures."""
-    for name in [name for name in registry._tools if name.startswith("plugin_")]:
-        registry.unregister_tool(name)
-    if runtime_config.plugins_enabled:
-        try:
-            replacement_manager = register_plugin_tools(runtime_config)
-            if replacement_manager is None:
-                set_health("plugins", HealthStatus.DEGRADED)
-                return False, "plugin reload produced no manager", current_manager
-            set_health("plugins", HealthStatus.RUNNING)
-            return True, "", replacement_manager
-        except Exception:
-            logger.warning("Error registering plugins on reload", exc_info=True)
-            set_health("plugins", HealthStatus.DEGRADED)
-            return False, "plugin reload failed", current_manager
-
-    set_health("plugins", HealthStatus.DISABLED)
-    return True, "", empty_manager_factory()
-
-
-async def _reconcile_mcp_extension_runtime(
-    extension_registry: ExtensionRuntimeRegistry,
-    mcp_client: Any,
-    tool_registry: Any,
-    plugin_manager: Any,
-    runtime_config: Any,
-) -> tuple[Any, list[str]]:
-    """Reapply main-owned MCP extensions after canonical client replacement."""
-    from charlie.extensions.install import install_extension
-
-    failed: list[str] = []
-    for extension in extension_registry.list():
-        if extension.kind != "mcp":
-            continue
-        if mcp_client is not None and extension.name in getattr(mcp_client, "_servers", {}):
-            mcp_client.remove_server(tool_registry, extension.name)
-        if not extension.enabled:
-            extension.tool_names = []
-            extension.runtime_warning = None
-            continue
-        if mcp_client is None:
-            extension.enabled = False
-            extension.tool_names = []
-            extension.runtime_warning = "Runtime extension degraded"
-            failed.append(extension.name)
-            continue
-        try:
-            tool_names, mcp_client = await asyncio.to_thread(
-                install_extension,
-                "mcp",
-                extension.name,
-                extension.source,
-                extension.raw_text,
-                tool_registry,
-                plugin_manager,
-                mcp_client,
-                list(getattr(runtime_config, "plugin_allow_dirs", []) or []),
-                mcp_enabled=bool(getattr(runtime_config, "mcp_enabled", False)),
-            )
-            extension.enabled = True
-            extension.tool_names = list(tool_names)
-            extension.runtime_warning = None
-        except Exception:
-            extension.enabled = False
-            extension.tool_names = []
-            extension.runtime_warning = "Runtime extension degraded"
-            failed.append(extension.name)
-    return mcp_client, failed
-
-
 async def _publish_settings_snapshot(
     bus: Optional[EventBus],
     settings_service: Any,
@@ -439,7 +359,8 @@ async def _run_self_extension_request(
             "message": "Self-extension runtime is not initialized.",
         }
     else:
-        request = self_extension_orchestrator.plan_request(
+        request = await asyncio.to_thread(
+            self_extension_orchestrator.plan_request,
             str(request_payload.get("prompt", "")),
             explicit_user_request=bool(request_payload.get("explicit", True)),
             affected_settings=dict(request_payload.get("settings") or {}),
@@ -701,8 +622,6 @@ def _configure_runtime_health(runtime_config: Any) -> None:
         "brain": (True, True, True, "main.brain"),
         "llm": (True, True, bool(getattr(runtime_config, "llm_url", "")), "main.brain"),
         "memory": (True, False, True, "main.memory"),
-        "plugins": (bool(getattr(runtime_config, "plugins_enabled", False)), False, True, "main.plugins"),
-        "mcp": (bool(getattr(runtime_config, "mcp_enabled", False)), False, True, "main.mcp"),
         "telegram": (bool(getattr(runtime_config, "telegram_enabled", False)), False, None, "main.telegram"),
         "voice": (voice_enabled, False, None, "main.voice"),
         "voice_capture": (voice_enabled, False, None, "main.voice"),
@@ -746,7 +665,6 @@ def _build_runtime_introspector(
     *,
     config: Any,
     capability_index: Any,
-    mcp_client: Any,
     memory_service: Any = None,
 ) -> Any:
     """Compose introspection around this process's canonical runtime owners."""
@@ -759,7 +677,6 @@ def _build_runtime_introspector(
         health_registry=_runtime_health,
         task_journal=get_task_journal(),
         lease_manager=get_capability_lease_manager(),
-        mcp_client=mcp_client,
         memory_service=memory_service,
     )
 
@@ -1078,7 +995,7 @@ async def _publish_task_snapshot(bus: Optional[EventBus] = None) -> None:
     tasks = [background_task._public_event_from_record(record) for record in get_task_journal().list()]
     await bus.emit(
         EventType.TASK_SNAPSHOT.value,
-        {"tasks": tasks},
+        {"tasks": tasks, "task_id": None},
         meta=EventMeta(source=EventSource.TASK),
     )
 
@@ -1136,140 +1053,6 @@ async def _publish_tool_snapshot(
     )
 
 
-_MCP_SENSITIVE_ARGUMENT_MARKERS = frozenset(
-    {
-        "api-key",
-        "api_key",
-        "apikey",
-        "auth",
-        "authorization",
-        "credential",
-        "env",
-        "header",
-        "headers",
-        "password",
-        "private-key",
-        "private_key",
-        "secret",
-        "token",
-    }
-)
-
-
-def _sanitize_mcp_args(args: Any) -> list[str]:
-    """Keep public MCP command arguments useful without exposing secrets."""
-    if args is None:
-        return []
-    if not isinstance(args, list) or any(not isinstance(arg, str) for arg in args):
-        raise ValueError("MCP server arguments must be a list of strings.")
-
-    safe_args: list[str] = []
-    redact_next = False
-    for arg in args:
-        lowered = arg.strip().lower()
-        if redact_next:
-            safe_args.append("<redacted>")
-            redact_next = False
-            continue
-        if "=" in arg:
-            option, _value = arg.split("=", 1)
-            marker = option.lstrip("-").strip().lower()
-            if marker in _MCP_SENSITIVE_ARGUMENT_MARKERS:
-                safe_args.append(f"{option}=<redacted>")
-                continue
-        marker = lowered.lstrip("-")
-        if marker in _MCP_SENSITIVE_ARGUMENT_MARKERS:
-            safe_args.append(arg)
-            redact_next = True
-            continue
-        if "authorization:" in lowered or lowered.startswith("bearer "):
-            safe_args.append("<redacted>")
-            continue
-        safe_args.append(arg)
-    return safe_args
-
-
-def _build_mcp_snapshot(mcp_client: Any = None, *, enabled: Optional[bool] = None) -> dict[str, Any]:
-    """Build a safe MCP projection from main's canonical MCP client only."""
-    detailed = [] if mcp_client is None else mcp_client.list_servers_detailed()
-    if not isinstance(detailed, list):
-        raise ValueError("Main MCP client returned an invalid server list.")
-
-    servers: list[dict[str, Any]] = []
-    seen_names: set[str] = set()
-    for item in detailed:
-        if not isinstance(item, dict):
-            raise ValueError("Main MCP client returned invalid server metadata.")
-        name = item.get("name")
-        if not isinstance(name, str) or not name.strip() or name in seen_names:
-            raise ValueError("Main MCP client returned invalid or duplicate server names.")
-        running = item.get("running")
-        if type(running) is not bool:
-            raise ValueError("Main MCP client returned invalid server running state.")
-        status = item.get("status")
-        if not isinstance(status, str) or not status.strip():
-            raise ValueError("Main MCP client returned invalid server status.")
-
-        raw_tools = item.get("tools", [])
-        if not isinstance(raw_tools, list):
-            raise ValueError("Main MCP client returned invalid server tools.")
-        tools: list[dict[str, str]] = []
-        seen_tool_names: set[str] = set()
-        for tool in raw_tools:
-            if not isinstance(tool, dict):
-                raise ValueError("Main MCP client returned invalid tool metadata.")
-            tool_name = tool.get("name")
-            description = tool.get("description", "")
-            if (
-                not isinstance(tool_name, str)
-                or not tool_name.strip()
-                or tool_name in seen_tool_names
-                or not isinstance(description, str)
-            ):
-                raise ValueError("Main MCP client returned invalid or duplicate tool metadata.")
-            seen_tool_names.add(tool_name)
-            tools.append({"name": tool_name, "description": description})
-
-        command = item.get("command", "")
-        if not isinstance(command, str):
-            raise ValueError("Main MCP client returned invalid server command.")
-        servers.append(
-            {
-                "name": name,
-                "command": command,
-                "args": _sanitize_mcp_args(item.get("args", [])),
-                "running": running,
-                "status": status,
-                "tools_count": len(tools),
-                "tools": tools,
-            }
-        )
-        seen_names.add(name)
-
-    if enabled is None:
-        enabled = bool(getattr(config, "mcp_enabled", False))
-    return {"authority": "main_runtime", "enabled": bool(enabled), "servers": servers}
-
-
-async def _publish_mcp_snapshot(
-    bus: Optional[EventBus] = None,
-    mcp_client: Any = None,
-    *,
-    enabled: Optional[bool] = None,
-) -> None:
-    """Publish current main-owned MCP state over IPC."""
-    if bus is None:
-        return
-    await bus.emit(
-        EventType.MCP_SNAPSHOT.value,
-        _build_mcp_snapshot(mcp_client, enabled=enabled),
-        meta=EventMeta(
-            source=EventSource.RUNTIME,
-            rationale="authoritative main-runtime MCP snapshot",
-        ),
-    )
-
-
 async def _publish_runtime_telemetry(bus: Optional[EventBus] = None) -> None:
     """Publish current main-owned runtime telemetry snapshot over IPC."""
     target_bus = bus or _main_event_bus
@@ -1306,7 +1089,6 @@ _main_telemetry.set_telemetry_listener(_on_telemetry_updated)
 
 async def _publish_runtime_state(
     bus: Optional[EventBus] = None,
-    mcp_client: Any = None,
     settings_service: Any = None,
     extension_registry: Optional[ExtensionRuntimeRegistry] = None,
 ) -> None:
@@ -1314,7 +1096,6 @@ async def _publish_runtime_state(
     await _publish_subsystem_health(bus)
     await _publish_task_snapshot(bus)
     await _publish_tool_snapshot(bus)
-    await _publish_mcp_snapshot(bus, mcp_client)
     await _publish_runtime_telemetry(bus)
     await _publish_settings_snapshot(bus, settings_service, rationale="runtime settings projection replay")
     await _publish_extension_snapshot(bus, extension_registry, rationale="runtime extension projection replay")
@@ -1410,19 +1191,16 @@ def apply_extension_operation(
     payload: dict[str, Any],
     *,
     brain: Any,
-    plugin_manager: Any,
-    mcp_client: Any,
-    runtime_config: Any,
     tool_registry: Any = None,
     extension_registry: Optional[ExtensionRuntimeRegistry] = None,
-) -> tuple[dict[str, Any], Any]:
+) -> dict[str, Any]:
     """Apply one extension transition against main's live runtime owners."""
     if not isinstance(payload, dict):
         payload = {}
     operation = payload.get("operation")
     name = payload.get("name")
     allowed_operations = {"install", "enable", "disable", "uninstall"}
-    allowed_kinds = {"mcp", "skill", "openapi", "plugin", "generated"}
+    allowed_kinds = {"skill", "openapi", "generated"}
     fingerprint = canonical_extension_request_fingerprint(str(operation or "invalid"), payload)
     if (
         not isinstance(payload.get("request_id"), str)
@@ -1436,40 +1214,31 @@ def apply_extension_operation(
             and (not isinstance(payload.get("kind"), str) or payload["kind"] not in allowed_kinds)
         )
     ):
-        return (
-            _extension_operation_result(
+        return _extension_operation_result(
                 payload,
                 success=False,
                 tool_names=[],
                 error="Invalid extension operation request.",
                 request_fingerprint=fingerprint,
-            ),
-            mcp_client,
         )
 
     entry = extension_registry.get(name) if extension_registry is not None else None
     if operation != "install" and extension_registry is not None and entry is None:
-        return (
-            _extension_operation_result(
+        return _extension_operation_result(
                 payload,
                 success=False,
                 tool_names=[],
                 error=f"Unknown extension '{name}' in main runtime.",
                 request_fingerprint=fingerprint,
-            ),
-            mcp_client,
         )
 
     if operation == "install" and extension_registry is not None and extension_registry.get(name) is not None:
-        return (
-            _extension_operation_result(
+        return _extension_operation_result(
                 payload,
                 success=False,
                 tool_names=[],
                 error=f"Extension '{name}' is already installed in main runtime.",
                 request_fingerprint=fingerprint,
-            ),
-            mcp_client,
         )
 
     kind = entry.kind if entry is not None else payload.get("kind")
@@ -1477,19 +1246,15 @@ def apply_extension_operation(
     raw_text = entry.raw_text if entry is not None else str(payload.get("raw_text", ""))
     known_tool_names = list(entry.tool_names) if entry is not None else payload.get("tool_names", [])
     if not isinstance(kind, str) or kind not in allowed_kinds:
-        return (
-            _extension_operation_result(
+        return _extension_operation_result(
                 payload,
                 success=False,
                 tool_names=[],
                 error="Invalid extension kind.",
                 request_fingerprint=fingerprint,
-            ),
-            mcp_client,
         )
     if not isinstance(known_tool_names, list) or any(not isinstance(item, str) for item in known_tool_names):
-        return (
-            _extension_operation_result(
+        return _extension_operation_result(
                 payload,
                 success=False,
                 tool_names=[],
@@ -1497,8 +1262,6 @@ def apply_extension_operation(
                 kind=kind,
                 name=name,
                 request_fingerprint=fingerprint,
-            ),
-            mcp_client,
         )
 
     if tool_registry is None:
@@ -1511,25 +1274,11 @@ def apply_extension_operation(
         else None
     )
     before_skill_block = getattr(brain, "_installed_skill_blocks", {}).get(name)
-    plugin_was_registered = bool(
-        plugin_manager is not None
-        and getattr(plugin_manager, "get_plugin", lambda _name: None)(name) is not None
-    )
     try:
         if operation == "install":
             from charlie.extensions.install import install_extension
 
-            tool_names, mcp_client = install_extension(
-                kind,
-                name,
-                source,
-                raw_text,
-                registry=tool_registry,
-                plugin_manager=plugin_manager,
-                mcp_client=mcp_client,
-                plugin_allow_dirs=list(getattr(runtime_config, "plugin_allow_dirs", []) or []),
-                mcp_enabled=bool(getattr(runtime_config, "mcp_enabled", False)),
-            )
+            tool_names = install_extension(kind, name, source, raw_text, registry=tool_registry)
             if kind == "skill":
                 from charlie.extensions.skills import format_skill_block, parse_skill_md
 
@@ -1549,87 +1298,33 @@ def apply_extension_operation(
                     )
                 )
         elif operation == "enable":
-            if kind == "mcp":
-                # Enabling a server starts a subprocess, so it is gated by the same
-                # enablement flag as installation. Previously this path reached
-                # enable_server directly and bypassed the check entirely.
-                if not bool(getattr(runtime_config, "mcp_enabled", False)):
-                    raise RuntimeError(
-                        "MCP is disabled: refusing to enable MCP server "
-                        f"{name!r}. Set MCP_ENABLED=true (config.mcp_enabled) to allow it."
-                    )
-                if mcp_client is None:
-                    raise RuntimeError("Main MCP client is unavailable.")
-                tool_names = mcp_client.enable_server(tool_registry, name)
-            elif kind == "plugin":
-                from charlie.extensions.install import builtin_plugin
-                from charlie.tools import enable_plugin
+            from charlie.extensions.install import install_extension
 
-                tool_names = enable_plugin(
-                    tool_registry,
-                    plugin_manager,
-                    builtin_plugin(name, list(getattr(runtime_config, "plugin_allow_dirs", []) or [])),
-                )
-            else:
-                from charlie.extensions.install import install_extension
+            tool_names = install_extension(kind, name, source, raw_text, registry=tool_registry)
+            if kind == "skill":
+                from charlie.extensions.skills import format_skill_block, parse_skill_md
 
-                tool_names, mcp_client = install_extension(
-                    kind,
-                    name,
-                    source,
-                    raw_text,
-                    registry=tool_registry,
-                    plugin_manager=plugin_manager,
-                    mcp_client=mcp_client,
-                    plugin_allow_dirs=list(getattr(runtime_config, "plugin_allow_dirs", []) or []),
-                    mcp_enabled=bool(getattr(runtime_config, "mcp_enabled", False)),
-                )
-                if kind == "skill":
-                    from charlie.extensions.skills import format_skill_block, parse_skill_md
-
-                    brain.add_installed_skill_block(name, format_skill_block(parse_skill_md(raw_text)))
+                brain.add_installed_skill_block(name, format_skill_block(parse_skill_md(raw_text)))
             if entry is not None:
                 entry.enabled = True
                 entry.tool_names = list(tool_names)
                 entry.runtime_warning = None
         elif operation == "disable":
-            if kind == "mcp":
-                if mcp_client is None or not mcp_client.disable_server(tool_registry, name):
-                    raise KeyError(f"MCP server '{name}' is not registered in main runtime.")
-            elif kind == "plugin":
-                from charlie.tools import disable_plugin
-
-                if entry is None or entry.enabled:
-                    if plugin_manager.get_plugin(name) is None:
-                        raise KeyError(f"Plugin '{name}' is not registered in main runtime.")
-                    disable_plugin(tool_registry, plugin_manager, name)
-            else:
-                for tool_name in known_tool_names:
-                    tool_registry.unregister_tool(tool_name)
-                if kind == "skill":
-                    brain.remove_installed_skill_block(name)
+            for tool_name in known_tool_names:
+                tool_registry.unregister_tool(tool_name)
+            if kind == "skill":
+                brain.remove_installed_skill_block(name)
             tool_names = []
             if entry is not None:
                 entry.enabled = False
                 entry.tool_names = []
                 entry.runtime_warning = None
         else:  # uninstall
-            if kind == "mcp":
-                if mcp_client is None or not mcp_client.remove_server(tool_registry, name):
-                    raise KeyError(f"MCP server '{name}' is not registered in main runtime.")
-            elif kind == "plugin":
-                from charlie.tools import disable_plugin
-
-                if entry is None or entry.enabled:
-                    if plugin_manager.get_plugin(name) is None:
-                        raise KeyError(f"Plugin '{name}' is not registered in main runtime.")
-                    disable_plugin(tool_registry, plugin_manager, name)
-            else:
-                if entry is not None and entry.enabled:
-                    for tool_name in known_tool_names:
-                        tool_registry.unregister_tool(tool_name)
-                if kind == "skill":
-                    brain.remove_installed_skill_block(name)
+            if entry is not None and entry.enabled:
+                for tool_name in known_tool_names:
+                    tool_registry.unregister_tool(tool_name)
+            if kind == "skill":
+                brain.remove_installed_skill_block(name)
             tool_names = []
             if extension_registry is not None:
                 extension_registry.remove(name)
@@ -1637,61 +1332,25 @@ def apply_extension_operation(
         if not isinstance(tool_names, list) or any(not isinstance(item, str) for item in tool_names):
             raise ValueError("Extension owner returned invalid tool names.")
         brain.rebuild_stable_tier()
-        return (
-            _extension_operation_result(
+        return _extension_operation_result(
                 payload,
                 success=True,
                 tool_names=list(tool_names),
                 kind=kind,
                 name=name,
                 request_fingerprint=fingerprint,
-            ),
-            mcp_client,
         )
     except Exception as exc:
         reason = str(exc).strip() or type(exc).__name__
         rollback_ok = True
         try:
             if operation in {"install", "enable"}:
-                if kind == "mcp" and mcp_client is not None:
-                    if operation == "install":
-                        mcp_client.remove_server(tool_registry, name)
-                    elif operation == "enable" and before_entry_state and not before_entry_state[0]:
-                        mcp_client.disable_server(tool_registry, name)
-                elif kind == "plugin" and plugin_manager is not None:
-                    from charlie.tools import disable_plugin
-
-                    if plugin_manager.get_plugin(name) is not None and (
-                        not plugin_was_registered
-                        or (operation == "enable" and before_entry_state and not before_entry_state[0])
-                    ):
-                        disable_plugin(tool_registry, plugin_manager, name)
                 if kind == "skill" and before_skill_block is None:
                     brain.remove_installed_skill_block(name)
             elif operation in {"disable", "uninstall"} and before_entry_state and before_entry_state[0]:
-                if kind == "plugin":
-                    from charlie.extensions.install import builtin_plugin
-                    from charlie.tools import enable_plugin
+                from charlie.extensions.install import install_extension
 
-                    enable_plugin(
-                        tool_registry,
-                        plugin_manager,
-                        builtin_plugin(name, list(getattr(runtime_config, "plugin_allow_dirs", []) or [])),
-                    )
-                else:
-                    from charlie.extensions.install import install_extension
-
-                    install_extension(
-                        kind,
-                        name,
-                        source,
-                        raw_text,
-                        registry=tool_registry,
-                        plugin_manager=plugin_manager,
-                        mcp_client=mcp_client,
-                        plugin_allow_dirs=list(getattr(runtime_config, "plugin_allow_dirs", []) or []),
-                        mcp_enabled=bool(getattr(runtime_config, "mcp_enabled", False)),
-                    )
+                install_extension(kind, name, source, raw_text, registry=tool_registry)
                 if kind == "skill" and before_skill_block is not None:
                     brain.add_installed_skill_block(name, before_skill_block)
 
@@ -1747,8 +1406,7 @@ def apply_extension_operation(
         if not rollback_ok:
             safe_reason = f"{safe_reason}; runtime extension state is degraded"
         logger.warning("Main extension operation failed: %s", safe_reason)
-        return (
-            _extension_operation_result(
+        return _extension_operation_result(
                 payload,
                 success=False,
                 tool_names=[],
@@ -1756,8 +1414,6 @@ def apply_extension_operation(
                 kind=kind,
                 name=name,
                 request_fingerprint=fingerprint,
-            ),
-            mcp_client,
         )
 
 
@@ -1780,9 +1436,6 @@ async def _handle_extension_operation_request(
     payload: Any,
     *,
     brain: Any,
-    plugin_manager: Any,
-    mcp_client: Any,
-    runtime_config: Any,
     tool_registry: Any,
     extension_registry: ExtensionRuntimeRegistry,
     event_bus: Any,
@@ -1790,7 +1443,7 @@ async def _handle_extension_operation_request(
     in_flight: dict[str, Any],
     fingerprint_cache: dict[str, str],
     operation_lock: Optional[asyncio.Lock] = None,
-) -> tuple[dict[str, Any], Any]:
+) -> dict[str, Any]:
     payload = payload if isinstance(payload, dict) else {}
     request_id = str(payload.get("request_id") or uuid.uuid4().hex)
     payload = dict(payload)
@@ -1819,7 +1472,7 @@ async def _handle_extension_operation_request(
             request_fingerprint=fingerprint,
         )
         conflict["runtime_status"] = "request_id_conflict"
-        return await publish(conflict, cache=False), mcp_client
+        return await publish(conflict, cache=False)
 
     cached = result_cache.get(request_id)
     if cached is not None:
@@ -1832,8 +1485,8 @@ async def _handle_extension_operation_request(
                 request_fingerprint=fingerprint,
             )
             conflict["runtime_status"] = "request_id_conflict"
-            return await publish(conflict, cache=False), mcp_client
-        return await publish(cached), mcp_client
+            return await publish(conflict, cache=False)
+        return await publish(cached)
 
     existing_entry = in_flight.get(request_id)
     existing = existing_entry[0] if isinstance(existing_entry, tuple) else existing_entry
@@ -1851,16 +1504,13 @@ async def _handle_extension_operation_request(
                 request_fingerprint=fingerprint,
             )
             conflict["runtime_status"] = "request_id_conflict"
-            return await publish(conflict, cache=False), mcp_client
+            return await publish(conflict, cache=False)
         await asyncio.shield(existing)
         cached = result_cache.get(request_id)
         if cached is not None:
-            return await publish(cached), mcp_client
-        return (
-            _extension_operation_result(
+            return await publish(cached)
+        return _extension_operation_result(
                 payload, success=False, tool_names=[], error="Extension operation was cancelled"
-            ),
-            mcp_client,
         )
 
     if current is not None:
@@ -1870,18 +1520,14 @@ async def _handle_extension_operation_request(
         await operation_lock.acquire()
         lock_acquired = True
     try:
-        result, updated_mcp_client = apply_extension_operation(
+        result = apply_extension_operation(
             payload,
             brain=brain,
-            plugin_manager=plugin_manager,
-            mcp_client=mcp_client,
-            runtime_config=runtime_config,
             tool_registry=tool_registry,
             extension_registry=extension_registry,
         )
         result["request_fingerprint"] = fingerprint
         await _publish_tool_snapshot(event_bus, tool_registry)
-        await _publish_mcp_snapshot(event_bus, updated_mcp_client)
         await _publish_extension_snapshot(
             event_bus,
             extension_registry,
@@ -1893,7 +1539,7 @@ async def _handle_extension_operation_request(
             meta=EventMeta(source=EventSource.BRAIN, task_id=request_id, rationale="main extension authority result"),
         )
         _cache_extension_result(result_cache, request_id, result, fingerprint_cache, fingerprint)
-        return result, updated_mcp_client
+        return result
     finally:
         entry = in_flight.get(request_id)
         if current is not None and (
@@ -1902,15 +1548,6 @@ async def _handle_extension_operation_request(
             in_flight.pop(request_id, None)
         if lock_acquired:
             operation_lock.release()
-
-
-def _try_build_mcp_snapshot(mcp_client: Any) -> Optional[dict[str, Any]]:
-    """Build a snapshot for operation accounting without inventing state."""
-    try:
-        return _build_mcp_snapshot(mcp_client)
-    except Exception as exc:
-        logger.error("Could not build authoritative MCP snapshot: %s", exc, exc_info=True)
-        return None
 
 
 def _set_subsystem_health(name: str, status: HealthStatus, public_detail: Optional[str] = None) -> None:
@@ -2122,7 +1759,13 @@ def _strip_tool_lines(text: str) -> str:
 
 
 def _safe_speak(
-    voice, text: str, emotion: str, label: str = "", *, channel: Optional[str] = None
+    voice,
+    text: str,
+    emotion: str,
+    label: str = "",
+    *,
+    channel: Optional[str] = None,
+    speech_owner: Optional[Any] = None,
 ) -> None:
     """Speak text, logging (not swallowing) any TTS failure.
 
@@ -2135,13 +1778,116 @@ def _safe_speak(
     if not text:
         return
     try:
-        voice.speak(text.strip(), emotion)
+        if speech_owner is None:
+            voice.speak(text.strip(), emotion)
+        else:
+            voice.speak(text.strip(), emotion, speech_owner=speech_owner)
     except Exception:
         logger.warning(
             "TTS speak failed%s: dropping audio only, answer continues",
             f" ({label})" if label else "",
             exc_info=True,
         )
+
+
+async def _speak_turn_work_progress(
+    brain,
+    voice,
+    request,
+    get_state,
+    is_current,
+    *,
+    speech_owner: Any,
+    initial_delay: float = 5.0,
+    interval: float = 20.0,
+) -> None:
+    """Speak question-specific runtime updates only while a voice turn is waiting."""
+    if request.channel != "voice":
+        return
+    logger.info("spoken_work_progress_started | turn_id=%s", request.turn_id)
+    previous = None
+    update_attempts = 0
+    await asyncio.sleep(initial_delay)
+    while is_current():
+        state = dict(get_state())
+        signature = json.dumps(state, sort_keys=True)
+        stage = state.get("stage")
+        is_research_work = stage in {"planning", "searching", "found", "reading"} and bool(
+            state.get("query") or state.get("source_count") is not None
+        )
+        is_synthesis = stage == "answer_generation" and bool(
+            state.get("source_acquisition_finished") or state.get("source_count") is not None
+        )
+        is_action = stage == "action_in_progress" and bool(state.get("operation"))
+        if signature != previous and (is_research_work or is_synthesis or is_action) and update_attempts < 2:
+            previous = signature
+            try:
+                update_attempts += 1
+                logger.info("spoken_work_progress_attempt | turn_id=%s | stage=%s", request.turn_id, state.get("stage"))
+                update = str(state.get("message") or "").strip()
+                if not update:
+                    update = await brain.spoken_work_update(request.input, state)
+                current_state = dict(get_state())
+                if (
+                    update and is_current()
+                    and current_state.get("stage") == stage
+                    and not voice.is_speaking.is_set()
+                ):
+                    _safe_speak(
+                        voice,
+                        update,
+                        "neutral",
+                        "work-progress",
+                        channel=request.channel,
+                        speech_owner=speech_owner,
+                    )
+                    logger.info(
+                        "spoken_work_progress | turn_id=%s | session_id=%s | stage=%s | text=%r",
+                        request.turn_id, request.session_id, state.get("stage"), update,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("Spoken work progress skipped", exc_info=True)
+        await asyncio.sleep(interval)
+
+
+def _spoken_research_summary(report) -> str:
+    """Extract a short spoken summary from the validated report answer."""
+    answer = str(getattr(report, "answer", "") or "")
+    section = (
+        r"(?:coverage(?:\s+(?:notes|summary|gaps|and limitations))?|research coverage|"
+        r"sources?(?:\s+(?:and\s+)?citations?)?|bibliography|citations?|"
+        r"evidence(?:\s+coverage)?|diagnostics|research details)"
+    )
+    kept = []
+    for line in answer.splitlines():
+        if re.match(rf"(?i)^\s*(?:#{{1,6}}\s*)?{section}\b(?:\s*:\s*.*|\s+-\s+.*|\s*)$", line):
+            break
+        if re.match(r"^\s*\[S\d+\]\s+https?://", line, re.I):
+            continue
+        kept.append(line)
+    summary = " ".join(kept)
+    summary = re.sub(r"\[S\d+\]", "", summary)
+    summary = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", summary)
+    summary = re.sub(r"https?://\S+", "", summary)
+    summary = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", summary)
+    summary = re.sub(r"\s+([,.!?;:])", r"\1", summary)
+    summary = re.sub(r"\s+", " ", summary).strip(" \t\r\n-*#")
+    sentences = re.split(r"(?<=[.!?])\s+", summary)
+    spoken = []
+    word_count = 0
+    for sentence in sentences[:2]:
+        words = sentence.split()
+        if word_count + len(words) <= 30:
+            spoken.append(sentence)
+            word_count += len(words)
+        elif not spoken:
+            spoken.append(" ".join(words[:30]).rstrip(" ,;:.!?") + ".")
+            break
+        else:
+            break
+    return " ".join(spoken).strip()
 
 
 def _print_console_reply(text: str) -> None:
@@ -2201,23 +1947,6 @@ async def _apply_voice_control(
             logger.debug("Voice control cancellation task exited with an error", exc_info=True)
     logger.info("voice_control_applied | control=%s | action=cancel_foreground", control)
     return True
-
-
-async def _restart_mcp_client(old_client, config):
-    """Stop old_client and start a fresh one, both off the event loop.
-
-    mcp_client.stop() and start_mcp() are synchronous and block on
-    subprocess handshakes (up to config.timeout, default 30s per server);
-    called directly inside an async def they freeze the whole event loop,
-    including the foreground voice loop, for that long.
-    """
-    if old_client is not None:
-        await asyncio.to_thread(old_client.stop)
-    if not config.mcp_enabled:
-        return None
-    from charlie.mcp_client import start_mcp
-
-    return await asyncio.to_thread(start_mcp, config)
 
 
 def _semantic_memory_expected(runtime_config: Config) -> bool:
@@ -2328,12 +2057,22 @@ async def _deliver_background_result(
         message = message[:4000].rstrip()
 
     delivery = {"telegram": "not_configured", "voice": "not_configured"}
+    def cancellation_requested() -> bool:
+        try:
+            task = get_task_journal().get(task_id)
+        except KeyError:
+            return True
+        return task.cancel_requested or task.status.value == "cancelled"
+
     if (
         channel == "telegram"
         and telegram_bot is not None
         and isinstance(telegram_user_id, int)
         and telegram_user_id > 0
     ):
+        if cancellation_requested():
+            delivery["telegram"] = "not_delivered"
+            return delivery
         try:
             await telegram_bot.send_message(telegram_user_id, message)
             delivery["telegram"] = "accepted"
@@ -2341,6 +2080,9 @@ async def _deliver_background_result(
             delivery["telegram"] = "failed"
             logger.warning("Telegram background-result delivery failed for %s", task_id, exc_info=True)
     if channel == "voice" and bool(getattr(voice, "is_ready", False)):
+        if cancellation_requested():
+            delivery["voice"] = "not_delivered"
+            return delivery
         try:
             spoken = spoken_summary or message
             delivery["voice"] = "queued" if voice.speak(spoken, "neutral") is None else "not_queued"
@@ -2353,6 +2095,11 @@ async def _deliver_background_result(
 
 
 _DASHBOARD_RESEARCH_HISTORY_LIMIT = 10
+_RESEARCH_TELEGRAM_HANDOFF = re.compile(
+    r"\b(?:send|share|forward)\b(?s:.{0,120}?)\b(?:research|findings|results|report|that|this|it)\b"
+    r"(?s:.{0,80}?)\b(?:to|over|via|on)\s+(?:my\s+)?telegram\b",
+    re.IGNORECASE,
+)
 _DASHBOARD_ACTIVITY_HISTORY_LIMIT = 40
 _DASHBOARD_ACTIVITY_EVENT_TYPES = frozenset({
     "background_task",
@@ -2368,6 +2115,52 @@ _DASHBOARD_ACTIVITY_EVENT_TYPES = frozenset({
     "browser_task_done",
     "alert",
 })
+
+
+def _is_research_telegram_handoff(text: str) -> bool:
+    return bool(_RESEARCH_TELEGRAM_HANDOFF.search(text.strip()))
+
+
+def _latest_completed_research_result(
+    history_by_session: dict[str, list[dict[str, Any]]], session_id: str
+) -> Optional[dict[str, Any]]:
+    for item in reversed(history_by_session.get(session_id, [])):
+        result_text = item.get("text") or item.get("answer") if isinstance(item, dict) else None
+        if (
+            isinstance(item, dict)
+            and item.get("session_id") == session_id
+            and item.get("partial") is False
+            and item.get("completeness") == "complete"
+            and item.get("termination_reason") == "completed"
+            and isinstance(result_text, str)
+            and result_text.strip()
+        ):
+            return item
+    return None
+
+
+async def _send_recent_research_to_telegram(
+    history_by_session: dict[str, list[dict[str, Any]]],
+    session_id: str,
+    *,
+    telegram_enabled: bool,
+    telegram_token_configured: bool,
+    telegram_user_id: int,
+    telegram_bot: Any,
+) -> str:
+    if not telegram_enabled or not telegram_token_configured or telegram_user_id <= 0 or telegram_bot is None:
+        return "unavailable"
+    result = _latest_completed_research_result(history_by_session, session_id)
+    if result is None:
+        return "missing"
+    try:
+        message_id = await telegram_bot.send_message(
+            telegram_user_id, result.get("text") or result["answer"]
+        )
+    except Exception:
+        logger.warning("Telegram research handoff delivery failed", exc_info=True)
+        return "failed"
+    return "sent" if message_id is not None else "unconfirmed"
 
 
 def _append_dashboard_research_result(
@@ -2447,6 +2240,30 @@ def _dashboard_activity_event(event: dict[str, Any]) -> dict[str, Any]:
     return {**event, "payload": activity_payload}
 
 
+def _research_resource_records(items: Any) -> list[dict[str, str]]:
+    from urllib.parse import urlparse
+
+    records = []
+    for item in items or []:
+        raw_url = str(getattr(item, "url", "") or "").strip()
+        url = raw_url
+        canonical_url = str(getattr(item, "canonical_url", "") or "").strip()
+        parsed = urlparse(url)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            url = canonical_url
+            parsed = urlparse(url)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            continue
+        domain = str(getattr(item, "domain", "") or "").strip() or parsed.hostname or parsed.netloc
+        records.append({
+            "title": str(getattr(item, "title", "") or "").strip()[:300] or domain,
+            "url": url,
+            "canonical_url": canonical_url if url == raw_url else url,
+            "domain": domain[:255],
+        })
+    return records
+
+
 async def main() -> int:
     global _main_event_bus, _main_event_bus_registry
     # Claim the runtime before doing any real startup work. The expensive part
@@ -2491,8 +2308,6 @@ async def main() -> int:
     recent_turn_texts: Dict[str, float] = {}
     _DEDUPE_WINDOW_SEC = 20.0
     telegram_bot = None
-    mcp_client = None
-    mcp_start_task = None
     exit_code = 0
     shutdown_quiescent = True
     # True while a chat turn's LLM/tool loop runs -- see _dispatch_or_queue.
@@ -2501,6 +2316,9 @@ async def main() -> int:
     pending_turn_times: Dict[str, float] = {}
     voice_diagnostic_traces: Dict[str, Any] = {}
     turn_channels_by_id: Dict[str, str] = {}
+    turn_work_states: Dict[str, dict] = {}
+    turn_research_turns = set()
+    turn_spoken_research_summaries: Dict[str, str] = {}
     repeated_success_patterns_by_turn: Dict[str, list[dict[str, str]]] = {}
     telegram_status_messages_by_turn: Dict[str, int] = {}
     telegram_status_text_by_turn: Dict[str, str] = {}
@@ -2529,6 +2347,8 @@ async def main() -> int:
     session_lifecycle_gate = asyncio.Lock()
     extension_runtime_registry = ExtensionRuntimeRegistry()
     extension_operation_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
+    # shortcut: process-local acknowledgments, so refresh/restart or eviction can admit a retry again; persist only if that becomes an acceptance requirement.
+    web_text_command_results: OrderedDict[str, tuple[str, str, dict[str, Any]]] = OrderedDict()
     extension_operation_in_flight: dict[str, Any] = {}
     extension_operation_fingerprints: dict[str, str] = {}
     event_bus_registry = _EventBusSubmissionRegistry()
@@ -2685,6 +2505,8 @@ async def main() -> int:
             task.add_done_callback(_finished)
             return task
 
+        desktop_focus_overlay_tasks = set()
+
         def on_tool_call(name, args, *, turn_id=None, task_id=None, session_id=None):
             nonlocal active_operation_name, active_operation_task_id, active_operation_cancellable
             if task_id == active_task_id:
@@ -2713,8 +2535,22 @@ async def main() -> int:
                     loop,
                 )
 
+        def on_tool_execution_start(name, args, *, turn_id=None, task_id=None, session_id=None):
+            from charlie.computer.focus_overlay import is_desktop_focus_tool, show_desktop_focus
+
+            if is_desktop_focus_tool(name) and show_desktop_focus(name, args):
+                desktop_focus_overlay_tasks.add(task_id or turn_id)
+
         def on_tool_result(name, result, *, turn_id=None, task_id=None, session_id=None):
             nonlocal active_operation_name, active_operation_task_id, active_operation_cancellable
+            from charlie.computer.focus_overlay import hide_desktop_focus, is_desktop_focus_tool
+
+            overlay_task = task_id or turn_id
+            if is_desktop_focus_tool(name) and (overlay_task in desktop_focus_overlay_tasks or None in desktop_focus_overlay_tasks):
+                desktop_focus_overlay_tasks.discard(overlay_task)
+                if None in desktop_focus_overlay_tasks:
+                    desktop_focus_overlay_tasks.discard(None)
+                hide_desktop_focus()
             if task_id == active_operation_task_id:
                 active_operation_name = None
                 active_operation_task_id = None
@@ -2737,6 +2573,60 @@ async def main() -> int:
 
         def on_operation_result(name: str, envelope: ResultEnvelope):
             """Record structured operation status while the legacy text callback stays unchanged."""
+            event_session_id = envelope.session_id or current_session_id
+            structured = envelope.data.get("structured_data")
+            if not isinstance(structured, dict):
+                structured = next((item for item in envelope.artifacts if isinstance(item, dict)), None)
+            if not isinstance(structured, dict) and isinstance(envelope.data, dict) and envelope.data.get("verified") is True:
+                structured = envelope.data
+            if name in {"weather_get", "stopwatch_control", "timer_create", "timer_cancel", "dashboard_widget_control"} and (
+                event_session_id != current_session_id or not isinstance(structured, dict)
+            ):
+                logger.debug(
+                    "Dashboard widget result projection skipped: tool=%s session_match=%s structured=%s",
+                    name,
+                    event_session_id == current_session_id,
+                    isinstance(structured, dict),
+                )
+            if event_session_id == current_session_id and isinstance(structured, dict) and structured.get("verified") is True:
+                changed = False
+                if name == "weather_get":
+                    location = structured.get("location")
+                    current = structured.get("current")
+                    daily = structured.get("daily")
+                    units = structured.get("units")
+                    if isinstance(location, dict) and isinstance(current, dict):
+                        sunset_values = daily.get("sunset") if isinstance(daily, dict) else None
+                        dashboard_widget_state["weather"] = {
+                            "location": str(location.get("name") or location.get("display_name") or ""),
+                            "temperature": current.get("temperature_2m"),
+                            "temperature_unit": units.get("temperature_2m", "°C") if isinstance(units, dict) else "°C",
+                            "feels_like": current.get("apparent_temperature"),
+                            "humidity": current.get("relative_humidity_2m"),
+                            "wind_speed": current.get("wind_speed_10m"),
+                            "wind_speed_unit": units.get("wind_speed_10m", "km/h") if isinstance(units, dict) else "km/h",
+                            "weather_code": current.get("weather_code"),
+                            "observed_at": current.get("time"),
+                            "sunset": sunset_values[0] if isinstance(sunset_values, list) and sunset_values else None,
+                        }
+                        changed = True
+                elif name == "stopwatch_control":
+                    state = structured.get("state")
+                    elapsed = structured.get("elapsed_seconds")
+                    if state in {"running", "stopped"} and isinstance(elapsed, (int, float)):
+                        dashboard_widget_state["stopwatch"] = {
+                            "state": state,
+                            "elapsed_seconds": max(0.0, float(elapsed)),
+                            "sampled_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        changed = True
+                elif name in {"timer_create", "timer_cancel"}:
+                    changed = True
+                elif name == "dashboard_widget_control" and isinstance(structured.get("visible"), bool):
+                    changed = structured.get("widget", "clock") in {"clock", "weather", "timer", "stopwatch", "music", "system_status"}
+                if changed:
+                    _publish_dashboard_widgets()
+
             try:
                 active_audit_store = audit_store
             except NameError:
@@ -2953,6 +2843,23 @@ async def main() -> int:
 
         def on_thinking_update(name, args, *, turn_id=None, task_id=None, session_id=None):
             event_session_id = session_id or current_session_id
+            if turn_id and turn_channels_by_id.get(turn_id) == "voice":
+                state = {"stage": "action_in_progress", "operation": name}
+                if name == "research" and isinstance(args, dict):
+                    turn_research_turns.add(turn_id)
+                    state = {
+                        key: args[key]
+                        for key in (
+                            "stage", "message", "current", "total", "query",
+                            "source_count", "search_result_count", "evidence_count",
+                            "passage_count", "finding_count", "resolved_count", "unresolved_count",
+                        )
+                        if key in args
+                    }
+                    if state.get("stage") in {"done", "synthesizing"}:
+                        state["stage"] = "answer_generation"
+                        state["source_acquisition_finished"] = True
+                turn_work_states[turn_id] = state
             if turn_id and turn_channels_by_id.get(turn_id) == "telegram":
                 background_record = None
                 if task_id:
@@ -3366,11 +3273,26 @@ async def main() -> int:
         recent_research_results = {}
 
         def on_research_result(report, *, session_id, task_id=None, turn_id=None, channel=None):
+            if turn_id and turn_id in turn_work_states:
+                coverage = list(getattr(report, "coverage", []) or [])
+                turn_work_states[turn_id] = {
+                    "stage": "answer_generation",
+                    "source_count": len(getattr(report, "sources", []) or []),
+                    "evidence_count": len(getattr(report, "evidence", []) or []),
+                    "passage_count": len(getattr(report, "passages", []) or []),
+                    "finding_count": len(getattr(report, "facts", []) or []),
+                    "resolved_count": sum(getattr(item, "status", "") in {"supported", "contradicted"} for item in coverage),
+                    "unresolved_count": sum(getattr(item, "status", "") == "unresolved" for item in coverage),
+                    "partial": bool(getattr(report, "partial", False)),
+                }
+                if channel == "voice" or turn_channels_by_id.get(turn_id) == "voice":
+                    turn_research_turns.add(turn_id)
+                    turn_spoken_research_summaries[turn_id] = _spoken_research_summary(report)
             if event_bus is None:
                 return False
             from charlie.research.search import clean_query
             from charlie.research.citations import referenced_ids
-            from charlie.research.sources import SourceClass
+            from charlie.research.sources import citation_source_class
             from datetime import datetime, timezone
 
             used_sources = referenced_ids(report.answer) if getattr(report, "answer", "") else set()
@@ -3380,21 +3302,39 @@ async def main() -> int:
                 if not used_sources or item.source_id in used_sources
             ]
             included_passage_ids = {item.passage_id for item in included_passages}
+            raw_search_results = list(getattr(report, "search_results", []) or [])
+            raw_read_pages = list(getattr(report, "sources", []) or [])
+            search_results = _research_resource_records(raw_search_results)
+            read_pages = _research_resource_records(raw_read_pages)
             sources_list = []
             for citation in report.citations:
-                if not used_sources or citation.source_id in used_sources:
-                    s_class = SourceClass.UNKNOWN.value
+                if citation.source_id in used_sources:
+                    s_class = None
                     if hasattr(report, "sources"):
                         for s in report.sources:
                             if s.source_id == citation.source_id:
-                                s_class = getattr(s, "source_class", SourceClass.UNKNOWN.value)
+                                s_class = getattr(s, "source_class", None)
                                 break
+                    s_class = citation_source_class(
+                        s_class, citation.url, brief=getattr(report, "brief", None)
+                    )
                     sources_list.append({
                         "id": citation.source_id,
                         "title": citation.title,
                         "url": citation.url,
                         "class": s_class,
                     })
+
+            logger.info(
+                "research_result_resources | turn_id=%s | raw_search=%d | displayed_links=%d "
+                "| raw_pages=%d | displayed_pages=%d | cited_sources=%d",
+                turn_id,
+                len(raw_search_results),
+                len(search_results),
+                len(raw_read_pages),
+                len(read_pages),
+                len(sources_list),
+            )
 
             sources_text = "\n".join(
                 f"[{item['id']}] {item['title']}: {item['url']}"
@@ -3426,20 +3366,21 @@ async def main() -> int:
                 "turn_id": turn_id,
                 "session_id": session_id,
                 "query": topic,
+                "mode": getattr(getattr(report, "mode", None), "value", None),
                 "text": legacy_text,
                 "answer": answer,
                 "partial": getattr(report, "partial", False),
                 "completeness": getattr(getattr(report, "completeness", None), "value", None),
                 "termination_reason": getattr(getattr(report, "termination_reason", None), "value", None),
                 "stop_reason": getattr(report, "stop_reason", ""),
-                "search_result_count": len(getattr(report, "search_results", [])),
-                "document_count": len(getattr(report, "sources", [])),
+                "search_result_count": len(search_results),
+                "document_count": len(read_pages),
                 "evidence_count": len(getattr(report, "evidence", [])),
                 "passage_count": len(getattr(report, "passages", [])),
                 "fact_count": len(getattr(report, "facts", [])),
-                "source_urls": list(dict.fromkeys(
-                    source.url for source in getattr(report, "sources", []) if getattr(source, "url", "")
-                )),
+                "search_results": search_results[:80],
+                "read_pages": read_pages[:80],
+                "source_urls": list(dict.fromkeys(item["url"] for item in read_pages)),
                 "evidence": [
                     {
                         "source_id": item.source_id,
@@ -3548,7 +3489,12 @@ async def main() -> int:
                 memory_service=memory_service,
                 on_tool_call=on_tool_call,
                 on_tool_result=on_tool_result,
+                on_tool_execution_start=on_tool_execution_start,
                 on_operation_result=on_operation_result,
+                get_current_weather_location=lambda: (
+                    memory_service.get_preference("current_location")
+                    or (dashboard_widget_state.get("weather") or {}).get("location")
+                ),
                 on_intent_decision=on_intent_decision,
                 on_thinking_update=on_thinking_update,
                 on_tool_approval_request=on_tool_approval_request,
@@ -3647,65 +3593,43 @@ async def main() -> int:
 
         # Canonical memory facade wiring stays owned by main's composition root.
         _wire_memory_service(memory_service)
-        # The SAME registry the LLM calls, so when PLUGINS_ENABLED=true the
-        # plugin_* tools appear alongside the built-in tools and are gated by
-        # the flag off by default.
-        from charlie.tools import register_plugin_tools
-
-        try:
-            plugin_manager = register_plugin_tools(config)
-            if plugin_manager is None:
-                logger.info("Plugin system disabled (PLUGINS_ENABLED=false).")
-                _set_subsystem_health("plugins", HealthStatus.DISABLED)
-            else:
-                logger.info("Plugin system ACTIVE: plugin_* tools registered.")
-                _set_subsystem_health("plugins", HealthStatus.RUNNING)
-        except Exception as e:
-            logger.warning(f"Plugin system failed to initialize: {e}")
-            plugin_manager = None
-            _set_subsystem_health("plugins", HealthStatus.DEGRADED)
-        if plugin_manager is None:
-            # Always keep a manager available so the main-authoritative
-            # extension_operation handler can enable/disable one built-in plugin
-            # even when the blanket PLUGINS_ENABLED flag is off.
-            from charlie.plugins import PluginManager
-
-            plugin_manager = PluginManager()
-
-        # Wire the MCP subsystem into the SAME shared tool registry (no-op unless enabled).
-        # Runs on a thread, awaited later, so it overlaps with VoiceEngine/STT startup instead of blocking it.
-        mcp_client = None
         self_extension_orchestrator = None
-        if config.mcp_enabled:
-            _set_subsystem_health("mcp", HealthStatus.STARTING)
-
-        async def _start_mcp_task():
-            nonlocal mcp_client
-            try:
-                if config.mcp_enabled:
-                    from charlie.mcp_client import start_mcp
-
-                    mcp_client = await asyncio.to_thread(start_mcp, config)
-                    if mcp_client is None:
-                        logger.info("MCP subsystem not started (no servers configured)")
-                        _set_subsystem_health("mcp", HealthStatus.DISABLED)
-                    else:
-                        _set_subsystem_health("mcp", HealthStatus.RUNNING)
-                else:
-                    logger.info("MCP subsystem not enabled (MCP_ENABLED=false)")
-                    _set_subsystem_health("mcp", HealthStatus.DISABLED)
-            except Exception as e:
-                logger.warning(f"MCP subsystem failed to initialize: {e}")
-                mcp_client = None
-                _set_subsystem_health("mcp", HealthStatus.DEGRADED)
-            finally:
-                await _publish_subsystem_health(event_bus)
-
-        mcp_start_task = asyncio.create_task(_start_mcp_task())
 
         # Placeholder for event_bus (set later in async context)
         event_bus = None
         current_session_id = f"voice_{_LAUNCH_ID}"
+        _default_hidden_widgets = {"weather", "stopwatch", "music", "timer", "system_status"}
+        _saved_widget_visibility = None
+        if memory_service:
+            try:
+                _saved_widget_visibility = json.loads(
+                    memory_service.get_preference("dashboard_widget_visibility") or "null"
+                )
+            except Exception:
+                logger.warning("Dashboard widget visibility preference could not be read", exc_info=True)
+        dashboard_widget_state = {
+            "weather": None,
+            "stopwatch": None,
+            "timers": [],
+            "media": None,
+            "system_status": None,
+            "clock_visible": (
+                _saved_widget_visibility.get("clock_visible") is True
+                if isinstance(_saved_widget_visibility, dict) else False
+            ),
+            "hidden_widgets": _default_hidden_widgets,
+        }
+        if isinstance(_saved_widget_visibility, dict):
+            saved_hidden = _saved_widget_visibility.get("hidden_widgets")
+            if isinstance(saved_hidden, list) and len(saved_hidden) <= 512 and all(
+                isinstance(item, str) and len(item) <= 128
+                and (item in {"weather", "stopwatch", "music", "timer", "system_status"} or item.startswith("timer:"))
+                for item in saved_hidden
+            ):
+                saved_hidden_set = set(saved_hidden)
+                if _saved_widget_visibility.get("schema_version", 1) < 2:
+                    saved_hidden_set.add("system_status")
+                dashboard_widget_state["hidden_widgets"] = saved_hidden_set
 
         def ensure_session_ready(session_id: str):
             if not session_id:
@@ -3972,6 +3896,74 @@ async def main() -> int:
         async def _web_command(command: dict[str, Any]) -> dict[str, Any]:
             """Route browser commands through canonical runtime owners."""
             command_type = str(command.get("type", ""))
+            if command_type in {"set_dashboard_widget_visibility", "set_clock_widget_visibility"}:
+                widget = "clock" if command_type == "set_clock_widget_visibility" else command.get("widget")
+                result = _set_dashboard_widget_visibility(widget, command.get("visible"), command.get("widget_id"))
+                if result.get("accepted"):
+                    _publish_dashboard_widgets()
+                return result
+            if command_type == "update_timer":
+                import math
+                from datetime import timedelta
+
+                schedule_id = command.get("schedule_id")
+                text = command.get("text", "Timer finished")
+                delay_seconds = command.get("delay_seconds")
+                delivery_channel = command.get("delivery_channel", "web")
+                if not isinstance(schedule_id, str) or not schedule_id.strip():
+                    raise ValueError("schedule_id must be a non-empty string")
+                if not isinstance(delivery_channel, str) or delivery_channel not in {"web", "voice"}:
+                    raise ValueError("delivery_channel must match a dashboard-visible timer")
+                if not isinstance(text, str) or len(text) > 120:
+                    raise ValueError("text must be a string of at most 120 characters")
+                if isinstance(delay_seconds, bool) or not isinstance(delay_seconds, (int, float)) or not math.isfinite(delay_seconds) or delay_seconds <= 0:
+                    raise ValueError("delay_seconds must be a positive finite number")
+                if calendar_runtime is None:
+                    return {"accepted": False, "error": "The timer service is unavailable."}
+                schedule = await calendar_runtime.execute("get_automation", schedule_id)
+                if (schedule.get("kind") != "reminder" or schedule.get("recurrence") != "once"
+                    or schedule.get("status") != "active" or schedule.get("delivery_channel") != delivery_channel
+                    or schedule.get("active_run_status") == "running"):
+                    return {"accepted": False, "error": "This timer is no longer editable."}
+                due_at = (datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)).isoformat()
+                updated = await calendar_runtime.execute("update_automation", schedule_id, {
+                    "text": text.strip() or "Timer finished",
+                    "first_run_at": due_at,
+                })
+                if (updated.get("status") != "active" or updated.get("text") != (text.strip() or "Timer finished")
+                    or updated.get("delivery_channel") != delivery_channel):
+                    return {"accepted": False, "error": "Charlie could not verify the timer change."}
+                _publish_dashboard_widgets()
+                return {"accepted": True, "schedule_id": schedule_id, "due_at": updated.get("next_run_at")}
+            if command_type == "stopwatch_control":
+                action = command.get("action")
+                if action not in {"start", "stop", "reset"}:
+                    raise ValueError("action must be start, stop, or reset")
+                from charlie.tools import stopwatch_control
+
+                result = await asyncio.to_thread(stopwatch_control, action)
+                structured = result.structured_data if isinstance(result.structured_data, dict) else {}
+                if structured.get("verified") is not True:
+                    return {"accepted": False, "error": "Charlie could not verify the stopwatch change."}
+                dashboard_widget_state["stopwatch"] = {
+                    "state": structured.get("state"),
+                    "elapsed_seconds": structured.get("elapsed_seconds"),
+                    "sampled_at": datetime.now(timezone.utc).isoformat(),
+                }
+                _publish_dashboard_widgets()
+                return {"accepted": True, **structured}
+            if command_type == "media_control":
+                action = command.get("action")
+                if action not in {"play_pause", "next_track", "prev_track"}:
+                    raise ValueError("action must be play_pause, next_track, or prev_track")
+                from charlie.tools import media_control
+
+                result = await asyncio.to_thread(media_control, action)
+                structured = result.structured_data if isinstance(result.structured_data, dict) else {}
+                if structured.get("ok") is not True:
+                    return {"accepted": False, "error": str(structured.get("reason") or "Media command was unavailable.")}
+                _publish_dashboard_widgets()
+                return {"accepted": True, "action": action, "verified": structured.get("verified") is True}
             if command_type == "update_settings":
                 updates = command.get("updates")
                 if not isinstance(updates, dict) or not updates:
@@ -4005,16 +3997,52 @@ async def main() -> int:
                 text = command.get("text")
                 if not isinstance(text, str) or not text.strip():
                     raise ValueError("text must be a non-empty string")
-                request = _allocate_turn_request(text.strip(), current_session_id, "web")
-                _schedule_process(_dispatch_or_queue(request), loop)
-                return {"accepted": True, "turn_id": request.turn_id, "session_id": request.session_id}
+                request_id = command.get("request_id")
+                session_id = command.get("session_id")
+                if not isinstance(request_id, str) or not request_id.strip() or len(request_id) > 128:
+                    raise ValueError("request_id must be a non-empty string of at most 128 characters")
+                if not isinstance(session_id, str) or not session_id.strip():
+                    raise ValueError("session_id must be a non-empty string")
+                clean_text = text.strip()
+                cached = web_text_command_results.get(request_id)
+                if cached is not None:
+                    cached_session_id, cached_text, acknowledgement = cached
+                    if (cached_session_id, cached_text) != (session_id, clean_text):
+                        return {"accepted": False, "error": "request_id is already bound to a different text or session."}
+                    web_text_command_results.move_to_end(request_id)
+                    return dict(acknowledgement)
+                if session_id != current_session_id:
+                    return {"accepted": False, "error": "The dashboard session changed; refresh before sending this message."}
+                request = _allocate_turn_request(clean_text, session_id, "web")
+                acknowledgement = {"accepted": True, "turn_id": request.turn_id, "session_id": request.session_id}
+                web_text_command_results[request_id] = (session_id, clean_text, acknowledgement)
+                web_text_command_results.move_to_end(request_id)
+                while len(web_text_command_results) > _WEB_TEXT_COMMAND_CACHE_MAX:
+                    web_text_command_results.popitem(last=False)
+                process_coro = _dispatch_or_queue(request)
+                try:
+                    scheduled = _schedule_process(process_coro, loop)
+                except Exception:
+                    web_text_command_results.pop(request_id, None)
+                    process_coro.close()
+                    raise
+                if scheduled is None:
+                    web_text_command_results.pop(request_id, None)
+                    return {"accepted": False, "error": "The runtime could not schedule this message."}
+                return dict(acknowledgement)
             if command_type == "cancel_task":
                 task_id = command.get("task_id")
                 if not isinstance(task_id, str) or not task_id.strip():
                     raise ValueError("task_id must be a non-empty string")
-                record = get_task_journal().cancel(task_id)
+                accepted = background_task.cancel(task_id)
+                record = get_task_journal().get(task_id)
                 await _publish_task_snapshot(event_bus)
-                return {"accepted": True, "task_id": record.id, "status": record.status.value}
+                return {
+                    "accepted": accepted,
+                    "task_id": record.id,
+                    "status": record.status.value,
+                    "cancel_requested": record.cancel_requested,
+                }
             if command_type in {"approve", "reject"}:
                 request_id = command.get("request_id")
                 if not isinstance(request_id, str) or not request_id.strip():
@@ -4034,6 +4062,148 @@ async def main() -> int:
                 return {"accepted": True, "request_id": request_id, "approved": command_type == "approve"}
             raise ValueError(f"unsupported web command: {command_type}")
 
+        def _dashboard_widgets_snapshot() -> dict[str, Any]:
+            media = dashboard_widget_state.get("media")
+            return {
+                "timers": list(dashboard_widget_state.get("timers", [])),
+                "weather": dashboard_widget_state.get("weather"),
+                "stopwatch": dashboard_widget_state.get("stopwatch"),
+                **({"media": media} if isinstance(media, dict) else {}),
+                "clock_visible": dashboard_widget_state.get("clock_visible", False),
+                "hidden_widgets": sorted(dashboard_widget_state.get("hidden_widgets", set())),
+                "system_status": dashboard_widget_state.get("system_status"),
+            }
+
+        def _refresh_dashboard_widgets_snapshot() -> dict[str, Any]:
+            timers = list(dashboard_widget_state.get("timers", []))
+            media = dashboard_widget_state.get("media")
+            try:
+                from charlie.tools import media_snapshot
+
+                snapshot_result = media_snapshot().structured_data
+                if isinstance(snapshot_result, dict):
+                    media = snapshot_result
+            except Exception:
+                logger.warning("dashboard media snapshot could not be loaded", exc_info=True)
+            if calendar_runtime is not None:
+                try:
+                    schedules = calendar_runtime.execute_sync("list_automations")
+                    timers = [
+                        {
+                            "id": schedule.get("id"),
+                            "text": schedule.get("text", "Timer"),
+                            "due_at": schedule.get("next_run_at") or schedule.get("first_run_at"),
+                            "timezone": schedule.get("timezone"),
+                            "delivery_channel": schedule.get("delivery_channel"),
+                        }
+                        for schedule in schedules
+                        if schedule.get("kind") == "reminder"
+                        and schedule.get("recurrence") == "once"
+                        and schedule.get("status") == "active"
+                        and schedule.get("delivery_channel") in {"web", "voice"}
+                        and isinstance(schedule.get("next_run_at") or schedule.get("first_run_at"), str)
+                    ]
+                except Exception:
+                    logger.warning("dashboard timer widget snapshot could not be loaded", exc_info=True)
+            dashboard_widget_state["timers"] = timers
+            dashboard_widget_state["media"] = media
+            return _dashboard_widgets_snapshot()
+
+        dashboard_media_signature = None
+
+        def _dashboard_media_signature(widgets: dict[str, Any]) -> tuple[Any, ...] | None:
+            media = widgets.get("media")
+            if not isinstance(media, dict):
+                return None
+            return tuple(media.get(key) for key in (
+                "available", "adapter_available", "title", "artist", "album", "app", "status", "duration_seconds",
+            ))
+
+        def _set_dashboard_widget_visibility(widget: Any, visible: Any, widget_id: Any = None) -> dict[str, Any]:
+            if not isinstance(widget, str) or widget not in {"clock", "weather", "timer", "stopwatch", "music", "system_status"}:
+                return {"accepted": False, "error": "unknown dashboard widget"}
+            if not isinstance(visible, bool):
+                return {"accepted": False, "error": "visible must be a boolean"}
+            if widget_id is not None and (
+                widget != "timer"
+                or not isinstance(widget_id, str)
+                or not widget_id.strip()
+                or widget_id != widget_id.strip()
+                or len(widget_id) > 128
+            ):
+                return {"accepted": False, "error": "widget_id is valid only for a timer"}
+            previous_clock_visibility = dashboard_widget_state.get("clock_visible", False)
+            previous_hidden_widgets = set(dashboard_widget_state.get("hidden_widgets", set()))
+            if widget == "clock":
+                dashboard_widget_state["clock_visible"] = visible
+            else:
+                hidden = dashboard_widget_state.setdefault("hidden_widgets", set())
+                if widget == "timer" and visible and widget_id is None:
+                    hidden.difference_update([item for item in hidden if item == "timer" or item.startswith("timer:")])
+                elif widget == "timer" and visible:
+                    hidden.discard("timer")
+                    hidden.discard(f"timer:{widget_id}")
+                elif widget == "timer" and widget_id is not None:
+                    hidden.add(f"timer:{widget_id}")
+                elif visible:
+                    hidden.discard(widget)
+                else:
+                    hidden.add(widget)
+            try:
+                stored = memory_service.set_preference(
+                    "dashboard_widget_visibility",
+                    json.dumps({
+                        "schema_version": 2,
+                        "clock_visible": dashboard_widget_state["clock_visible"],
+                        "hidden_widgets": sorted(dashboard_widget_state["hidden_widgets"]),
+                    }, separators=(",", ":")),
+                    provenance="dashboard_widget_control",
+                ) if memory_service else False
+            except Exception:
+                logger.warning("Dashboard widget visibility preference could not be saved", exc_info=True)
+                stored = False
+            if not stored:
+                dashboard_widget_state["clock_visible"] = previous_clock_visibility
+                dashboard_widget_state["hidden_widgets"] = previous_hidden_widgets
+                return {"accepted": False, "error": "Widget preference could not be saved."}
+            return {"accepted": True, "widget": widget, "visible": visible, **({"widget_id": widget_id} if widget_id else {})}
+
+        def _publish_dashboard_widgets(widgets: dict[str, Any] | None = None) -> None:
+            nonlocal dashboard_media_signature
+            if event_bus is None:
+                return
+            try:
+                widgets = widgets if widgets is not None else _dashboard_widgets_snapshot()
+                dashboard_media_signature = _dashboard_media_signature(widgets)
+                _submit_event_threadsafe(
+                    event_bus.emit(
+                        "dashboard_widgets",
+                        {
+                            "widgets": widgets,
+                            "channel": "web",
+                            "session_id": current_session_id,
+                        },
+                        meta=EventMeta(
+                            source=EventSource.BRAIN,
+                            session_id=current_session_id,
+                            rationale="dashboard visibility or timer, stopwatch, weather, and media state changed",
+                        ),
+                    ),
+                    loop,
+                )
+            except RuntimeError:
+                logger.debug("dashboard widgets update skipped during shutdown", exc_info=True)
+
+        async def _media_widget_poll_loop() -> None:
+            while True:
+                await asyncio.sleep(4)
+                gateway = web_gateway
+                if gateway is None or gateway._client_count() == 0:
+                    continue
+                widgets = await asyncio.to_thread(_refresh_dashboard_widgets_snapshot)
+                if _dashboard_media_signature(widgets) != dashboard_media_signature:
+                    _publish_dashboard_widgets(widgets)
+
         def _web_snapshot() -> dict[str, Any]:
             from charlie.core import get_active_tool_approval
             tasks = [
@@ -4046,7 +4216,15 @@ async def main() -> int:
                     current_session_id,
                     limit=_DASHBOARD_RESEARCH_HISTORY_LIMIT + _DASHBOARD_ACTIVITY_HISTORY_LIMIT,
                 ) if store else []
-                conversation_rows = store.get_session_messages(current_session_id, limit=50) if store else []
+                if store:
+                    get_history_with_turns = getattr(store, "get_session_messages_with_turn_ids", None)
+                    conversation_rows = (
+                        get_history_with_turns(current_session_id, limit=50)
+                        if callable(get_history_with_turns)
+                        else [(*row, None) for row in store.get_session_messages(current_session_id, limit=50)]
+                    )
+                else:
+                    conversation_rows = []
             except Exception:
                 logger.warning("dashboard session history could not be loaded", exc_info=True)
                 dashboard_events = []
@@ -4072,8 +4250,13 @@ async def main() -> int:
                 if isinstance(text, str) and text
             }
             conversation_history = [
-                {"id": f"{current_session_id}:{index}", "role": "you" if role == "user" else "charlie", "text": content}
-                for index, (role, content) in enumerate(conversation_rows)
+                {
+                    "id": f"{current_session_id}:{index}",
+                    "role": "you" if role == "user" else "charlie",
+                    "text": content,
+                    **({"turn_id": turn_id} if isinstance(turn_id, str) and turn_id else {}),
+                }
+                for index, (role, content, turn_id) in enumerate(conversation_rows)
                 if role in {"user", "assistant"} and not (role == "assistant" and content in research_texts)
             ]
             activity_history = [
@@ -4117,6 +4300,7 @@ async def main() -> int:
                 },
                 "research_result": research_result,
                 "research_results": research_results,
+                "widgets": _dashboard_widgets_snapshot(),
                 "settings": settings_service.snapshot(),
                 "approval": dict(web_approval_payload) if get_active_tool_approval() == (
                     web_approval_payload.get("request_id"), "web",
@@ -4230,6 +4414,8 @@ async def main() -> int:
                 routing_source: str = "control",
                 confidence: Optional[float] = 1.0,
                 rationale: str = "",
+                execution_policy: ExecutionPolicy = ExecutionPolicy.CONVERSATION,
+                external_action_required: bool = False,
             ) -> None:
                 recorder = getattr(brain, "record_intent_decision", None)
                 if recorder is not None:
@@ -4240,6 +4426,8 @@ async def main() -> int:
                         routing_source=routing_source,
                         confidence=confidence,
                         rationale=rationale,
+                        execution_policy=execution_policy,
+                        external_action_required=external_action_required,
                     )
                 if trace is not None:
                     trace.mark_once(
@@ -4297,7 +4485,9 @@ async def main() -> int:
                         voice.speak("That approval expired.", last_emotion)
                 elif platform == "console" and not resolved:
                     await _deliver_immediate_reply("That approval expired.")
-                elif not resolved and telegram_bot:
+                elif platform == "web" and not resolved:
+                    await _deliver_immediate_reply("That approval expired.")
+                elif platform == "telegram" and not resolved and telegram_bot:
                     try:
                         await telegram_bot.send_message(
                             config.telegram_user_id, "That approval has expired. Send the request again."
@@ -4351,6 +4541,34 @@ async def main() -> int:
                     voice.stop_tts()
                     brain.cancel_chat()
                     speech_echo_cooldown = time.time() + 0.8
+
+            if _is_research_telegram_handoff(text):
+                record_primary_decision(
+                    intent="action",
+                    capabilities=("telegram",),
+                    routing_source="deterministic",
+                    rationale="explicit request to send this session's completed research to Telegram",
+                    execution_policy=ExecutionPolicy.ACTION,
+                    external_action_required=True,
+                )
+                outcome = await _send_recent_research_to_telegram(
+                    recent_research_results,
+                    session_id,
+                    telegram_enabled=bool(config.telegram_enabled),
+                    telegram_token_configured=bool(config.telegram_bot_token),
+                    telegram_user_id=config.telegram_user_id,
+                    telegram_bot=telegram_bot,
+                )
+                response = {
+                    "sent": "I sent the completed research to your Telegram.",
+                    "unavailable": "Telegram isn't configured, so I couldn't send the research.",
+                    "missing": "I don't have a completed research result in this session to send.",
+                    "failed": "I couldn't send the research to Telegram.",
+                    "unconfirmed": "Telegram didn't confirm delivery, so I can't say the research was sent.",
+                }[outcome]
+                await _deliver_immediate_reply(response)
+                mark_response_complete("completed" if outcome == "sent" else outcome)
+                return
 
             # Route !search command
             if text.strip().startswith("!search "):
@@ -4461,15 +4679,6 @@ async def main() -> int:
             # Detect emotion for this turn
             detected_emotion = get_emotion_for_context(text)
 
-            # Sparkle announcements on emotion change
-            sparkle = ""
-            if detected_emotion != last_emotion:
-                sparkle_map = {
-                    "energetic": "Oh, exciting! ",
-                    "calm": "Got it, calming down. ",
-                    "sad": "I hear you. ",
-                }
-                sparkle = sparkle_map.get(detected_emotion, "")
             last_emotion = detected_emotion
 
             # Emit thinking event
@@ -4496,7 +4705,25 @@ async def main() -> int:
             is_first_flush = True
             turn_active = True
             turn_channels_by_id[request.turn_id] = platform
+            turn_work_states[request.turn_id] = {"stage": "response_generation"}
+            progress_task = None
+            progress_owner = None
+            if platform == "voice" and config.voice_enabled:
+                progress_owner = voice.create_speech_owner(request.turn_id)
+                progress_task = asyncio.create_task(
+                    _speak_turn_work_progress(
+                        brain, voice, request,
+                        lambda: turn_work_states.get(request.turn_id, {}),
+                        lambda: active_turn_id == request.turn_id and is_first_chunk,
+                        speech_owner=progress_owner,
+                    ),
+                    name=f"spoken-progress-{request.turn_id}",
+                )
             try:
+                def speak_reply(part, label):
+                    if request.turn_id not in turn_research_turns:
+                        _safe_speak(voice, part, detected_emotion, label, channel=platform)
+
                 async for chunk in brain.chat_stream(
                     text,
                     platform=platform,
@@ -4506,7 +4733,13 @@ async def main() -> int:
                     turn_request=request,
                     diagnostic_trace=trace,
                 ):
+                    if is_first_chunk and not chunk.strip():
+                        continue
                     if is_first_chunk:
+                        if progress_task is not None:
+                            voice.cancel_speech_owner(progress_owner)
+                            progress_task.cancel()
+                            await asyncio.gather(progress_task, return_exceptions=True)
                         print("\r" + " " * 30 + "\r", end="", flush=True)
                         is_first_chunk = False
                     print(chunk, end="", flush=True)
@@ -4533,18 +4766,14 @@ async def main() -> int:
                     if is_first_flush:
                         sentence_buffer, flushed = _flush_complete_sentences(
                             sentence_buffer,
-                            lambda part: _safe_speak(
-                                voice, part, detected_emotion, "first-flush", channel=platform
-                            ),
+                            lambda part: speak_reply(part, "first-flush"),
                         )
                         if flushed:
                             is_first_flush = False
                         elif len(sentence_buffer) >= 150:
                             idx = sentence_buffer.rfind(" ", 0, 150)
                             if idx > 0:
-                                _safe_speak(
-                                    voice, sentence_buffer[:idx], detected_emotion, "first-force", channel=platform
-                                )
+                                speak_reply(sentence_buffer[:idx], "first-force")
                                 sentence_buffer = sentence_buffer[idx:].lstrip()
                             is_first_flush = False
                             flushed = True
@@ -4552,9 +4781,7 @@ async def main() -> int:
                     if not flushed:
                         sentence_buffer, flushed = _flush_complete_sentences(
                             sentence_buffer,
-                            lambda part: _safe_speak(
-                                voice, part, detected_emotion, "sentence", channel=platform
-                            ),
+                            lambda part: speak_reply(part, "sentence"),
                         )
 
                     if not flushed and len(sentence_buffer) >= _MAX_FLUSH_CHARS:
@@ -4563,31 +4790,27 @@ async def main() -> int:
                         clause_idx = _CLAUSE_BOUNDARY.search(sentence_buffer[:_MAX_FLUSH_CHARS])
                         if clause_idx:
                             flush_end = clause_idx.end()
-                            _safe_speak(
-                                voice, sentence_buffer[:flush_end], detected_emotion, "clause", channel=platform
-                            )
+                            speak_reply(sentence_buffer[:flush_end], "clause")
                             sentence_buffer = sentence_buffer[flush_end:].lstrip()
                         else:
                             word_idx = sentence_buffer.rfind(" ", 0, _MAX_FLUSH_CHARS)
                             if word_idx > 0:
-                                _safe_speak(
-                                    voice, sentence_buffer[:word_idx], detected_emotion, "word", channel=platform
-                                )
+                                speak_reply(sentence_buffer[:word_idx], "word")
                                 sentence_buffer = sentence_buffer[word_idx:].lstrip()
                             elif sentence_buffer.strip():
-                                _safe_speak(
-                                    voice,
-                                    sentence_buffer[:_MAX_FLUSH_CHARS],
-                                    detected_emotion,
-                                    "force",
-                                    channel=platform,
-                                )
+                                speak_reply(sentence_buffer[:_MAX_FLUSH_CHARS], "force")
                                 sentence_buffer = sentence_buffer[_MAX_FLUSH_CHARS:]
 
                 # Final TTS for any text that did not reach a progressive boundary.
                 if sentence_buffer.strip():
+                    speak_reply(sentence_buffer, "final")
+                if request.turn_id in turn_research_turns:
                     _safe_speak(
-                        voice, sparkle + sentence_buffer, detected_emotion, "final", channel=platform
+                        voice,
+                        turn_spoken_research_summaries.get(request.turn_id, ""),
+                        "neutral",
+                        "research-summary",
+                        channel=platform,
                     )
 
                 # Persist the generated reply.
@@ -4731,6 +4954,13 @@ async def main() -> int:
                     )
                 raise
             finally:
+                if progress_task is not None:
+                    voice.cancel_speech_owner(progress_owner)
+                    progress_task.cancel()
+                    await asyncio.gather(progress_task, return_exceptions=True)
+                turn_work_states.pop(request.turn_id, None)
+                turn_research_turns.discard(request.turn_id)
+                turn_spoken_research_summaries.pop(request.turn_id, None)
                 turn_channels_by_id.pop(request.turn_id, None)
                 repeated_success_patterns_by_turn.pop(request.turn_id, None)
                 if platform == "telegram" and telegram_bot is not None and self_extension_orchestrator is not None:
@@ -4843,78 +5073,6 @@ async def main() -> int:
                     previous = state
                 await asyncio.sleep(0.1)
 
-        async def _reload_mcp_client() -> tuple[bool, str]:
-            """Stop the MCP subprocess client and restart it if still enabled."""
-            nonlocal mcp_client
-            from charlie.tools import registry
-
-            for k in [k for k in registry._tools if k.startswith("mcp_")]:
-                registry.unregister_tool(k)
-            try:
-                mcp_client = await _restart_mcp_client(mcp_client, config)
-                base_client_missing = bool(config.mcp_enabled and config.mcp_servers and mcp_client is None)
-                mcp_client, failed_extensions = await _reconcile_mcp_extension_runtime(
-                    extension_runtime_registry,
-                    mcp_client,
-                    registry,
-                    plugin_manager,
-                    config,
-                )
-                _set_subsystem_health(
-                    "mcp",
-                    HealthStatus.DEGRADED
-                    if failed_extensions or base_client_missing
-                    else HealthStatus.RUNNING
-                    if mcp_client is not None
-                    else HealthStatus.DISABLED,
-                )
-                if base_client_missing:
-                    return False, "mcp reload produced no client"
-                return (not failed_extensions), "mcp extension reapply failed" if failed_extensions else ""
-            except Exception as ex:
-                logger.warning(f"Error reloading MCP client: {ex}")
-                mcp_client = None
-                try:
-                    mcp_client, _failed_extensions = await _reconcile_mcp_extension_runtime(
-                        extension_runtime_registry,
-                        None,
-                        registry,
-                        plugin_manager,
-                        config,
-                    )
-                except Exception:
-                    logger.warning("MCP extension reconciliation failed after client reload error", exc_info=True)
-                _set_subsystem_health("mcp", HealthStatus.DEGRADED)
-                return False, "mcp reload failed"
-
-        def _reload_plugin_tools() -> tuple[bool, str]:
-            """Re-register plugin tools to match the current enabled flag / allow-dirs."""
-            nonlocal plugin_manager
-            from charlie.plugins import PluginManager
-            from charlie.tools import register_plugin_tools, registry
-
-            success, reason, replacement_manager = _reload_plugin_tools_state(
-                config,
-                plugin_manager,
-                registry=registry,
-                register_plugin_tools=register_plugin_tools,
-                empty_manager_factory=PluginManager,
-                set_health=_set_subsystem_health,
-            )
-            if success:
-                plugin_manager = replacement_manager
-                for entry in extension_runtime_registry.list():
-                    if entry.kind != "plugin":
-                        continue
-                    plugin = plugin_manager.get_plugin(entry.name)
-                    if plugin is None:
-                        entry.enabled = False
-                        entry.tool_names = []
-                    else:
-                        entry.enabled = True
-                        entry.tool_names = [f"plugin_{tool['name']}" for tool in plugin.get_tools()]
-            return success, reason
-
         async def _publish_settings_reload_state() -> None:
             """Refresh projections affected by targeted settings reloads."""
             brain.rebuild_stable_tier()
@@ -4922,7 +5080,6 @@ async def main() -> int:
             from charlie.tools import registry as _reloaded_registry
 
             await _publish_tool_snapshot(event_bus, _reloaded_registry)
-            await _publish_mcp_snapshot(event_bus, mcp_client)
             await _publish_extension_snapshot(
                 event_bus,
                 extension_runtime_registry,
@@ -4930,15 +5087,11 @@ async def main() -> int:
             )
 
         async def _apply_extension_runtime_request(payload: dict[str, Any]) -> dict[str, Any]:
-            nonlocal mcp_client
             from charlie.tools import registry as _extension_registry
 
-            result, mcp_client = await _handle_extension_operation_request(
+            result = await _handle_extension_operation_request(
                 payload,
                 brain=brain,
-                plugin_manager=plugin_manager,
-                mcp_client=mcp_client,
-                runtime_config=config,
                 tool_registry=_extension_registry,
                 extension_registry=extension_runtime_registry,
                 event_bus=event_bus,
@@ -4948,40 +5101,6 @@ async def main() -> int:
                 operation_lock=settings_operation_lock,
             )
             return result
-
-        def _self_extension_runtime_operation(
-            operation: str,
-            name: str,
-            command: str,
-            args: list[str],
-            env: dict[str, str],
-        ) -> dict[str, Any]:
-            raw_text = json.dumps(
-                {
-                    "mcpServers": {
-                        name: {"command": command, "args": list(args), "env": dict(env)},
-                    }
-                },
-                sort_keys=True,
-            )
-            payload = {
-                "request_id": f"self-extension-{uuid.uuid4().hex}",
-                "operation": operation,
-                "kind": "mcp",
-                "name": name,
-                "source": "self_extension",
-                "raw_text": raw_text,
-            }
-            future = _submit_event_threadsafe(_apply_extension_runtime_request(payload), loop)
-            if future is None:
-                return {
-                    "success": False,
-                    "error": "Main extension authority is shutting down or unavailable.",
-                }
-            try:
-                return future.result(timeout=90.0)
-            except Exception as exc:
-                return {"success": False, "error": f"Canonical MCP extension operation failed: {exc}"}
 
         # Telegram runs in-process so it shares the canonical dispatch and approval owners.
         if config.telegram_enabled:
@@ -5249,9 +5368,7 @@ async def main() -> int:
                         disk_percent = psutil.disk_usage(Path.cwd().anchor or "C:\\").percent
                     except (OSError, psutil.Error) as e:
                         logger.debug(f"disk_usage unavailable: {type(e).__name__}: {e}")
-                    await bus.emit(
-                        "system_status",
-                        {
+                    system_status = {
                             "cpu": cpu_percent,
                             "ram": ram_percent,
                             "gpu": await asyncio.to_thread(_read_gpu_percent),
@@ -5259,7 +5376,12 @@ async def main() -> int:
                             "uptime_seconds": time.time() - boot_time,
                             "battery_percent": battery_percent,
                             "disk_percent": disk_percent,
-                        },
+                            "sampled_at_ms": round(time.time() * 1000),
+                        }
+                    dashboard_widget_state["system_status"] = system_status
+                    await bus.emit(
+                        "system_status",
+                        system_status,
                         meta=EventMeta(source=EventSource.VOICE),
                     )
                     if _state_machine.expire_if_due() is not None:
@@ -5304,14 +5426,13 @@ async def main() -> int:
             # "gateway unavailable" and keep the assistant running.
             web_gateway = None
             try:
-                token_file = Path(os.getenv("CHARLIE_WEB_TOKEN_FILE") or "artifacts/web_bootstrap_url.txt")
                 web_gateway = RuntimeWebGateway(
                     loop=loop,
                     command_handler=_web_command,
                     snapshot_getter=_web_snapshot,
                     static_dir=Path(__file__).resolve().parent / "frontend" / "dist",
                     port=config.web_port,
-                    bootstrap_token_file=token_file,
+                    require_auth=False,
                 )
                 web_gateway.start()
                 if (
@@ -5350,16 +5471,8 @@ async def main() -> int:
 
             charlie.recovery._event_bus = bus
             brain.event_bus = bus
-            import charlie.mcp_client
-
-            charlie.mcp_client.set_event_bus(bus, asyncio.get_running_loop())
-
-            # Build one authoritative self-extension service only after the
-            # real EventBus loop and MCP subsystem are available. Chat tools
-            # delegate to this instance; they never construct an orchestrator.
-            await mcp_start_task
             # Publish an initial authoritative runtime snapshot after startup.
-            await _publish_runtime_state(bus, mcp_client, settings_service, extension_runtime_registry)
+            await _publish_runtime_state(bus, settings_service, extension_runtime_registry)
             from charlie.capabilities import get_capability_index
             from charlie.code_index import CodeIndex
             from charlie.doctor import CharlieDoctor
@@ -5376,7 +5489,6 @@ async def main() -> int:
             runtime_introspector = _build_runtime_introspector(
                 config=config,
                 capability_index=shared_capability_index,
-                mcp_client=mcp_client,
                 memory_service=memory_service,
             )
             code_index = CodeIndex()
@@ -5390,7 +5502,6 @@ async def main() -> int:
                 config=config,
                 introspector=runtime_introspector,
                 capability_index=shared_capability_index,
-                mcp_client=mcp_client,
             )
             from charlie.tools import configure_runtime_services, registry as tool_registry
 
@@ -5402,20 +5513,18 @@ async def main() -> int:
                 capability_index=shared_capability_index,
                 event_bus=bus,
                 event_loop=asyncio.get_running_loop(),
-                mcp_client=mcp_client,
                 tool_registry=tool_registry,
-                runtime_extension_operation=_self_extension_runtime_operation,
                 doctor=doctor,
                 code_index=code_index,
                 self_knowledge=self_knowledge,
                 introspector=runtime_introspector,
             )
-            await asyncio.to_thread(self_extension_orchestrator.rehydrate_mcp_runtime)
             configure_runtime_services(
                 self_extension_orchestrator=self_extension_orchestrator,
                 runtime_introspector=runtime_introspector,
                 self_knowledge_service=self_knowledge,
                 doctor=doctor,
+                dashboard_widget_visibility_callback=_set_dashboard_widget_visibility,
             )
             _load_rehydrated_skill_blocks(brain, self_extension_orchestrator)
             if telegram_bot is not None and config.telegram_user_id > 0:
@@ -5437,6 +5546,7 @@ async def main() -> int:
 
             calendar_runtime = CalendarRuntime(config.session_db_path)
             configure_calendar_runtime(calendar_runtime)
+            _publish_dashboard_widgets()
             interrupted_automations = await calendar_runtime.execute("reconcile_automation_claims")
             if interrupted_automations:
                 recovery_notice = (
@@ -5465,19 +5575,30 @@ async def main() -> int:
                             meta=EventMeta(source=EventSource.WATCHER, rationale="local reminder became due"),
                         )
 
-                    async def _deliver_voice(event: dict) -> None:
-                        voice.speak(f"Reminder: {event['title']}", "neutral")
+                    async def _deliver_voice(event: dict) -> bool:
+                        return voice.speak(f"Reminder: {event['title']}", "neutral") is None
+
+                    async def _send_calendar_telegram(event: dict) -> None:
+                        await telegram_bot.send_message(
+                            config.telegram_user_id, f"Reminder: {event['title']}"
+                        )
+
+                    async def _deliver_console_reminder(event: dict) -> None:
+                        print(f"\nReminder: {event['title']}", flush=True)
 
                     async def _deliver_automation_alert(schedule: dict) -> None:
                         message = f"Reminder: {schedule['text']}"
                         await bus.emit(
                             "alert",
-                            {"severity": "info", "message": message, "reminder_id": schedule["id"]},
+                            {"severity": "info", "message": message, "reminder_id": schedule["id"], "channel": schedule.get("delivery_channel")},
                             meta=EventMeta(source=EventSource.WATCHER, rationale="automation reminder became due"),
                         )
 
-                    def _queue_automation_voice(schedule: dict) -> None:
-                        voice.speak(f"Reminder: {schedule['text']}", "neutral")
+                    def _queue_automation_voice(schedule: dict) -> bool:
+                        return voice.speak(f"Reminder: {schedule['text']}", "neutral") is None
+
+                    async def _deliver_console_automation(schedule: dict) -> None:
+                        print(f"\nReminder: {schedule['text']}", flush=True)
 
                     async def _send_automation_telegram(schedule: dict) -> None:
                         await telegram_bot.send_message(
@@ -5502,8 +5623,12 @@ async def main() -> int:
                             voice_callback=(
                                 _deliver_voice if config.voice_enabled and getattr(voice, "is_ready", False) else None
                             ),
+                            telegram_callback=(
+                                _send_calendar_telegram if telegram_bot is not None else None
+                            ),
+                            console_callback=_deliver_console_reminder,
                         )
-                        await deliver_due_automation_reminders(
+                        delivered_automation_reminders = await deliver_due_automation_reminders(
                             calendar_runtime,
                             utc_now_iso(),
                             alert_callback=_deliver_automation_alert,
@@ -5513,7 +5638,10 @@ async def main() -> int:
                             telegram_callback=(
                                 _send_automation_telegram if telegram_bot is not None else None
                             ),
+                            console_callback=_deliver_console_automation,
                         )
+                        if delivered_automation_reminders:
+                            _publish_dashboard_widgets()
                         await deliver_due_automation_tasks(
                             calendar_runtime,
                             utc_now_iso(),
@@ -5524,7 +5652,7 @@ async def main() -> int:
                         raise
                     except Exception:
                         logger.warning("Calendar reminder iteration failed; continuing", exc_info=True)
-                    await asyncio.sleep(15)
+                    await asyncio.sleep(1)
 
             from charlie import background_task as _background_task
 
@@ -5550,9 +5678,6 @@ async def main() -> int:
                 import psutil
 
                 return psutil.cpu_percent(), psutil.virtual_memory().percent
-
-            def _get_mcp_status() -> Dict[str, bool]:
-                return mcp_client.health_check() if mcp_client is not None else {}
 
             _watcher_loop = asyncio.get_running_loop()
 
@@ -5611,7 +5736,6 @@ async def main() -> int:
             _watcher_registry.register(
                 cpu_ram_watcher(_read_cpu_ram_percent, config.alert_cpu_pct, config.alert_ram_pct)
             )
-            _watcher_registry.register(mcp_health_watcher(_get_mcp_status))
             _watcher_registry.register(
                 stalled_task_watcher(lambda: get_task_journal().list(include_terminal=False))
             )
@@ -5665,6 +5789,8 @@ async def main() -> int:
                 system_status_task,
                 calendar_task,
             ]
+            if web_gateway is not None:
+                steady_state_tasks.append(asyncio.create_task(_media_widget_poll_loop(), name="media_widget_poll"))
             if config.voice_enabled:
                 steady_state_tasks.extend(
                     [
@@ -5705,7 +5831,6 @@ async def main() -> int:
                     active_process_for_shutdown,
                     *housekeeping_to_drain,
                     *tuple(background_housekeeping_tasks),
-                    mcp_start_task,
                 ]
                 await _cancel_and_drain(tasks_to_drain, label="event_bus_tasks")
                 try:
@@ -5750,7 +5875,6 @@ async def main() -> int:
 
         active_process_for_shutdown = active_process_task or globals().get("active_process_task")
         outer_tasks = [
-            mcp_start_task,
             active_process_for_shutdown,
             *tuple(background_housekeeping_tasks),
         ]
@@ -5762,6 +5886,17 @@ async def main() -> int:
             _set_subsystem_health_if_known("background_tasks", HealthStatus.DEGRADED, "Shutdown incomplete")
             exit_code = 1
         await _drain_runtime_submissions()
+
+        try:
+            from charlie.computer.backend import reset_backend
+
+            stopped = await asyncio.wait_for(asyncio.to_thread(reset_backend), timeout=22.0)
+            if not stopped:
+                raise RuntimeError("Cua desktop runtime did not confirm shutdown")
+            logger.info("Cua desktop backend shut down")
+        except Exception:
+            exit_code = 1
+            logger.warning("Cua desktop backend shutdown incomplete; its worker may still be running", exc_info=True)
 
         try:
             from charlie.desktop import shutdown_uia_executor
@@ -5781,9 +5916,12 @@ async def main() -> int:
         _stop_voice(final=True)
         try:
             from charlie.browser import controller as browser_controller
-            browser_controller.shutdown()
-        except Exception as e:
-            logger.debug("Browser controller shutdown error: %s", e)
+            stopped = await asyncio.wait_for(asyncio.to_thread(browser_controller.shutdown), timeout=12.0)
+            if not stopped:
+                raise RuntimeError("Playwright controller did not confirm shutdown")
+        except Exception:
+            exit_code = 1
+            logger.warning("Browser controller shutdown incomplete; its worker may still be running", exc_info=True)
 
         get_task_journal().set_on_change(None)
         if telegram_bot is not None:
@@ -5818,13 +5956,6 @@ async def main() -> int:
 
             configure_calendar_runtime(None)
             calendar_runtime = None
-
-        if mcp_client is not None:
-            try:
-                await asyncio.to_thread(mcp_client.stop)
-                logger.info("MCP subsystem stopped")
-            except Exception as e:
-                logger.warning("MCP subsystem stop error: %s", e)
 
         if brain is not None:
             try:

@@ -487,6 +487,7 @@ class TestNormalRoundTrips:
             await brain.close()
 
         assert result == "Local VLM sees the Settings window."
+        assert executed_tools[0] == "desktop_read_screen"
         assert executed_tools.count("desktop_screenshot") == 1
         assert "web_search" not in executed_tools
         assert "web_research" not in executed_tools
@@ -903,7 +904,7 @@ class TestNormalRoundTrips:
 
     @pytest.mark.asyncio
     async def test_explicit_memory_survives_new_brain_session_without_dumping_irrelevant_facts(
-        self, monkeypatch, brain_config
+        self, monkeypatch, brain_config, tmp_path
     ):
         from charlie import tools as tools_module
         from charlie.memory_graph import MemoryGraph
@@ -922,7 +923,7 @@ class TestNormalRoundTrips:
 
             def search(self, query, n_results=3, threshold=None):
                 self.queries.append(query)
-                if "color" not in query.lower():
+                if not any(term in query.lower() for term in ("color", "shade")):
                     return []
                 return [{"text": self.documents[0][0], "distance": 0.1, "metadata": {}}]
 
@@ -933,7 +934,7 @@ class TestNormalRoundTrips:
                 return {"available": True, "document_count": len(self.documents)}
 
         store = PersistentStore()
-        service = MemoryService(graph=MemoryGraph(":memory:"), memory_store=store)
+        service = MemoryService(graph=MemoryGraph(str(tmp_path / "memory.db")), memory_store=store)
         monkeypatch.setattr(tools_module, "_memory_service", service)
 
         session_a = Brain(
@@ -965,8 +966,13 @@ class TestNormalRoundTrips:
         try:
             result = await _collect(session_b, "What is my test color?", skip_pre_search=True, session_id="session-b")
             assert result == "Your test color is blue."
-            assert store.queries == ["What is my test color?"]
+            assert store.queries == []
             assert len(store.documents) == 1
+            assert "my test color is blue" in str(payloads[0])
+
+            payloads.clear()
+            await _collect(session_b, "Which shade did I pick?", skip_pre_search=True, session_id="session-b")
+            assert store.queries == ["Which shade did I pick?"]
             assert "my test color is blue" in str(payloads[0])
 
             payloads.clear()

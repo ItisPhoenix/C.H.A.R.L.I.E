@@ -490,6 +490,8 @@ class SessionStore:
             if isinstance(data, dict):
                 approval_status = data.get("approval_status")
         status_suffix = f" approval={approval_status}" if approval_status else ""
+        if isinstance(result, ResultEnvelope):
+            status_suffix += f" status={result.status} verification={result.verification_status}"
         result_text = result.result if isinstance(result, ResultEnvelope) else result
         truncated_result = str(result_text or "")[:max_chars]
         content = f"[{tool_name} args={args_str}]{status_suffix} result: {truncated_result}"
@@ -856,6 +858,53 @@ class SessionStore:
     ) -> List[Tuple[str, str]]:
         """Returns messages for a specific session, oldest first."""
         return self.get_recent(limit=limit, session_id=session_id)
+
+    def get_session_messages_with_turn_ids(
+        self, session_id: str, limit: int = 50
+    ) -> List[Tuple[str, str, Optional[str]]]:
+        """Return ordered conversation rows with the turn identity needed for replay."""
+
+        def _do():
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT messages.role, messages.content, messages.turn_id FROM messages "
+                "JOIN sessions ON sessions.session_id = messages.session_id "
+                "WHERE messages.session_id = ? ORDER BY messages.id DESC LIMIT ?",
+                (session_id, limit),
+            )
+            return list(reversed(cursor.fetchall()))
+
+        return self._with_retry(_do, "get_session_messages_with_turn_ids", reraise=False) or []
+
+    def get_completed_turn_messages(
+        self, session_id: str, current_turn_id: Optional[str], limit: int = 50
+    ) -> List[Tuple[str, str]]:
+        """Return prompt history from completed turns, excluding this turn."""
+
+        def _do():
+            turn_filter = ""
+            params: list[Any] = [session_id]
+            if current_turn_id is not None:
+                turn_filter = " AND (messages.turn_id IS NULL OR messages.turn_id <> ?)"
+                params.append(current_turn_id)
+            params.append(limit)
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT messages.role, messages.content FROM messages "
+                "JOIN sessions ON sessions.session_id = messages.session_id "
+                "WHERE messages.session_id = ? "
+                "AND (messages.turn_id IS NULL OR EXISTS ("
+                "SELECT 1 FROM messages completed "
+                "WHERE completed.session_id = messages.session_id "
+                "AND completed.turn_id = messages.turn_id "
+                "AND completed.role = 'assistant'))"
+                + turn_filter
+                + " ORDER BY messages.id DESC LIMIT ?",
+                params,
+            )
+            return list(reversed(cursor.fetchall()))
+
+        return self._with_retry(_do, "get_completed_turn_messages", reraise=False) or []
 
     def append_dashboard_event(
         self,

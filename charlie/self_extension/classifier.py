@@ -42,16 +42,7 @@ _SKILL_PATTERNS = [
     re.compile(r"\b(skill\.md)\b", re.IGNORECASE),
 ]
 
-# 3. MCP Tool Patterns
-_MCP_PATTERNS = [
-    re.compile(
-        r"\b(connect|add|register|configure|install)\s+(the\s+)?(mcp|model\s+context\s+protocol|mcp\s+server)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\bnpx\s+.*@.*mcp\b", re.IGNORECASE),
-]
-
-# 4. Large Architecture Patterns
+# 3. Large Architecture Patterns
 _ARCH_LARGE_PATTERNS = [
     re.compile(
         r"\b(replace|rewrite|redesign|overhaul)\s+(your\s+)?(entire\s+)?"
@@ -61,7 +52,7 @@ _ARCH_LARGE_PATTERNS = [
     re.compile(r"\b(migrate\s+all|refactor\s+entire\s+codebase)\b", re.IGNORECASE),
 ]
 
-# 5. Code Small Patterns
+# 4. Code Small Patterns
 _CODE_SMALL_PATTERNS = [
     re.compile(
         r"\b(add|implement|write|create|code)\s+(a\s+)?(small\s+)?"
@@ -154,16 +145,7 @@ class ExtensionClassifier:
                     reason="Request matches configuration or settings parameter update.",
                 )
 
-        # 4. MCP tool check
-        for pat in _MCP_PATTERNS:
-            if pat.search(p):
-                return ExtensionClassification(
-                    kind=ExtensionKind.MCP_TOOL,
-                    confidence=0.95,
-                    reason="Request specifies MCP server integration or configuration.",
-                )
-
-        # 5. Skill / reusable procedure check
+        # 4. Skill / reusable procedure check
         for pat in _SKILL_PATTERNS:
             if pat.search(p):
                 return ExtensionClassification(
@@ -172,7 +154,7 @@ class ExtensionClassifier:
                     reason="Request asks to remember or register a reusable workflow or procedure.",
                 )
 
-        # 6. Small code extension check
+        # 5. Small code extension check
         for pat in _CODE_SMALL_PATTERNS:
             if pat.search(p):
                 return ExtensionClassification(

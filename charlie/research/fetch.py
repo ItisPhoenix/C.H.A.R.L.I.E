@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import html
 import ipaddress
+import json
 import logging
 import re
 import socket
@@ -42,8 +43,10 @@ _BROWSER_HEADERS = {
 
 _MIN_CONTENT_CHARS = 160
 _MAX_DOCUMENT_CHARS = 14000
+_MAX_STRUCTURED_JSON_CHARS = 2_000_000
 _TAG_RE = re.compile(r"<[^>]+>")
 _TITLE_RE = re.compile(r"<title\b[^>]*>(.*?)</title\s*>", re.IGNORECASE | re.DOTALL)
+_AUTH_GATE_PATH_RE = re.compile(r"/(?:login|log-in|signin|sign-in|onboarding)(?:/|$)", re.IGNORECASE)
 _SPACE_RE = re.compile(r"[ \t\r\f\v]+")
 _BLOCK_TAG_RE = re.compile(r"</?(?:p|div|section|article|header|footer|tr|li|h[1-6]|table|ul|ol|dl|dt|dd|br)\b[^>]*>", re.IGNORECASE)
 _TABLE_ROW_RE = re.compile(r"<tr\b[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
@@ -97,12 +100,17 @@ def _resolve_public_url(url: str) -> tuple[str, tuple[str, ...]]:
         raise ValueError("Research URL must use public http or https without credentials")
     if "%" in host or host in {"localhost", "metadata.google.internal", "metadata"} or host.endswith(".local"):
         raise ValueError("Research URL targets a private or local host")
-    if port not in {80, 443}:
-        raise ValueError("Research URL uses a disallowed port")
 
     try:
         addresses = (str(ipaddress.ip_address(host)),)
     except ValueError:
+        addresses = ()
+
+    if addresses and any(_is_blocked_ip(address) for address in addresses):
+        raise ValueError("Research URL targets a private or local network")
+    if port not in {80, 443}:
+        raise ValueError("Research URL uses a disallowed port")
+    if not addresses:
         try:
             records = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
         except socket.gaierror as exc:
@@ -200,6 +208,18 @@ def extract_text(markup: str) -> tuple[str, str]:
     return _fallback_text(markup), "html-text"
 
 
+def _structured_json_text(body: str) -> Optional[str]:
+    text = body.lstrip("\ufeff \t\r\n")
+    # shortcut: JSON pages above 2 MB use normal text extraction; raise only for a known large source.
+    if len(text) > _MAX_STRUCTURED_JSON_CHARS or not text.startswith(("[", "{")):
+        return None
+    try:
+        json.loads(text)
+    except (ValueError, RecursionError):
+        return None
+    return text
+
+
 def _is_soft_not_found(text: str) -> bool:
     """Detect error pages served with HTTP 200.
 
@@ -226,6 +246,25 @@ def _is_soft_not_found(text: str) -> bool:
     return any(marker in lowered for marker in markers)
 
 
+def _is_auth_gate(url: str, text: str, title: Optional[str]) -> bool:
+    """Reject login/onboarding shells that expose no public research content."""
+    if _AUTH_GATE_PATH_RE.search(urlparse(url).path):
+        return True
+    lowered = f"{title or ''}\n{text[:1200]}".casefold()
+    return any(marker in lowered for marker in (
+        "authentication required",
+        "you must be logged in to",
+        "you need to log in to",
+        "log in to continue",
+        "log in to view",
+        "log in to see more",
+        "sign in to continue",
+        "sign in to view",
+        "please log in to",
+        "please sign in to",
+    ))
+
+
 def document_from_content(
     result: SearchResult,
     content: str,
@@ -237,6 +276,9 @@ def document_from_content(
     text = content.strip()[:max_chars]
     minimum = 1 if result.provider == "browser_read" else _MIN_CONTENT_CHARS
     if len(text) < minimum:
+        return None
+    if _is_auth_gate(result.url, text, title or result.title):
+        logger.info("Discarding login-gated research page: %s", result.url)
         return None
     if _is_soft_not_found(text):
         logger.info("Discarding soft-404 page returned with 200: %s", result.url)
@@ -261,6 +303,11 @@ async def _get_browser_shaped(
     url: str,
     *,
     timeout_s: float,
+    method: str = "GET",
+    headers: Optional[dict] = None,
+    params: Optional[dict] = None,
+    json_body: Optional[object] = None,
+    follow_redirects: bool = True,
 ) -> tuple[int, str, str]:
     """Fetch with a validated, pinned peer and validate every redirect first."""
     if not CURL_CFFI_AVAILABLE or _CurlAsyncSession is None or _CurlOpt is None:
@@ -298,9 +345,12 @@ async def _get_browser_shaped(
             curl_options=resolve_options,
         ) as session:
             response = await asyncio.wait_for(
-                session.get(
+                session.request(
+                    method.upper(),
                     current_url,
-                    headers=_BROWSER_HEADERS,
+                    headers={**_BROWSER_HEADERS, **(headers or {})},
+                    params=params,
+                    json=json_body,
                     timeout=max(0.1, remaining),
                     allow_redirects=False,
                 ),
@@ -318,7 +368,7 @@ async def _get_browser_shaped(
 
         status = int(response.status_code)
         location = response.headers.get("location") or response.headers.get("Location")
-        if status in {301, 302, 303, 307, 308} and location:
+        if follow_redirects and status in {301, 302, 303, 307, 308} and location:
             if hop >= _MAX_REDIRECTS:
                 raise ValueError("Research source exceeded the redirect limit")
             current_url = urljoin(current_url, str(location))
@@ -353,7 +403,13 @@ async def fetch_document(
             )
             return None
         page_title = extract_html_title(body)
-        text, method = extract_text(body)
+        structured_json = _structured_json_text(body)
+        if structured_json is None:
+            text, method = extract_text(body)
+            content_limit = max_chars
+        else:
+            text, method = structured_json, "json"
+            content_limit = len(structured_json)
         redirected = SearchResult(
             title=result.title,
             url=final_url,
@@ -368,7 +424,7 @@ async def fetch_document(
             text,
             extraction_method=method,
             title=page_title or result.title,
-            max_chars=max_chars,
+            max_chars=content_limit,
         )
     except ValueError as exc:
         logger.info("Refusing research URL %s: %s", result.url, exc)

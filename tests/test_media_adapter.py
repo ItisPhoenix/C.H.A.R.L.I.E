@@ -1,3 +1,6 @@
+from enum import IntEnum
+from types import SimpleNamespace
+
 import pytest
 
 from charlie.media_adapter import WindowsMediaAdapter, _thumbnail_data_uri
@@ -20,6 +23,109 @@ async def test_media_adapter_reports_unavailable_without_a_session(monkeypatch):
     assert snapshot["adapter_available"] is True
     assert snapshot["status"] == "no_session"
     assert snapshot["title"] == ""
+
+
+@pytest.mark.asyncio
+async def test_media_adapter_uses_winrt_playback_enum_name(monkeypatch):
+    class PlaybackStatus(IntEnum):
+        PLAYING = 4
+
+    class Session:
+        source_app_user_model_id = "Spotify.exe"
+
+        async def try_get_media_properties_async(self):
+            return SimpleNamespace(title="Track", artist="Artist", album_title="Album", thumbnail=None)
+
+        def get_playback_info(self):
+            return SimpleNamespace(playback_status=PlaybackStatus.PLAYING)
+
+        def get_timeline_properties(self):
+            return SimpleNamespace(position=None, end_time=None)
+
+    class Manager:
+        @staticmethod
+        async def request_async():
+            return Manager()
+
+        def get_current_session(self):
+            return Session()
+
+    monkeypatch.setattr("charlie.media_adapter._manager_type", Manager)
+    monkeypatch.setattr("charlie.media_adapter._on_media_executor_thread", lambda: True)
+    monkeypatch.setattr("charlie.media_adapter._volume_snapshot", lambda: {"volume_percent": None, "muted": None})
+
+    snapshot = await WindowsMediaAdapter().snapshot()
+
+    assert snapshot["status"] == "playing"
+    assert snapshot["title"] == "Track"
+
+
+@pytest.mark.asyncio
+async def test_play_pause_is_verified_from_session_status_readback(monkeypatch):
+    class PlaybackStatus(IntEnum):
+        PLAYING = 4
+        PAUSED = 5
+
+    class Session:
+        def __init__(self):
+            self.status = PlaybackStatus.PLAYING
+
+        def get_playback_info(self):
+            return SimpleNamespace(playback_status=self.status)
+
+        async def try_toggle_play_pause_async(self):
+            self.status = PlaybackStatus.PAUSED
+            return True
+
+    session = Session()
+
+    class Manager:
+        @staticmethod
+        async def request_async():
+            return Manager()
+
+        def get_current_session(self):
+            return session
+
+    monkeypatch.setattr("charlie.media_adapter._manager_type", Manager)
+    monkeypatch.setattr("charlie.media_adapter._on_media_executor_thread", lambda: True)
+
+    result = await WindowsMediaAdapter().control("play_pause")
+
+    assert result["ok"] is True
+    assert result["status"] == "paused"
+    assert result["verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_play_pause_remains_unverified_when_session_status_does_not_change(monkeypatch):
+    class PlaybackStatus(IntEnum):
+        PLAYING = 4
+
+    class Session:
+        def get_playback_info(self):
+            return SimpleNamespace(playback_status=PlaybackStatus.PLAYING)
+
+        async def try_toggle_play_pause_async(self):
+            return True
+
+    class Manager:
+        @staticmethod
+        async def request_async():
+            return Manager()
+
+        def get_current_session(self):
+            return Session()
+
+    monkeypatch.setattr("charlie.media_adapter._manager_type", Manager)
+    monkeypatch.setattr("charlie.media_adapter._on_media_executor_thread", lambda: True)
+
+    result = await WindowsMediaAdapter().control("play_pause")
+
+    assert result["ok"] is True
+    assert result["status"] == "playing"
+    assert result["verified"] is False
+    assert "could not be confirmed" in result["reason"]
 
 
 @pytest.mark.asyncio

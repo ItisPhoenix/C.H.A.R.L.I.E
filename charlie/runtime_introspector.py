@@ -1,7 +1,7 @@
 """Unified live runtime introspection layer for Charlie V1.
 
 Queries authoritative state across process, models, capabilities, task journal,
- capability leases, subsystem health, MCP servers, memory systems, and desktop/browser
+ capability leases, subsystem health, memory systems, and desktop/browser
 subsystems with strict secret masking.
 """
 
@@ -32,7 +32,6 @@ class RuntimeSnapshot:
     tasks: Dict[str, Any]
     leases: Dict[str, Any]
     subsystem_health: Dict[str, Any]
-    mcp: Dict[str, Any]
     memory: Dict[str, Any]
     subsystems: Dict[str, Any]
 
@@ -50,7 +49,6 @@ class RuntimeIntrospector:
         health_registry: Optional[Any] = None,
         task_journal: Optional[Any] = None,
         lease_manager: Optional[Any] = None,
-        mcp_client: Optional[Any] = None,
         memory_service: Optional[Any] = None,
     ) -> None:
         self._config = config
@@ -62,7 +60,6 @@ class RuntimeIntrospector:
         self._health_registry = health_registry
         self._task_journal = task_journal
         self._lease_manager = lease_manager
-        self._mcp_client = mcp_client
         self._memory_service = memory_service
 
     # -------------------------------------------------------------------------
@@ -105,15 +102,6 @@ class RuntimeIntrospector:
         try:
             from charlie.resource_locks import get_capability_lease_manager
             return get_capability_lease_manager()
-        except Exception:
-            return None
-
-    def _get_mcp_client(self) -> Any:
-        if self._mcp_client is not None:
-            return self._mcp_client
-        try:
-            from charlie.mcp_client import get_mcp_client
-            return get_mcp_client()
         except Exception:
             return None
 
@@ -294,20 +282,6 @@ class RuntimeIntrospector:
             result = runtime_snapshot()
             return dict(result) if isinstance(result, dict) else {}
         return {}
-
-    def get_mcp_info(self) -> Dict[str, Any]:
-        """Query MCPClient for configured servers and tool roster."""
-        mcp = self._get_mcp_client()
-        if mcp is None:
-            return {"configured_servers": 0, "connected_servers": 0, "servers": []}
-
-        detailed = mcp.list_servers_detailed()
-        connected = sum(1 for s in detailed if s.get("status") == "connected")
-        return {
-            "configured_servers": len(detailed),
-            "connected_servers": connected,
-            "servers": detailed,
-        }
 
     def get_memory_info(self) -> Dict[str, Any]:
         """Query MemoryService without overriding its component health truth."""
@@ -527,7 +501,6 @@ class RuntimeIntrospector:
             "leases": self.get_leases_info(),
             "subsystem_health": self.get_health_info(),
             "runtime_truth": self.get_runtime_truth(),
-            "mcp": self.get_mcp_info(),
             "memory": self.get_memory_info(),
             "subsystems": self.get_subsystem_info(),
         }

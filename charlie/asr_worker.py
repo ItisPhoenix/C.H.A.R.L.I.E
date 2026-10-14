@@ -402,8 +402,8 @@ def _build_transcribe_kwargs(
             condition_on_previous_text=True,
             beam_size=_ac.get("beam_size", 6),
             best_of=_ac.get("best_of", 6),
-            # Capture RMS is an amplitude, Silero expects a probability.
-            vad_filter=capture_fields.get("capture_mode") != "ptt",
+            # Live capture already segments speech; a second VAD can trim quiet final words.
+            vad_filter=capture_fields.get("capture_mode") not in {"ptt", "vad"},
             vad_parameters=dict(
                 threshold=_ac.get("vad_threshold", 0.45),
                 min_speech_duration_ms=_ac.get("min_speech_duration_ms", 120),

@@ -12,22 +12,23 @@ from urllib.parse import urlparse
 from charlie.research.credibility import organisational_domain, rank_prior
 from charlie.research.fetch import canonicalize_url
 from charlie.research.models import ResearchPlan, SearchResult, SourceDocument
+from charlie.research.router import is_briefing_query
 from charlie.research.semantics import SemanticRelevance
 from charlie.research.sources import SourceClass, classify
 
 logger = logging.getLogger("charlie.research.ranking")
 
-_TOKEN_RE = re.compile(r"[a-z0-9]{3,}", re.I)
+_TOKEN_RE = re.compile(r"[a-z0-9]{2,}", re.I)
 _STOPWORDS = {
-    "about", "and", "are", "for", "from", "how", "is", "it", "its", "the", "this", "to",
+    "about", "and", "are", "as", "at", "be", "by", "do", "for", "from", "how", "in", "is", "it", "its", "of", "on", "or", "the", "this", "to", "vs",
     "use", "used", "what", "when", "where", "which", "with", "briefing", "daily", "intelligence",
-    "best", "latest", "stable", "current", "official", "source", "sources", "using", "give", "tell",
-    "version", "versions", "release", "releases", "date", "dates", "today", "two", "three", "sentences",
-    "under", "below", "within", "less", "than", "india", "inr", "rupees", "price", "prices",
+    "best", "official", "source", "sources", "using", "give", "tell",
+    "two", "three", "sentences",
+    "under", "below", "within", "less", "than",
 }
 _IDENTIFIER_RE = re.compile(r"\b[a-z]{2,}-\d+[a-z0-9-]*\b", re.I)
-_LLM_QUERY_RE = re.compile(r"\b(?:llms?|large\s+language\s+models?)\b", re.I)
-_LLM_ABBREVIATIONS = {"llm", "weights", "weight"}
+_CAPITALIZED_ENTITY_PHRASE_RE = re.compile(r"\b[A-Z][a-z0-9]+(?:\s+[A-Z][a-z0-9]+)+\b")
+_ACRONYM_RE = re.compile(r"\b[A-Z]{2,}\b")
 
 _SOURCE_WEIGHTS = {
     SourceClass.OFFICIAL: 0.35,
@@ -46,6 +47,17 @@ def _tokens(text: str) -> set[str]:
     return set(_TOKEN_RE.findall(text.lower()))
 
 
+def _query_entity_tokens(query: str) -> set[str]:
+    phrases = _CAPITALIZED_ENTITY_PHRASE_RE.findall(query)
+    acronyms = _ACRONYM_RE.findall(query)
+    return {
+        token
+        for value in [*phrases, *acronyms]
+        for token in _tokens(value)
+        if token not in _STOPWORDS
+    }
+
+
 def search_result_matches_query(query: str, result: SearchResult) -> bool:
     """Reject pages that only match generic request wording.
 
@@ -54,20 +66,20 @@ def search_result_matches_query(query: str, result: SearchResult) -> bool:
     those pages from becoming research evidence while retaining concise
     release and product searches.
     """
+    if is_briefing_query(query):
+        return bool(result.published_at)
     terms = _tokens(query) - _STOPWORDS
     content_text = f"{result.title} {result.snippet} {result.domain}"
     content = _tokens(content_text)
     if not terms:
-        return True
-    # Category words alone let dictionary and language-reference pages into LLM searches.
-    if _LLM_QUERY_RE.search(query) and not (
-        content & _LLM_ABBREVIATIONS
-        or re.search(r"\blarge\s+language\s+models?\b", content_text, re.I)
-    ):
         return False
+    entity_terms = _query_entity_tokens(query)
+    if entity_terms and not (entity_terms & content):
+        return False
+    if len(terms) == 1 and len(next(iter(terms))) == 2:
+        identity = _tokens(f"{result.title} {result.domain or urlparse(result.url).hostname or ''}")
+        return bool(terms & identity)
     required_overlap = 1 if len(terms) <= 3 else 2
-    if _LLM_QUERY_RE.search(query):
-        required_overlap = 1
     return len(terms & content) >= required_overlap
 
 

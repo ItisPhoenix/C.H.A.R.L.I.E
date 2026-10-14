@@ -102,3 +102,49 @@ def test_llm_release_filter_rejects_dictionary_and_unrelated_language_results():
     assert not search_result_matches_query(query, dictionary)
     assert not search_result_matches_query(query, language_reference)
     assert search_result_matches_query(query, release)
+
+
+def test_short_release_subject_rejects_unrelated_homepages_and_keeps_matching_official_page():
+    from charlie.research.ranking import search_result_matches_query
+
+    query = "What is the latest stable Go release?"
+    wikipedia = SearchResult(
+        "Wikipedia, the free encyclopedia",
+        "https://en.wikipedia.org/wiki/Main_Page",
+        "Go to the main page to browse the encyclopedia.",
+    )
+    google = SearchResult("Google", "https://www.google.com/")
+    official = SearchResult("Go Release History", "https://go.dev/doc/devel/release")
+
+    assert not search_result_matches_query(query, wikipedia)
+    assert not search_result_matches_query(query, google)
+    assert search_result_matches_query(query, official)
+
+
+def test_named_entity_release_query_rejects_generic_word_overlap():
+    from charlie.research.ranking import search_result_matches_query
+
+    query = "Asterion Atlas launched a new navigation model this week"
+    unrelated = SearchResult(
+        "What's new in Python 3.14",
+        "https://docs.python.org/3/whatsnew/3.14.html",
+        "A new model changes interpreter behavior.",
+    )
+    relevant = SearchResult(
+        "Asterion Atlas release notes",
+        "https://developers.asterion.example/atlas/release-notes",
+        "Asterion published the Atlas navigation update this week.",
+    )
+
+    assert not search_result_matches_query(query, unrelated)
+    assert search_result_matches_query(query, relevant)
+
+
+def test_deep_plan_keeps_request_as_its_only_seed_instead_of_adding_fixed_publishers():
+    from charlie.research.search import build_plan, clean_query
+
+    query = "How do wetlands reduce flood risk?"
+    plan = build_plan(query, ResearchMode.DEEP)
+
+    assert [item.text for item in plan.queries] == [clean_query(query)]
+    assert plan.domain_filters == []
