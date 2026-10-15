@@ -489,7 +489,10 @@ def _reconcile_persisted_background_tasks() -> tuple[set[str], set[str]]:
                 error_summary=_RESTART_ERROR,
             )
             reconciled_ids.add(record.id)
-        except TaskTransitionError:
+        except (TaskTransitionError, OSError):
+            # OSError included: _journal.transition() persists to disk and raises
+            # on a disk/permission failure. Unhandled, that escaped the loop,
+            # stranded every remaining RUNNING record, and aborted startup.
             try:
                 current = _journal.get(record.id)
             except KeyError:
@@ -708,6 +711,26 @@ def _infer_capability_requirements(text: str, steps: List[str]) -> tuple[str, ..
     return tuple(sorted(requirements))
 
 
+def _describe_task_failure(failure: Any) -> str:
+    """Summarise a failed operation without discarding its diagnostic detail.
+
+    ``ResultEnvelope.errors`` and the structured ``data`` carry the exception kind
+    and failure reason that a flattened result string drops. The task journal keeps
+    only this one text field, so the detail has to be captured here or it is lost.
+    """
+    errors = list(getattr(failure, "errors", None) or [])
+    data = getattr(failure, "data", None) or {}
+    parts: List[str] = []
+    exception_type = data.get("exception_type")
+    if exception_type:
+        parts.append(str(exception_type))
+    parts.extend(str(item) for item in errors if item)
+    detail = "; ".join(part for part in parts if part)
+    if detail:
+        return detail
+    return str(getattr(failure, "result", None) or getattr(failure, "reason", None) or "A task operation failed.")
+
+
 async def _store_result(
     task: BackgroundTask,
     event_bus,
@@ -730,9 +753,13 @@ async def _store_result(
     )
     if detail:
         summary = f"{summary} Result: {detail}"
-    store = ResultsStore(db_path=task.brain.config.session_db_path)
     delivery = {"telegram": "not_configured", "voice": "not_configured"}
+    store: Optional[ResultsStore] = None
     try:
+        # Inside the guard: ResultsStore.__init__ raises on DB init failure, and
+        # an escaping exception here was reported as a task failure while the
+        # journal already said COMPLETED.
+        store = ResultsStore(db_path=task.brain.config.session_db_path)
         if not store.store(task.id, summary, full_result, int(level)):
             logger.warning("Background-task result was not retained; skipping notifications for %s", task.id)
             return {"local_event": "failed"}
@@ -790,8 +817,15 @@ async def _store_result(
         for channel, status in delivery.items():
             store.set_delivery_status(task.id, channel, status)
         return delivery
+    except Exception:
+        # A store that cannot even be opened is a persistence failure like any
+        # other: report it so the caller can refuse to claim success, rather than
+        # letting it escape into a path that already marked the task COMPLETED.
+        logger.warning("Background-task result store unavailable for %s", task.id, exc_info=True)
+        return {"local_event": "failed"}
     finally:
-        store.close()
+        if store is not None:
+            store.close()
 
 
 def _research_delivery_status(delivery: Dict[str, str], channel: Optional[str]) -> ResearchDelivery:
@@ -1331,14 +1365,22 @@ async def _run_research_task(task: BackgroundTask, event_bus, voice=None) -> Non
     succeeded = complete or useful_partial
     if not succeeded:
         task.error = answer
+    summary = _compact_research_speech(report.answer)
+
+    # Persist before recording completion: a research result that could not be
+    # stored must not be published as delivered, in the journal or as an alert.
+    delivery = await _store_result(task, event_bus, answer, spoken_summary=summary)
+    report.delivery_status = _research_delivery_status(delivery, task.approval_platform)
+    if succeeded and delivery.get("local_event") == "failed":
+        succeeded = False
+        task.error = "Research finished but its result could not be saved."
+
     record = _record_task_lifecycle(task, status=CanonicalTaskStatus.COMPLETED if succeeded else CanonicalTaskStatus.FAILED)
     await _emit_task_event(event_bus, record, task=task)
-    outcome = "success" if complete else "warning"
+    outcome = "success" if complete and succeeded else "warning"
 
     # Persisting the result owns the single voice delivery. The alert remains a
     # dashboard event here so a research completion cannot speak twice.
-    summary = _compact_research_speech(report.answer)
-
     await _announce(
         event_bus,
         voice,
@@ -1347,8 +1389,6 @@ async def _run_research_task(task: BackgroundTask, event_bus, voice=None) -> Non
         approval_platform=task.approval_platform,
         speak=False,
     )
-    delivery = await _store_result(task, event_bus, answer, spoken_summary=summary)
-    report.delivery_status = _research_delivery_status(delivery, task.approval_platform)
 
 
 async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
@@ -1455,7 +1495,7 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
 
             if task.failed_operation is not None:
                 failure = task.failed_operation
-                task.error = str(failure.result or failure.reason or "A task operation failed.")
+                task.error = _describe_task_failure(failure)
                 record = _record_task_lifecycle(task, status=CanonicalTaskStatus.FAILED)
                 await _emit_task_event(event_bus, record, task=task)
                 await _announce(
@@ -1509,6 +1549,22 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
             await _store_result(task, event_bus, f"Task failed: {task.error}")
             return
 
+        # Store before announcing: completion must never be published ahead of the
+        # durable result, and a store that refuses the write must not be reported
+        # to the user as success.
+        delivery = await _store_result(task, event_bus, full_result)
+        if delivery.get("local_event") == "failed":
+            task.error = "The task finished but its result could not be saved."
+            record = _record_task_lifecycle(task, status=CanonicalTaskStatus.FAILED)
+            await _emit_task_event(event_bus, record, task=task)
+            await _announce(
+                event_bus,
+                voice,
+                "error",
+                "Background task failed. Check task details.",
+                approval_platform=task.approval_platform,
+            )
+            return
         record = _record_task_lifecycle(task, status=CanonicalTaskStatus.COMPLETED)
         await _emit_task_event(event_bus, record, task=task)
         await _announce(
@@ -1518,12 +1574,11 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
             f"Background task complete: {task.text}",
             approval_platform=task.approval_platform,
         )
-        await _store_result(task, event_bus, full_result)
     except Exception as e:
         logger.error("Background task %s failed at step %d: %s", task.id, task.current_step, e, exc_info=True)
         if task.cancel_requested:
             raise asyncio.CancelledError from e
-        task.error = str(e)
+        task.error = f"{type(e).__name__}: {e}"
         record = _record_task_lifecycle(task, status=CanonicalTaskStatus.FAILED)
         await _emit_task_event(event_bus, record, task=task)
         await _announce(

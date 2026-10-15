@@ -3610,15 +3610,28 @@ def charlie_self_query(question: str) -> str:
     ),
     schema={
         "type": "object",
-        "properties": {},
+        "properties": {
+            "repair_stale_leases": {
+                "type": "boolean",
+                "description": (
+                    "Release capability leases whose owning task is no longer live. "
+                    "Opt-in: this mutates real resource ownership, so it is never "
+                    "done as a side effect of diagnosing."
+                ),
+            },
+        },
     },
 )
-def charlie_doctor_diagnose() -> str:
+def charlie_doctor_diagnose(repair_stale_leases: bool = False) -> str:
     from charlie.doctor import CharlieDoctor
 
     doctor = _charlie_doctor or CharlieDoctor()
     report = doctor.diagnose()
-    return doctor.format_report(report)
+    text = doctor.format_report(report)
+    if repair_stale_leases:
+        result = doctor.execute_repair("repair_stale_leases")
+        text = f"{text}\n\nLease repair: {result.get('message', result)}"
+    return text
 
 
 # Synchronous owner-approval seam for self-extension transactions.

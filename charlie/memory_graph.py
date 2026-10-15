@@ -8,7 +8,7 @@ people, places, and their relationships.
 import logging
 import sqlite3
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from charlie.utils import json_dumps, json_loads, make_id, utc_now_iso
 
@@ -46,6 +46,10 @@ class MemoryGraph:
     def __init__(self, db_path: str = _DEFAULT_DB_PATH) -> None:
         self.db_path = db_path
         self._local = threading.local()
+        # Every thread opens its own connection, so close() cannot reach them by
+        # looking at the calling thread's slot alone.
+        self._conn_lock = threading.Lock()
+        self._all_conns: Set[sqlite3.Connection] = set()
         self._init_db()
 
     # -- connection helpers (matches SessionStore pattern) -------------------
@@ -60,6 +64,8 @@ class MemoryGraph:
         conn = sqlite3.connect(self.db_path, timeout=10)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        with self._conn_lock:
+            self._all_conns.add(conn)
         return conn
 
     def _init_db(self) -> None:
@@ -613,9 +619,16 @@ class MemoryGraph:
         return removed
 
     def close(self) -> None:
-        """Close the thread-local connection."""
-        if hasattr(self._local, "conn") and self._local.conn is not None:
-            self._local.conn.close()
-            self._local.conn = None
+        """Close every connection this graph opened, not just the caller's."""
+        with self._conn_lock:
+            connections = list(self._all_conns)
+            self._all_conns.clear()
+        for conn in connections:
+            try:
+                conn.close()
+            except Exception:  # pragma: no cover - best effort at teardown
+                pass
+        # Only meaningful for the calling thread; the others are already closed.
+        self._local.conn = None
 
 

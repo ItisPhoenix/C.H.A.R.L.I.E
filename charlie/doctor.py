@@ -60,7 +60,13 @@ class CheckSeverity(StrEnum):
 # ever appears in the TaskJournal. Journal membership alone is therefore not a
 # liveness signal -- deriving it that way reported every in-flight lease as an
 # orphan. An owner is only an orphan when it matches none of these shapes.
-LIVE_OWNER_PREFIXES = ("operation:", "fastpath.")
+#
+# The per-turn/per-execution prefixes below are minted at charlie/core.py:6253
+# and are NOT journal task ids, so journal membership can never vouch for them.
+# They were missing here, which made the check report every ordinary chat turn
+# lease as an orphan -- 40 of 42 real acquisitions in the production log -- and
+# would have let the repair force-release live desktop/terminal/browser leases.
+LIVE_OWNER_PREFIXES = ("operation:", "fastpath.", "turn:", "task:", "execution:")
 # Retained from the original predicate: no current production site mints these,
 # but an external/extension caller still may, and dropping them would turn a
 # working lease into a reported fault.

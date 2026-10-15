@@ -514,7 +514,10 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "domain": "terminal",
         "tool_registry_owner": "tools",
         "risk_class": "destructive",
-        "required_leases": ("terminal",),
+        # A shell command mutates the filesystem as readily as it spawns
+        # processes, so it must serialize against file_write rather than hold
+        # process ownership alone.
+        "required_leases": ("file", "terminal"),
         "timeout_sec": 30.0,
         "verifier": "verify_terminal_command",
     },

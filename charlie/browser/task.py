@@ -230,9 +230,18 @@ async def _resolve_inner(
                 try:
                     def _open_read_close(context):
                         page = context.new_page()
-                        page.goto(explicit_url, wait_until="domcontentloaded", timeout=10000)
-                        observed_url = page.url
-                        title = page.title()
+                        try:
+                            page.goto(explicit_url, wait_until="domcontentloaded", timeout=10000)
+                            observed_url = page.url
+                            title = page.title()
+                        except BaseException:
+                            # A failed probe must not leave a tab behind in the
+                            # user's own browser context.
+                            try:
+                                page.close()
+                            except Exception:
+                                pass
+                            raise
                         if re.search(r"\bclose\b", task, re.IGNORECASE):
                             page.close()
                         return observed_url, title
