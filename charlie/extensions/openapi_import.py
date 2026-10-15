@@ -101,16 +101,20 @@ def _operation_schema(op: OpenAPIOperation) -> Dict[str, Any]:
         name = p.get("name")
         if not name:
             continue
-        properties[name] = {
-            "type": (p.get("schema") or {}).get("type", "string"),
-            "description": p.get("description", f"{p.get('in', 'query')} parameter"),
-        }
+        declared = p.get("schema") if isinstance(p.get("schema"), dict) else {}
+        # Carry the declared constraints through, otherwise the validator cannot
+        # reject an out-of-range or wrong-enum value before the live request.
+        param_schema = dict(declared) if declared else {"type": "string"}
+        param_schema["description"] = p.get("description", f"{p.get('in', 'query')} parameter")
+        properties[name] = param_schema
         if p.get("required"):
             required.append(name)
     if op.request_body_schema:
-        properties["body"] = (
-            op.request_body_schema if isinstance(op.request_body_schema, dict) else {"type": "object"}
-        )
+        body_schema = op.request_body_schema if isinstance(op.request_body_schema, dict) else {"type": "object"}
+        # A free-form passthrough body must still refuse unknown properties.
+        if body_schema.get("type") == "object":
+            body_schema = {"additionalProperties": False, **body_schema}
+        properties["body"] = body_schema
     schema: Dict[str, Any] = {"type": "object", "properties": properties}
     if required:
         schema["required"] = required

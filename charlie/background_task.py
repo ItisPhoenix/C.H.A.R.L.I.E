@@ -1365,7 +1365,9 @@ async def _run_loop(task: BackgroundTask, event_bus, voice=None) -> None:
         if task.planning_pending:
             plan_prompt = (
                 "Break the following task into a short numbered list of concrete steps. "
-                "Reply with ONLY the numbered list, one step per line, no preamble.\n\n"
+                "Reply with ONLY the numbered list, one step per line, no preamble. "
+                "To run a command or read system information, plan a shell step; never plan to "
+                "open a console window (Command Prompt, PowerShell or Windows Terminal) to do it.\n\n"
                 f"Task: {task.text}"
             )
             plan_text = ""

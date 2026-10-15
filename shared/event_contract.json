@@ -21,6 +21,7 @@
     "ptt_cancel": {"category": "request", "replay": false, "required": []},
     "tool_call": {"category": "request", "replay": false, "required": []},
     "tool_result": {"category": "result", "replay": false, "required": []},
+    "operation_result": {"category": "result", "replay": false, "required": ["name", "verification_status"]},
     "tool_approval_request": {"category": "request", "replay": true, "required": ["request_id"]},
     "tool_approval_resolved": {"category": "acknowledgement", "replay": false, "required": ["request_id"]},
     "research_progress": {"category": "progress", "replay": false, "required": []},

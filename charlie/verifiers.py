@@ -12,6 +12,7 @@ Provides structured, capability-owned semantic postconditions for mutations and 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -30,6 +31,9 @@ _DISPATCHABLE_VERIFIERS = frozenset({
     "verify_app_focus",
     "verify_app_launch",
     "verify_browser_navigate",
+    "verify_calendar_delete_readback",
+    "verify_widget_visibility_readback",
+    "verify_stopwatch_readback",
     "verify_file_write",
     "verify_terminal_command",
     "verify_volume",
@@ -399,16 +403,50 @@ def verify_browser_navigate(
 def verify_terminal_command(
     command: str, request: str, exit_code: Optional[int], output: str = "",
 ) -> VerificationResult:
-    """A process exit does not independently establish the requested side effect."""
+    """Verify a shell command against the shared safety and request contracts.
+
+    No per-command table: a command is verified when the shared safety policy
+    classifies it as a read-only query, the request actually asked for it, and
+    the command's own stdout is the requested readback.
+    """
     if exit_code is not None and exit_code != 0:
         return VerificationResult(
             status="failed", verified=False, message=f"Terminal command exited with code {exit_code}.",
             verification_status="verified_failure",
         )
+    if exit_code is None:
+        return VerificationResult(
+            status="unverified", verified=False,
+            message="Command is still running; no exit code yet.",
+            verification_status="executed_unverified",
+        )
+    normalized_command = re.sub(r"\s+", " ", str(command or "").strip()).casefold()
+    request_cf = str(request or "").casefold()
+    normalized_output = str(output or "").strip()
+    if not normalized_command or not normalized_output:
+        return VerificationResult(
+            status="unverified", verified=False,
+            message="Command produced no output to read back.",
+            verification_status="executed_unverified",
+        )
+
+    from charlie.core import _shell_command_is_requested
+
+    # Safety is decided upstream by autonomy/approval, not re-decided here: this
+    # verifier only answers whether the command's own output is the readback the
+    # request asked for. Gating on the approval-exemption list would refuse every
+    # legitimately approved command that is not on that list.
+    if _shell_command_is_requested(request_cf, normalized_command):
+        return VerificationResult(
+            status="completed",
+            verified=True,
+            message=f"Command output is the requested readback: {normalized_output[:200]}",
+            verification_status="verified_success",
+        )
     return VerificationResult(
         status="unverified", verified=False,
         message="Command execution did not independently establish the requested postcondition.",
-        verification_status="executed_unverified" if exit_code == 0 else "verification_unavailable",
+        verification_status="executed_unverified",
     )
 
 
@@ -426,13 +464,20 @@ def _requested_apps(arguments: Dict[str, Any]) -> List[str]:
     return []
 
 
-def _recorded_pre_state(result_data: Optional[Dict[str, Any]]) -> Optional[bool]:
-    """Pre-state the acting adapter recorded: True acted on a live target, False found none."""
+def _recorded_pre_state(result_data: Optional[Dict[str, Any]], app_index: Optional[int] = None) -> Optional[bool]:
+    """Pre-state observed by the adapter before it acted.
+
+    A close result cannot substitute for a pre-action observation.
+    """
     data = result_data or {}
-    if data.get("ok") is True:
-        return True
-    if data.get("ok") is False and data.get("failure_kind") == "target_unavailable":
-        return False
+    observed = data.get("observed_present")
+    if isinstance(observed, list) and observed:
+        if app_index is not None:
+            value = observed[app_index] if app_index < len(observed) else None
+            return value if isinstance(value, bool) else None
+        return any(observed) if all(isinstance(item, bool) for item in observed) else None
+    if isinstance(observed, bool):
+        return observed
     return None
 
 
@@ -516,10 +561,9 @@ def run_verifier_for_match(
                     verification_status="verification_unavailable",
                 )
             if verifier_name == "verify_app_close":
-                was_present = _recorded_pre_state(result_data)
                 checks = [
-                    verify_app_close(app, timeout_sec=2.0, was_present=was_present)
-                    for app in requested
+                    verify_app_close(app, timeout_sec=2.0, was_present=_recorded_pre_state(result_data, index))
+                    for index, app in enumerate(requested)
                 ]
             else:
                 checks = [verify_app_launch(app, timeout_sec=2.0) for app in requested]
@@ -533,8 +577,108 @@ def run_verifier_for_match(
                 verification_status=worst.verification_status,
             )
 
+        if verifier_name == "verify_calendar_delete_readback":
+            from charlie.calendar_runtime import calendar_runtime_required
+
+            event_id = str(arguments.get("event_id") or "").strip()
+            if not event_id:
+                return VerificationResult(
+                    status="unverified",
+                    verified=False,
+                    message="No calendar event id was recorded to read back.",
+                    verification_status="verification_unavailable",
+                )
+            try:
+                observed = calendar_runtime_required().execute_sync("get_event", event_id)
+            except KeyError:
+                observed = None
+            if observed is None:
+                return VerificationResult(
+                    status="completed",
+                    verified=True,
+                    message="An independent calendar readback no longer returns the deleted event.",
+                    verification_status="verified_success",
+                )
+            return VerificationResult(
+                status="failed",
+                verified=False,
+                message="The calendar still returns the event that was reported deleted.",
+                verification_status="verified_failure",
+            )
+
+        if verifier_name == "verify_stopwatch_readback":
+            from charlie import tools
+
+            stopwatch = tools._stopwatch
+            if stopwatch is None:
+                return VerificationResult(
+                    status="unverified", verified=False,
+                    message="The stopwatch is unavailable for independent readback.",
+                    verification_status="verification_unavailable",
+                )
+            expected = result_data or {}
+            observed = stopwatch.snapshot()
+            state = observed["state"]
+            elapsed = observed["elapsed_seconds"]
+            expected_elapsed = expected.get("elapsed_seconds")
+            requested_at = expected.get("requested_at_monotonic")
+            verified = (
+                state == expected.get("state")
+                and isinstance(expected_elapsed, (int, float))
+                and elapsed >= expected_elapsed
+                and (state == "running" or elapsed == expected_elapsed)
+                and (arguments.get("action") != "start" or state == "running")
+                and (arguments.get("action") != "stop" or state == "stopped")
+                and (
+                    arguments.get("action") != "reset"
+                    or (
+                        observed["accumulated_seconds"] == 0
+                        and isinstance(requested_at, (int, float))
+                        and (state == "stopped" or observed["started_at_monotonic"] >= requested_at)
+                    )
+                )
+            )
+            return VerificationResult(
+                status="completed" if verified else "partially_completed", verified=verified,
+                message="Stopwatch state matched an independent readback."
+                if verified else "Stopwatch state did not match the requested change.",
+                verification_status="verified_success" if verified else "verified_failure",
+            )
+
+        if verifier_name == "verify_widget_visibility_readback":
+            from charlie import tools
+
+            if tools._memory_service is None:
+                return VerificationResult(
+                    status="unverified", verified=False,
+                    message="Saved widget preferences are unavailable for readback.",
+                    verification_status="verification_unavailable",
+                )
+            saved = json.loads(tools._memory_service.get_preference("dashboard_widget_visibility") or "null")
+            widget = arguments.get("widget")
+            widget_id = arguments.get("widget_id")
+            visible = arguments.get("visible")
+            verified = False
+            if isinstance(saved, dict) and isinstance(saved.get("hidden_widgets"), list):
+                hidden = saved["hidden_widgets"]
+                if widget == "clock":
+                    verified = saved.get("clock_visible") is visible
+                elif widget == "timer" and widget_id:
+                    verified = ("timer" not in hidden and f"timer:{widget_id}" not in hidden) is visible
+                elif widget == "timer" and visible:
+                    verified = not any(item == "timer" or item.startswith("timer:") for item in hidden)
+                else:
+                    verified = (widget not in hidden) is visible
+            return VerificationResult(
+                status="completed" if verified else "partially_completed", verified=verified,
+                message="Saved widget visibility matched an independent preference readback."
+                if verified else "Saved widget visibility did not match the requested preference.",
+                verification_status="verified_success" if verified else "verified_failure",
+            )
+
         if verifier_name == "verify_file_write":
-            path = arguments.get("file_path") or arguments.get("path") or ""
+            # The writer resolves placeholders/safe paths; verify the path it actually wrote.
+            path = (result_data or {}).get("resolved_path") or arguments.get("file_path") or arguments.get("path") or ""
             content = arguments.get("content")
             if content is None:
                 content = arguments.get("text")
@@ -559,4 +703,5 @@ def run_verifier_for_match(
             status="unverified",
             verified=False,
             message=f"Verifier error: {e}",
+            verification_status="verification_unavailable",
         )

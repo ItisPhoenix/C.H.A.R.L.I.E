@@ -17,6 +17,7 @@ export type SceneSnapshot = {
   researchResult?: ResearchResultData;
   researchResults?: ResearchResultData[];
   settings?: RuntimeSetting[];
+  pendingApprovals?: RuntimeEvent[];
   pendingApproval?: RuntimeEvent;
 };
 
@@ -205,6 +206,7 @@ export type RuntimeEvent = {
   query?: string;
   taskId?: string;
   turnId?: string;
+  operation?: string;
   sessionId?: string;
   resultId?: string;
   requestId?: string;
@@ -213,6 +215,7 @@ export type RuntimeEvent = {
   researchResult?: ResearchResultData;
   widgets?: DashboardWidgets;
   systemStatus?: DashboardSystemStatus;
+  payload?: Record<string, unknown>;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -522,8 +525,14 @@ export function parseSnapshot(value: unknown): SceneSnapshot | null {
   const researchResults = [...uniqueResearchResults.values()].slice(-10);
   const research = latestResearch ?? researchResults[researchResults.length - 1];
   const settings = raw.settings && typeof raw.settings === "object" ? raw.settings as Record<string, unknown> : null;
-  const approval = raw.approval && typeof raw.approval === "object"
-    ? parseRuntimeEvent({ type: "tool_approval_request", payload: raw.approval }) : null;
+  if (raw.approvals !== undefined && !Array.isArray(raw.approvals)) return null;
+  const rawApprovals = Array.isArray(raw.approvals) ? raw.approvals : raw.approval ? [raw.approval] : [];
+  const pendingApprovals = rawApprovals.flatMap((payload) => {
+    const approval = parseRuntimeEvent({ type: "tool_approval_request", payload });
+    return approval?.channel === "web" && approval.requestId
+      && (typeof raw.session_id !== "string" || !approval.sessionId || approval.sessionId === raw.session_id)
+      ? [approval] : [];
+  });
   const settingFields: RuntimeSetting[] = [];
   if (settings?.authority === "main_runtime" && Array.isArray(settings.fields)) {
     for (const entry of settings.fields) {
@@ -548,7 +557,10 @@ export function parseSnapshot(value: unknown): SceneSnapshot | null {
     ...(typeof raw.active_turn_id === "string" || raw.active_turn_id === null ? { activeTurnId: raw.active_turn_id as string | null } : {}),
     ...(typeof raw.active_task_id === "string" || raw.active_task_id === null ? { activeTaskId: raw.active_task_id as string | null } : {}),
     ...(settings ? { settings: settingFields } : {}),
-    ...(approval?.channel === "web" && approval.requestId ? { pendingApproval: approval } : {}),
+    ...(pendingApprovals.length ? {
+      pendingApprovals,
+      pendingApproval: pendingApprovals[pendingApprovals.length - 1],
+    } : {}),
     ...(voice && typeof voice.enabled === "boolean" && typeof voice.mic_muted === "boolean" && typeof voice.muted === "boolean" && typeof voice.volume === "number" && Number.isFinite(voice.volume) ? { voice: { enabled: voice.enabled, mic_muted: voice.mic_muted, muted: voice.muted, volume: voice.volume } } : {}),
     ...(research ? { researchResult: research } : {}),
     ...(researchResults.length ? { researchResults } : {}),
@@ -602,6 +614,7 @@ export function parseRuntimeEvent(value: unknown): RuntimeEvent | null {
     ...(typeof raw.session_id === "string" ? { sessionId: raw.session_id } : typeof payload.session_id === "string" ? { sessionId: payload.session_id } : {}),
     ...(typeof payload.result_id === "string" ? { resultId: payload.result_id } : {}),
     ...(typeof payload.request_id === "string" ? { requestId: payload.request_id } : {}),
+    ...(typeof payload.operation === "string" ? { operation: payload.operation } : {}),
     ...(["voice", "telegram", "web", "console"].includes(String(payload.channel)) ? {
       channel: payload.channel as RuntimeEvent["channel"],
     } : {}),

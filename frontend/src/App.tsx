@@ -99,8 +99,8 @@ export function App() {
   const [captionLines, setCaptionLines] = useState<CaptionLine[]>([]);
   const [captionSpeaker, setCaptionSpeaker] = useState<CaptionLine["kind"]>("stt");
   const [reminderNotice, setReminderNotice] = useState("");
-  const [approvalBusy, setApprovalBusy] = useState(false);
-  const [approvalError, setApprovalError] = useState("");
+  const [approvalBusyIds, setApprovalBusyIds] = useState<string[]>([]);
+  const [approvalErrors, setApprovalErrors] = useState<Record<string, string>>({});
   const [chatBubbles, setChatBubbles] = useState<ChatBubble[]>([]);
   const [orbState, setOrbState] = useState<OrbState>("connecting");
   const [workPhase, setWorkPhase] = useState<"working" | "solving">("working");
@@ -188,6 +188,14 @@ export function App() {
       });
       return [...current, ...restored].slice(0, 40);
     });
+    // A background result that finished while the dashboard was closed exists
+    // only in the scene. Surface it in chat the way the live event does,
+    // otherwise the owner is told to check the dashboard and finds nothing.
+    for (const event of scene.activity ?? []) {
+      const stored = event.payload;
+      if (event.type !== "result_stored" || stored?.channel !== "web" || !stored?.text) continue;
+      addChatBubble("charlie", String(stored.text), `task:${stored.result_id ?? event.id}`);
+    }
     setViewHydratedSessionId(scene.sessionId);
   }, [scene?.sessionId, viewHydratedSessionId]);
 
@@ -269,8 +277,19 @@ export function App() {
       setStreamOpen(true);
       void refreshScene(() => active).then((snapshot) => {
         if (!active || !snapshot || snapshot.sessionId !== currentSessionIdRef.current) return;
-        setActivity((items) => items.filter((item) => item.type !== "tool_approval_request"
-          || item.requestId === snapshot.pendingApproval?.requestId));
+        const pendingApprovals = snapshot.pendingApprovals
+          ?? (snapshot.pendingApproval ? [snapshot.pendingApproval] : []);
+        const pendingIds = new Set(pendingApprovals.map((item) => item.requestId).filter((id): id is string => Boolean(id)));
+        setActivity((items) => {
+          const retained = items.filter((item) => item.type !== "tool_approval_request" || pendingIds.has(item.requestId ?? ""));
+          const existingIds = new Set(retained.map((item) => item.requestId).filter((id): id is string => Boolean(id)));
+          const restored = [...pendingApprovals].reverse().flatMap((item) => {
+            if (!item.requestId || existingIds.has(item.requestId)) return [];
+            existingIds.add(item.requestId);
+            return [{ ...item, key: `approval:${item.requestId}` }];
+          });
+          return [...restored, ...retained].slice(0, 40);
+        });
         setSceneError("");
         setOrbState((current) => current === "connecting" ? "breathing" : current);
       }).catch((error: unknown) => {
@@ -375,12 +394,29 @@ export function App() {
       }
       if (projectSessionEvent && event.type === "tool_approval_resolved" && event.requestId) {
         setActivity((items) => items.filter((item) => item.requestId !== event.requestId));
-        setScene((current) => current && current.pendingApproval?.requestId === event.requestId
-          ? { ...current, pendingApproval: undefined } : current);
+        setApprovalBusyIds((items) => items.filter((id) => id !== event.requestId));
+        setApprovalErrors((current) => { const next = { ...current }; delete next[event.requestId!]; return next; });
+        setScene((current) => {
+          if (!current) return current;
+          const pendingApprovals = (current.pendingApprovals ?? (current.pendingApproval ? [current.pendingApproval] : []))
+            .filter((item) => item.requestId !== event.requestId);
+          return {
+            ...current,
+            pendingApprovals,
+            pendingApproval: pendingApprovals[pendingApprovals.length - 1],
+          };
+        });
       }
       if (projectSessionEvent && event.type === "tool_approval_request" && event.channel === "web") {
-        setApprovalError("");
-        setScene((current) => current ? { ...current, pendingApproval: event } : current);
+        const requestId = event.requestId;
+        if (requestId) setApprovalErrors((current) => { const next = { ...current }; delete next[requestId]; return next; });
+        setScene((current) => {
+          if (!current || !event.requestId) return current;
+          const pendingApprovals = (current.pendingApprovals ?? (current.pendingApproval ? [current.pendingApproval] : []))
+            .filter((item) => item.requestId !== event.requestId);
+          pendingApprovals.push(event);
+          return { ...current, pendingApprovals, pendingApproval: event };
+        });
       }
       if (event.type === "speaking_start") {
         const spoken = event.text || ttsBufferRef.current.trim();
@@ -524,19 +560,33 @@ export function App() {
   async function decideApproval(approval: RuntimeEvent, approved: boolean) {
     if (approval.channel !== "web" || !approval.requestId) return;
     const requestId = approval.requestId;
-    setApprovalBusy(true);
-    setApprovalError("");
+    if (approvalBusyIds.includes(requestId)) return;
+    setApprovalBusyIds((items) => [...items, requestId]);
+    setApprovalErrors((current) => { const next = { ...current }; delete next[requestId]; return next; });
     try {
-      if (!await postRuntimeCommand({ type: approved ? "approve" : "reject", request_id: requestId })) {
+      if (!await postRuntimeCommand({
+        type: approved ? "approve" : "reject",
+        request_id: requestId,
+        ...(approval.sessionId ? { session_id: approval.sessionId } : {}),
+        ...(approval.taskId ? { task_id: approval.taskId } : {}),
+        ...(approval.operation ? { operation: approval.operation } : {}),
+      })) {
         throw new Error("Charlie did not acknowledge the decision.");
       }
       setActivity((items) => items.filter((item) => item.requestId !== requestId));
-      setScene((current) => current && current.pendingApproval?.requestId === requestId
-        ? { ...current, pendingApproval: undefined } : current);
+      setScene((current) => {
+        if (!current) return current;
+        const pendingApprovals = (current.pendingApprovals ?? (current.pendingApproval ? [current.pendingApproval] : []))
+          .filter((item) => item.requestId !== requestId);
+        return { ...current, pendingApprovals, pendingApproval: pendingApprovals[pendingApprovals.length - 1] };
+      });
     } catch (error) {
-      setApprovalError(error instanceof Error ? error.message : "Could not send the decision.");
+      setApprovalErrors((current) => ({
+        ...current,
+        [requestId]: error instanceof Error ? error.message : "Could not send the decision.",
+      }));
     } finally {
-      setApprovalBusy(false);
+      setApprovalBusyIds((items) => items.filter((id) => id !== requestId));
     }
   }
 
@@ -623,7 +673,7 @@ export function App() {
     ? activity.filter((item) => item.type === "research_progress" && item.turnId === researchProgress.turnId).slice(0, 5).reverse()
     : [];
   const pendingApproval = activity.find((item) => item.type === "tool_approval_request"
-    && item.channel === "web" && item.requestId) ?? scene?.pendingApproval;
+    && item.channel === "web" && item.requestId) ?? scene?.pendingApprovals?.[scene.pendingApprovals.length - 1] ?? scene?.pendingApproval;
   return (
     <PageBeam>
       <main className={`workspace ${chatOpen ? "is-chat-open" : ""} ${drawerOpen ? "is-drawer-open" : ""} ${!chatOpen && researchOpen && selectedResearchResult ? "has-research" : ""} ${settings.reducedMotion ? "is-reduced-motion" : ""}`} style={{ "--research-tabs-height": `${researchTabsHeight}px` } as CSSProperties}>
@@ -706,7 +756,7 @@ export function App() {
       {pendingApproval?.requestId && <ApprovalPopup
         title={pendingApproval.operationPreview || "Allow this action?"}
         reason={pendingApproval.summary || "Charlie needs your approval before continuing."}
-        busy={approvalBusy || !connected} error={approvalError}
+        busy={approvalBusyIds.includes(pendingApproval.requestId) || !connected} error={approvalErrors[pendingApproval.requestId]}
         onDecision={(approved) => void decideApproval(pendingApproval, approved)}
       />}
 
@@ -714,7 +764,7 @@ export function App() {
         <div className="drawer-heading"><h2>Activity</h2><button type="button" aria-label="Close activity" onClick={closeActivity}>Close</button></div>
         {activeTasks.length || visibleActivity.length ? <ol className="activity-list">
           {activeTasks.map((task) => <li key={`task-${task.id}`}><strong>{task.title}</strong><span>{task.currentAction || task.status}</span><button type="button" onClick={() => void sendRuntimeControl({ type: "cancel_task", task_id: task.id })}>Cancel task</button>{task.updatedAt && <time dateTime={task.updatedAt}>{task.updatedAt}</time>}</li>)}
-          {visibleActivity.map((item) => <li key={item.key}><strong>{activityLabel(item)}</strong>{item.summary && <span>{item.summary}</span>}{item.type === "tool_approval_request" && item.channel === "web" && item.requestId && <div><button type="button" disabled={approvalBusy || !connected} onClick={() => void decideApproval(item, true)}>Approve</button><button type="button" disabled={approvalBusy || !connected} onClick={() => void decideApproval(item, false)}>Decline</button></div>}{item.taskId && cancellableTaskIds.has(item.taskId) && <div><button type="button" disabled={!connected} onClick={() => void sendRuntimeControl({ type: "cancel_task", task_id: item.taskId })}>Cancel task</button></div>}{item.timestamp && <time dateTime={item.timestamp}>{item.timestamp}</time>}</li>)}
+          {visibleActivity.map((item) => <li key={item.key}><strong>{activityLabel(item)}</strong>{item.summary && <span>{item.summary}</span>}{item.type === "tool_approval_request" && item.channel === "web" && item.requestId && <><div><button type="button" disabled={approvalBusyIds.includes(item.requestId) || !connected} onClick={() => void decideApproval(item, true)}>Approve</button><button type="button" disabled={approvalBusyIds.includes(item.requestId) || !connected} onClick={() => void decideApproval(item, false)}>Decline</button></div>{approvalErrors[item.requestId] && <span role="alert">{approvalErrors[item.requestId]}</span>}</>}{item.taskId && cancellableTaskIds.has(item.taskId) && <div><button type="button" disabled={!connected} onClick={() => void sendRuntimeControl({ type: "cancel_task", task_id: item.taskId })}>Cancel task</button></div>}{item.timestamp && <time dateTime={item.timestamp}>{item.timestamp}</time>}</li>)}
         </ol> : <p className="activity-empty">No activity in this Charlie session yet.</p>}
       </aside>
       {drawerOpen && <button className="drawer-scrim" type="button" aria-label="Close activity" onClick={closeActivity} />}
@@ -730,14 +780,24 @@ function PageBeam({ children }: { children: ReactNode }) {
 function activityLabel(item: ActivityItem): string {
   switch (item.type) {
     case "tool_call": return "Working";
-    case "tool_result": return "Work completed";
+    case "tool_result": {
+      // The canonical envelope decides the wording. Never say an action completed
+      // when Charlie only dispatched it or could not confirm the result.
+      const status = item.payload?.verification_status;
+      if (status === "verified_success") return "Done, verified";
+      if (status === "verified_failure") return "Did not take effect";
+      if (status === "executed_unverified") return "Sent, not verified";
+      if (status === "verification_unavailable") return "Completed, not verifiable";
+      return "Work completed";
+    }
     case "research_progress": return "Researching";
     case "research_result":
     case "result_stored": return "Result ready";
     case "background_task":
     case "task_snapshot": return "Background work";
     case "tool_approval_request": return "Approval needed";
-    case "tool_approval_resolved": return "Approval resolved";
+    case "tool_approval_resolved":
+      return item.payload?.approved === false ? "Approval declined" : "Approval granted";
     case "browser_task_started": return "Browser work";
     case "browser_task_done": return "Browser result ready";
     case "alert": return "Attention";

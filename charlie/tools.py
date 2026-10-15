@@ -5,6 +5,7 @@ No business logic -- just tool I/O.
 """
 
 import asyncio
+import copy
 import hashlib
 import http.client
 import ipaddress
@@ -156,9 +157,46 @@ _WIN_CMD_PATTERNS = [
 ]
 
 
+# Python already runs commands through cmd.exe, so a caller-supplied `cmd /c`
+# wrapper is redundant and actively corrupting: once the outer quoting is applied
+# `cmd /c ver` reaches cmd as `ver"` and fails with 'ver"' is not recognized.
+_REDUNDANT_CMD_WRAPPER_RE = re.compile(r"^\s*cmd(?:\.exe)?\s+/[ck]\s+", re.IGNORECASE)
+
+
+def unwrap_redundant_shell_wrapper(command: str) -> str:
+    """Drop a leading ``cmd /c`` wrapper that the host shell already supplies."""
+    stripped = _REDUNDANT_CMD_WRAPPER_RE.sub("", str(command or ""), count=1).strip()
+    return stripped or str(command or "").strip()
+
+
 # Cross-platform volume command translations (wrong OS -> Windows equivalent)
 _AMIXER_SET_RE = re.compile(r"amixer\s+set\s+Master\s+(\d+)\%", re.IGNORECASE)
 _OSCRIPT_VOL_RE = re.compile(r"osascript\s.*[Ss]et\s+[Vv]olume\s+([\d.]+)", re.IGNORECASE)
+
+
+def _close_nested_objects(node: Any) -> None:
+    """Refuse unknown keys in nested objects that describe their properties.
+
+    Named and patterned properties remain valid; explicitly open schemas stay open.
+    Callers supply a private schema copy so registry definitions remain unchanged.
+    """
+    if isinstance(node, dict):
+        if ("properties" in node or "patternProperties" in node) and "additionalProperties" not in node:
+            node["additionalProperties"] = False
+        for key in ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependencies"):
+            children = node.get(key)
+            if isinstance(children, dict):
+                for child in children.values():
+                    _close_nested_objects(child)
+        for key in (
+            "items", "contains", "additionalProperties", "unevaluatedProperties", "propertyNames",
+            "not", "if", "then", "else", "additionalItems", "unevaluatedItems",
+            "allOf", "anyOf", "oneOf", "prefixItems",
+        ):
+            _close_nested_objects(node.get(key))
+    elif isinstance(node, list):
+        for item in node:
+            _close_nested_objects(item)
 
 
 class ToolRegistry:
@@ -313,6 +351,7 @@ class ToolRegistry:
             schema = info["schema"]
         if not isinstance(arguments, dict) or not isinstance(schema, dict):
             raise ValueError("Tool arguments must be an object for a registered schema")
+        schema = copy.deepcopy(schema)
         try:
             def is_json_value(value: Any) -> bool:
                 if value is None or isinstance(value, (str, bool, int)):
@@ -327,14 +366,24 @@ class ToolRegistry:
 
             if not is_json_value(arguments):
                 raise ValueError("Tool arguments contain values outside JSON")
-            supplied = {key: value for key, value in arguments.items() if key not in trusted_fields}
+            declared_properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+            # trusted_fields relaxes an internally assigned value, it does not
+            # disable checking: a trusted key the schema declares is still validated.
+            supplied = {
+                key: value
+                for key, value in arguments.items()
+                if key not in trusted_fields or key in declared_properties
+            }
             normalized = json.loads(json.dumps(supplied, allow_nan=False))
             from jsonschema.validators import validator_for
             from referencing import Registry
 
             validator_type = validator_for(schema)
             validator_type.check_schema(schema)
-            validator_type(schema, registry=Registry()).validate(normalized)
+            _close_nested_objects(schema)
+            # A declared "format" is a real constraint, so it must be checked;
+            # without this the validator ignores date-time and friends.
+            validator_type(schema, registry=Registry(), format_checker=validator_type.FORMAT_CHECKER).validate(normalized)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"Tool arguments are not valid JSON: {exc}") from exc
         except Exception as exc:
@@ -346,10 +395,6 @@ class ToolRegistry:
                     f"Invalid arguments for '{name}' at {path} ({exc.validator or 'schema'} constraint)"
                 ) from exc
             raise ValueError(f"Invalid schema or arguments for '{name}' ({type(exc).__name__})") from exc
-        if schema.get("type") == "object" and "additionalProperties" not in schema:
-            unknown = normalized.keys() - schema.get("properties", {}).keys()
-            if unknown:
-                raise ValueError(f"Unknown arguments for '{name}': {', '.join(sorted(unknown))}")
         return {**normalized, **{key: arguments[key] for key in trusted_fields if key in arguments}}
 
     def _execute_registered_tool(
@@ -882,6 +927,7 @@ def shell_execute(command: str, *, voice_mode: bool = False) -> ToolExecutionRes
             if pattern.match(command.strip()):
                 command = replacement
                 break
+        command = unwrap_redundant_shell_wrapper(command)
 
     context = get_current_execution_context()
     try:
@@ -1323,6 +1369,7 @@ def _write_file_atomically(path: str, content: str) -> ToolExecutionResult:
         structured = {
             "ok": verified,
             "verified": verified,
+            "resolved_path": str(safe_path),
             "byte_count": len(actual),
             "sha256": actual_hash,
         }
@@ -2332,7 +2379,14 @@ def desktop_close_app(apps: list[str] | str, processes: list[str] | str | None =
         )
     from charlie.computer.backend import get_backend
 
+    # Observe presence before closing so the verifier's pre-state is an
+    # observation rather than an echo of this tool's own close result.
+    from charlie.desktop.windows import find_window_identity
+
+    observed_present = [find_window_identity(app) is not None for app in app_list]
     result, verified, failure_kind = get_backend().close_apps(app_list, process_list)
+    if not verified:
+        logger.warning("Desktop close unverified: failure_kind=%s detail=%s", failure_kind, result)
     from charlie.text_utils import format_app_list
 
     reply = (
@@ -2346,6 +2400,7 @@ def desktop_close_app(apps: list[str] | str, processes: list[str] | str | None =
             "ok": verified,
             "verified": verified,
             "apps": app_list,
+            "observed_present": observed_present,
             "verification_detail": result,
             "failure_kind": failure_kind,
         },
@@ -2581,10 +2636,10 @@ def desktop_move(x: int, y: int) -> str:
     schema={
         "type": "object",
         "properties": {
-            "x1": {"type": "integer", "description": "Start X pixel coordinate."},
-            "y1": {"type": "integer", "description": "Start Y pixel coordinate."},
-            "x2": {"type": "integer", "description": "End X pixel coordinate."},
-            "y2": {"type": "integer", "description": "End Y pixel coordinate."},
+            "x1": {"type": "integer", "minimum": 0, "description": "Start X pixel coordinate."},
+            "y1": {"type": "integer", "minimum": 0, "description": "Start Y pixel coordinate."},
+            "x2": {"type": "integer", "minimum": 0, "description": "End X pixel coordinate."},
+            "y2": {"type": "integer", "minimum": 0, "description": "End Y pixel coordinate."},
         },
         "required": ["x1", "y1", "x2", "y2"],
     },
@@ -2608,7 +2663,7 @@ def desktop_drag(x1: int, y1: int, x2: int, y2: int) -> str:
     schema={
         "type": "object",
         "properties": {
-            "notches": {"type": "integer", "description": "Scroll amount; positive=up, negative=down."},
+            "notches": {"type": "integer", "minimum": -200, "maximum": 200, "description": "Scroll amount; positive=up, negative=down."},
         },
         "required": ["notches"],
     },
@@ -2724,10 +2779,10 @@ def desktop_window(window: str, action: str) -> str:
         "type": "object",
         "properties": {
             "window": {"type": "string", "description": "Title substring to match."},
-            "x": {"type": "integer", "description": "New left position in screen pixels."},
-            "y": {"type": "integer", "description": "New top position in screen pixels."},
-            "width": {"type": "integer", "description": "New width in pixels."},
-            "height": {"type": "integer", "description": "New height in pixels."},
+            "x": {"type": "integer", "minimum": 0, "description": "New left position in screen pixels."},
+            "y": {"type": "integer", "minimum": 0, "description": "New top position in screen pixels."},
+            "width": {"type": "integer", "minimum": 1, "description": "New width in pixels."},
+            "height": {"type": "integer", "minimum": 1, "description": "New height in pixels."},
         },
         "required": ["window", "x", "y", "width", "height"],
     },
@@ -3320,6 +3375,7 @@ def stopwatch_control(action: str) -> ToolExecutionResult:
         if _stopwatch is None:
             _stopwatch = Stopwatch()
         stopwatch = _stopwatch
+    requested_at = time.monotonic()
     elapsed = (
         stopwatch.start() if action == "start"
         else stopwatch.stop() if action == "stop"
@@ -3342,6 +3398,7 @@ def stopwatch_control(action: str) -> ToolExecutionResult:
             "action": action,
             "elapsed_seconds": elapsed,
             "state": state,
+            "requested_at_monotonic": requested_at,
         },
         "stopwatch",
     )

@@ -2106,6 +2106,7 @@ _DASHBOARD_ACTIVITY_EVENT_TYPES = frozenset({
     "task_snapshot",
     "tool_call",
     "tool_result",
+    "operation_result",
     "research_progress",
     "research_result",
     "result_stored",
@@ -2216,6 +2217,24 @@ def _dashboard_history_record(event: Any) -> Optional[dict[str, Any]]:
         if not summary:
             return None
         stored_payload = {"message": summary[:320]}
+        # The short label is for display, but truthfulness needs the canonical
+        # verification status and a stable tool name to pair it with.
+        for key in ("name", "verification_status", "operation_status"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                stored_payload[key] = value.strip()
+        if isinstance(payload.get("approved"), bool):
+            stored_payload["approved"] = payload["approved"]
+        if event_type == "result_stored":
+            # A finished background task's result has to stay readable after a
+            # reload. The short label truncates at 320 characters, so keep the
+            # full result and its stable identity alongside it.
+            full_text = payload.get("text")
+            if isinstance(full_text, str) and full_text.strip():
+                stored_payload["text"] = full_text[:8000]
+            result_id = payload.get("result_id")
+            if isinstance(result_id, str) and result_id.strip():
+                stored_payload["result_id"] = result_id
         if isinstance(channel, str):
             stored_payload["channel"] = channel
     return {
@@ -2238,6 +2257,38 @@ def _dashboard_activity_event(event: dict[str, Any]) -> dict[str, Any]:
     if isinstance(payload.get("channel"), str):
         activity_payload["channel"] = payload["channel"]
     return {**event, "payload": activity_payload}
+
+
+def _attach_tool_verification(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Annotate each tool_result with the canonical verification status of its envelope.
+
+    The legacy text callback emits ``tool_result`` before the envelope exists, so the
+    status arrives in the ``operation_result`` emitted immediately afterwards for the
+    same tool. Pairing is FIFO per tool name, matching that emission order. Only the
+    canonical envelope may set the status; an adapter's own claim is never used.
+    """
+    pending: dict[str, list[dict[str, Any]]] = {}
+    out: list[dict[str, Any]] = []
+    for event in events:
+        if not isinstance(event, dict):
+            out.append(event)
+            continue
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        event_type = event.get("type")
+        if event_type == "tool_result":
+            annotated = {**event, "payload": {**payload}}
+            pending.setdefault(str(payload.get("name") or ""), []).append(annotated)
+            out.append(annotated)
+            continue
+        if event_type == "operation_result":
+            queue = pending.get(str(payload.get("name") or ""))
+            if queue:
+                queue[0]["payload"]["verification_status"] = payload.get("verification_status")
+                queue[0]["payload"]["operation_status"] = payload.get("operation_status")
+                queue.pop(0)
+            continue
+        out.append(event)
+    return out
 
 
 def _research_resource_records(items: Any) -> list[dict[str, str]]:
@@ -2588,7 +2639,13 @@ async def main() -> int:
                     event_session_id == current_session_id,
                     isinstance(structured, dict),
                 )
-            if event_session_id == current_session_id and isinstance(structured, dict) and structured.get("verified") is True:
+            # Adapters may self-assert "verified"; only the canonical envelope
+            # may promote a widget to a confirmed state.
+            envelope_verified = envelope.verification_status == "verified_success"
+            observation_completed = name == "weather_get" and envelope.status == "completed"
+            if event_session_id == current_session_id and isinstance(structured, dict) and (
+                envelope_verified or observation_completed
+            ):
                 changed = False
                 if name == "weather_get":
                     location = structured.get("location")
@@ -2626,6 +2683,32 @@ async def main() -> int:
                     changed = structured.get("widget", "clock") in {"clock", "weather", "timer", "stopwatch", "music", "system_status"}
                 if changed:
                     _publish_dashboard_widgets()
+
+            # The canonical verification status belongs to the envelope, and the
+            # dashboard has no other honest source for it.
+            if event_bus and event_session_id == current_session_id:
+                _submit_event_threadsafe(
+                    event_bus.emit(
+                        "operation_result",
+                        {
+                            "name": name,
+                            # A missing verdict is not a fifth state: it means no
+                            # independent verification was recorded for this result.
+                            "verification_status": (
+                                getattr(envelope.verification_status, "value", envelope.verification_status)
+                                or "verification_unavailable"
+                            ),
+                            "operation_status": getattr(envelope.status, "value", envelope.status),
+                        },
+                        meta=EventMeta(
+                            source=EventSource.BRAIN,
+                            task_id=getattr(envelope, "task_id", None),
+                            session_id=event_session_id,
+                            turn_id=getattr(envelope, "turn_id", None),
+                        ),
+                    ),
+                    loop,
+                )
 
             try:
                 active_audit_store = audit_store
@@ -2904,18 +2987,27 @@ async def main() -> int:
             expected_platform: Optional[str] = None,
         ) -> bool:
             """Resolve one pending approval future and report whether it was current."""
-            from charlie.core import get_active_tool_approval, resolve_tool_approval
+            from charlie.core import is_tool_approval_pending, resolve_tool_approval
 
             if not isinstance(request_id, str) or not request_id:
                 logger.warning("Rejected malformed tool approval request id")
                 return False
 
-            if expected_platform is not None and get_active_tool_approval() != (
+            # Approvals resolve by exact identity as registered. Do not reject a
+            # legitimate request only because a different approval was registered
+            # later (multiple independent pending approvals are expected).
+            if not is_tool_approval_pending(
                 request_id,
-                expected_platform,
+                expected_platform=expected_platform,
             ):
                 logger.warning("Rejected approval for a stale or wrong-channel request: %s", request_id)
                 return False
+
+            # Capture the identity now: resolving the approval drops the record.
+            from charlie.core import get_tool_approval_record
+
+            approval_record = get_tool_approval_record(request_id)
+            approval_operation = str(getattr(approval_record, "operation", "") or "")
 
             background_record = None
             if expected_platform == "telegram" and approved:
@@ -2973,6 +3065,9 @@ async def main() -> int:
                             exc_info=True,
                         )
                 return False
+            if expected_platform == "web":
+                with web_approval_payloads_lock:
+                    web_approval_payloads.pop(request_id, None)
             expiry_task = telegram_approval_expiry_tasks.pop(request_id, None)
             if expiry_task is not None and not expiry_task.done():
                 expiry_task.cancel()
@@ -2980,8 +3075,20 @@ async def main() -> int:
                 _submit_event_threadsafe(
                     event_bus.emit(
                         "tool_approval_resolved",
-                        {"request_id": request_id},
-                        meta=EventMeta(source=EventSource.BRAIN),
+                        {
+                            "request_id": request_id,
+                            "approved": bool(approved),
+                            "name": approval_operation or request_id,
+                            "operation": approval_operation,
+                            # Persistence requires the owning channel and session,
+                            # otherwise every decision silently vanishes from history.
+                            "channel": expected_platform or "unknown",
+                            "session_id": current_session_id,
+                        },
+                        meta=EventMeta(
+                            source=EventSource.BRAIN,
+                            session_id=current_session_id,
+                        ),
                     ),
                     loop,
                 )
@@ -3125,7 +3232,8 @@ async def main() -> int:
             if handled:
                 speech_echo_cooldown = time.time() + 1.5
 
-        web_approval_payload: dict[str, Any] = {}
+        web_approval_payloads: dict[str, dict[str, Any]] = {}
+        web_approval_payloads_lock = threading.Lock()
 
         async def on_tool_approval_request(
             request_id,
@@ -3223,13 +3331,25 @@ async def main() -> int:
             if platform == "web":
                 if event_bus is None:
                     return False
-                web_approval_payload.clear()
-                web_approval_payload.update({
+                from charlie.core import is_tool_approval_pending
+
+                payload = {
                     "request_id": request_id, "message": reason, "channel": platform,
                     "operation_preview": operation_preview or "",
-                })
+                    "operation": tool_name,
+                    "session_id": session_id, "task_id": task_id, "turn_id": turn_id,
+                }
+                with web_approval_payloads_lock:
+                    for pending_id in tuple(web_approval_payloads):
+                        if not is_tool_approval_pending(
+                            pending_id,
+                            expected_platform="web",
+                            expected_session_id=session_id,
+                        ):
+                            web_approval_payloads.pop(pending_id, None)
+                    web_approval_payloads[request_id] = payload
                 await event_bus.emit(
-                    "tool_approval_request", dict(web_approval_payload),
+                    "tool_approval_request", dict(payload),
                     meta=EventMeta(source=EventSource.BRAIN, turn_id=turn_id, task_id=task_id, session_id=session_id),
                 )
                 return True
@@ -3571,6 +3691,7 @@ async def main() -> int:
                     reason,
                     platform=channel,
                     risk_class="security_sensitive",
+                    session_id=current_session_id if channel == "web" else None,
                 )
                 if getattr(decision, "value", decision) != _ApprovalDecision.APPROVED.value:
                     return None
@@ -3939,31 +4060,44 @@ async def main() -> int:
                 action = command.get("action")
                 if action not in {"start", "stop", "reset"}:
                     raise ValueError("action must be start, stop, or reset")
-                from charlie.tools import stopwatch_control
-
-                result = await asyncio.to_thread(stopwatch_control, action)
-                structured = result.structured_data if isinstance(result.structured_data, dict) else {}
-                if structured.get("verified") is not True:
-                    return {"accepted": False, "error": "Charlie could not verify the stopwatch change."}
+                envelope = await brain.execute_tool_operation(
+                    "stopwatch_control",
+                    {"action": action},
+                    request=f"Dashboard stopwatch {action}",
+                    task_id=None,
+                    session_id=current_session_id,
+                    platform="web",
+                )
+                structured = envelope.data.get("structured_data")
+                if envelope.verification_status != "verified_success" or not isinstance(structured, dict):
+                    return {"accepted": False, "error": str(envelope.reason or envelope.result or "Charlie could not verify the stopwatch change.")}
                 dashboard_widget_state["stopwatch"] = {
                     "state": structured.get("state"),
                     "elapsed_seconds": structured.get("elapsed_seconds"),
                     "sampled_at": datetime.now(timezone.utc).isoformat(),
                 }
                 _publish_dashboard_widgets()
-                return {"accepted": True, **structured}
+                return {"accepted": True, **structured, "verified": True}
             if command_type == "media_control":
                 action = command.get("action")
                 if action not in {"play_pause", "next_track", "prev_track"}:
                     raise ValueError("action must be play_pause, next_track, or prev_track")
-                from charlie.tools import media_control
-
-                result = await asyncio.to_thread(media_control, action)
-                structured = result.structured_data if isinstance(result.structured_data, dict) else {}
-                if structured.get("ok") is not True:
-                    return {"accepted": False, "error": str(structured.get("reason") or "Media command was unavailable.")}
+                envelope = await brain.execute_tool_operation(
+                    "media_control",
+                    {"action": action},
+                    request=f"Dashboard media action {action}",
+                    task_id=None,
+                    session_id=current_session_id,
+                    platform="web",
+                )
+                if envelope.status in {"failed", "blocked", "cancelled"}:
+                    return {"accepted": False, "error": str(envelope.reason or envelope.result or "Media command could not be verified.")}
                 _publish_dashboard_widgets()
-                return {"accepted": True, "action": action, "verified": structured.get("verified") is True}
+                return {
+                    "accepted": True, "action": action,
+                    "verified": envelope.verification_status == "verified_success",
+                    "verification_status": envelope.verification_status,
+                }
             if command_type == "update_settings":
                 updates = command.get("updates")
                 if not isinstance(updates, dict) or not updates:
@@ -4047,10 +4181,31 @@ async def main() -> int:
                 request_id = command.get("request_id")
                 if not isinstance(request_id, str) or not request_id.strip():
                     raise ValueError("request_id must be a non-empty string")
-                from charlie.core import get_active_tool_approval
+                from charlie.core import get_tool_approval_record, is_tool_approval_pending
 
-                pending = get_active_tool_approval()
-                if pending is None or pending[0] != request_id:
+                session_id = command.get("session_id")
+                task_id = command.get("task_id")
+                operation = command.get("operation")
+                record = get_tool_approval_record(request_id)
+                if task_id == "" and record is not None and record.task_id is None:
+                    task_id = None
+                # The request ID selects one operation; echoed identity fields
+                # prevent a stale or mismatched dashboard decision from crossing it.
+                if not is_tool_approval_pending(
+                    request_id,
+                    expected_platform="web",
+                    expected_session_id=current_session_id,
+                ) or (
+                    session_id is not None and session_id != current_session_id
+                ) or (
+                    record is not None
+                    and record.session_id is not None
+                    and record.session_id != current_session_id
+                ) or (
+                    task_id is not None and (record is None or record.task_id != task_id)
+                ) or (
+                    operation is not None and (record is None or record.operation != operation)
+                ):
                     raise ValueError("approval is stale or unavailable")
                 resolved = _resolve_tool_approval_and_notify(
                     request_id,
@@ -4205,7 +4360,26 @@ async def main() -> int:
                     _publish_dashboard_widgets(widgets)
 
         def _web_snapshot() -> dict[str, Any]:
-            from charlie.core import get_active_tool_approval
+            from charlie.core import is_tool_approval_pending
+
+            with web_approval_payloads_lock:
+                payloads = tuple(web_approval_payloads.items())
+            pending_approvals = []
+            stale_payloads = []
+            for request_id, payload in payloads:
+                if is_tool_approval_pending(
+                    request_id,
+                    expected_platform="web",
+                    expected_session_id=current_session_id,
+                ):
+                    pending_approvals.append(dict(payload))
+                else:
+                    stale_payloads.append((request_id, payload))
+            if stale_payloads:
+                with web_approval_payloads_lock:
+                    for request_id, payload in stale_payloads:
+                        if web_approval_payloads.get(request_id) == payload:
+                            web_approval_payloads.pop(request_id, None)
             tasks = [
                 task
                 for task in get_task_journal().snapshot()
@@ -4261,8 +4435,9 @@ async def main() -> int:
             ]
             activity_history = [
                 _dashboard_activity_event(event)
-                for event in dashboard_events
+                for event in _attach_tool_verification(dashboard_events)
                 if event.get("type") in _DASHBOARD_ACTIVITY_EVENT_TYPES
+                and event.get("type") != "operation_result"
                 and not (
                     isinstance(event.get("payload"), dict)
                     and event["payload"].get("channel") == "telegram"
@@ -4302,15 +4477,29 @@ async def main() -> int:
                 "research_results": research_results,
                 "widgets": _dashboard_widgets_snapshot(),
                 "settings": settings_service.snapshot(),
-                "approval": dict(web_approval_payload) if get_active_tool_approval() == (
-                    web_approval_payload.get("request_id"), "web",
-                ) else None,
+                "approvals": pending_approvals,
+                "approval": pending_approvals[-1] if pending_approvals else None,
             }
 
         def _persist_dashboard_event(event: dict[str, Any]) -> None:
             record = _dashboard_history_record(event)
             if record is None or store is None:
                 return
+            if record["event_type"] in {"tool_call", "tool_result"}:
+                # tool_events is the only durable record of which tools ran and in
+                # which turn. audit_entries and dashboard_events both drop turn_id,
+                # and the summarised payload drops the call arguments, so the raw
+                # payload is stored here instead.
+                raw = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                try:
+                    store.append_tool_event(
+                        record["session_id"],
+                        record["event_type"],
+                        str(raw.get("name") or record["payload"].get("name") or ""),
+                        json.dumps(raw, ensure_ascii=False, default=str)[:4000],
+                    )
+                except Exception:
+                    logger.warning("tool event could not be persisted", exc_info=True)
             try:
                 store.append_dashboard_event(
                     record["session_id"],
@@ -4670,10 +4859,9 @@ async def main() -> int:
                     "calm": "Got it, calming down.",
                 }
                 ack = ack_map.get(cmd_emotion, "Got it.")
-                if platform in {"telegram", "console"}:
-                    await _deliver_immediate_reply(ack)
-                else:
-                    voice.speak(ack, cmd_emotion)
+                # The acknowledgement belongs to the originating channel. A web
+                # or Telegram control command must never be spoken out loud.
+                await _deliver_immediate_reply(ack)
                 return
 
             # Detect emotion for this turn
@@ -5726,7 +5914,15 @@ async def main() -> int:
                                 logger.warning("Watcher Telegram delivery failed: main loop unavailable")
                         except Exception:
                             logger.warning("Failed to schedule watcher Telegram delivery", exc_info=True)
-                    if level >= AttentionLevel.ATTENTION and bool(getattr(voice, "is_ready", False)):
+                    # The alert already went to the event bus, and to Telegram when
+                    # configured. Speaking on top of an owner who is mid-turn on
+                    # another channel interrupts work that is already in progress.
+                    active_channel = turn_channels_by_id.get(active_turn_id or "")
+                    if (
+                        level >= AttentionLevel.ATTENTION
+                        and bool(getattr(voice, "is_ready", False))
+                        and active_channel in {"", "voice"}
+                    ):
                         try:
                             voice.speak(message, "neutral")
                         except Exception:

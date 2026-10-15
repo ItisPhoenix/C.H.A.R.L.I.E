@@ -517,31 +517,29 @@ def match_windows_settings(query: str) -> Optional[FastPathMatch]:
 # 4. App Focus & Switch Patterns
 # ---------------------------------------------------------------------------
 _FOCUS_APP_RE = re.compile(
-    r"^\s*(?:charlie[,:]?\s*)?(?:switch\s+to|focus|bring\s+up|bring\s+to\s+front)\s+"
-    r"(?:the\s+)?([a-zA-Z0-9 _.-]+?)\s*(?:app|window)?\s*[.!?]*\s*$",
+    r"^\s*(?:charlie[,:]?\s*)?(?:"
+    # "switch to" is ambiguous on its own ("switch to calm", "switch to dark
+    # mode"), so it only names an app when an app/window noun is present.
+    r"switch\s+to\s+(?:the\s+)?(?P<switched>[a-zA-Z0-9 _.-]+?)\s*(?:app|window)"
+    r"|(?:focus|bring\s+up|bring\s+to\s+front)\s+(?:the\s+)?(?P<focused>[a-zA-Z0-9 _.-]+?)\s*(?:app|window)?"
+    r")\s*[.!?]*\s*$",
     re.IGNORECASE,
 )
-
-
-def _handle_focus_app(app_name: str) -> str:
-    from charlie.desktop.windows import focus_window
-
-    res = focus_window(app_name)
-    return res
 
 
 def match_focus_app(query: str) -> Optional[FastPathMatch]:
     m = _FOCUS_APP_RE.match(query.strip())
     if not m:
         return None
-    app = m.group(1).strip()
+    app = (m.group("switched") or m.group("focused") or "").strip()
+    if not app:
+        return None
     return FastPathMatch(
         intent="focus_app",
         semantic_op_id="desktop.window.focus",
         tool_name="desktop_focus",
-        arguments={"title": app},
+        arguments={"window": app},
         target_domain="desktop",
-        direct_handler=lambda: _handle_focus_app(app),
     )
 
 
@@ -614,13 +612,6 @@ _DIRECT_URL_RE = re.compile(
 )
 
 
-def _handle_direct_url(url: str) -> str:
-    from charlie.tools import registry
-
-    norm_url = url if url.startswith("http://") or url.startswith("https://") else f"https://{url}"
-    return registry.execute_tool("browser_read", {"url": norm_url})
-
-
 def match_direct_url(query: str) -> Optional[FastPathMatch]:
     m = _DIRECT_URL_RE.match(query.strip())
     if not m:
@@ -633,7 +624,6 @@ def match_direct_url(query: str) -> Optional[FastPathMatch]:
         tool_name="browser_read",
         arguments={"url": norm_url},
         target_domain="browser",
-        direct_handler=lambda: _handle_direct_url(norm_url),
     )
 
 
@@ -881,6 +871,14 @@ def execute_fast_path(match: FastPathMatch) -> FastPathResult:
             "Error: Media fast-paths require Brain's canonical media operation.",
             {"available": False, "reason": "Media fast-path execution is owned by Brain."},
         )
+    from charlie.capabilities import capability_index
+
+    operation = capability_index.get_operation(match.tool_name)
+    if operation and (operation.risk_class != "safe" or operation.verifier):
+        return FastPathResult(
+            f"Error: {match.tool_name} must be dispatched through Brain's canonical operation.",
+            {"available": False, "reason": "Mutating operations require Brain's policy and lease boundary."},
+        )
     if match.direct_handler is not None:
         try:
             result = match.direct_handler()
@@ -891,4 +889,5 @@ def execute_fast_path(match: FastPathMatch) -> FastPathResult:
 
     from charlie.tools import registry
 
-    return FastPathResult(registry.execute_tool(match.tool_name, match.arguments))
+    result = registry.execute_tool_structured(match.tool_name, match.arguments)
+    return FastPathResult(result.model_text)

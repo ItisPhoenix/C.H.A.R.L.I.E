@@ -37,6 +37,17 @@ class Stopwatch:
                 return self._elapsed
             return self._elapsed + time.monotonic() - self._started_at
 
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "state": "running" if self._started_at is not None else "stopped",
+                "elapsed_seconds": self._elapsed + (
+                    time.monotonic() - self._started_at if self._started_at is not None else 0.0
+                ),
+                "accumulated_seconds": self._elapsed,
+                "started_at_monotonic": self._started_at,
+            }
+
     @property
     def running(self) -> bool:
         with self._lock:

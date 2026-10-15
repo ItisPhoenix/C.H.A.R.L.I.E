@@ -14,7 +14,7 @@ import os
 import re
 import threading
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from functools import wraps
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
@@ -575,9 +575,24 @@ def _repeat_tool_outcome_signature(envelope: ResultEnvelope) -> str:
 # request_id -> Future[bool], resolved by the active voice or owner-channel
 # callback in main.py. The tool loop never treats an absent channel as approval.
 pending_tool_approvals: Dict[str, "asyncio.Future[bool]"] = {}
-# request_id -> (platform, approval scope key). More than one may be outstanding
-# when independent tasks each need their own bounded approval lifetime.
-_pending_tool_approvals: Dict[str, Tuple[str, str]] = {}
+
+
+@dataclass(frozen=True)
+class ApprovalRecord:
+    """Identity a pending approval is bound to; replay is refused without it."""
+
+    platform: str
+    scope_key: str
+    operation: str
+    task_id: Optional[str] = None
+    session_id: Optional[str] = None
+    turn_id: Optional[str] = None
+    created_at: float = 0.0
+
+
+# request_id -> ApprovalRecord. More than one may be outstanding when
+# independent tasks each need their own bounded approval lifetime.
+_pending_tool_approvals: Dict[str, ApprovalRecord] = {}
 
 
 def _pending_tool_approval_keys() -> List[str]:
@@ -587,8 +602,7 @@ def _pending_tool_approval_keys() -> List[str]:
 def get_active_voice_approval() -> Optional[str]:
     """Return the active request id only when voice may answer by speech."""
     for request_id in reversed(_pending_tool_approval_keys()):
-        platform = _pending_tool_approvals[request_id][0]
-        if platform == "voice":
+        if _pending_tool_approvals[request_id].platform == "voice":
             return request_id
     return None
 
@@ -599,8 +613,48 @@ def get_active_tool_approval() -> Optional[Tuple[str, str]]:
     if not keys:
         return None
     request_id = keys[-1]
-    platform, _scope = _pending_tool_approvals[request_id]
-    return request_id, platform
+    return request_id, _pending_tool_approvals[request_id].platform
+
+
+def get_tool_approval_record(request_id: str) -> Optional[ApprovalRecord]:
+    """Return the bound identity of a pending approval, or None."""
+    return _pending_tool_approvals.get(request_id)
+
+
+def is_tool_approval_pending(
+    request_id: str,
+    *,
+    expected_platform: Optional[str] = None,
+    expected_session_id: Optional[str] = None,
+    expected_task_id: Optional[str] = None,
+) -> bool:
+    """Return True if an approval is currently pending with its exact identity.
+
+    Unlike :func:`get_active_tool_approval`, this does not privilege the most
+    recently registered request. Concurrent approvals resolve by exact id.
+    """
+    registered = _pending_tool_approvals.get(request_id)
+    if registered is None:
+        return False
+    if expected_platform is not None and registered.platform != expected_platform:
+        return False
+    # Only a bound identity can contradict the caller. An approval raised without
+    # a session/task has no binding to check; refusing it would leave the request
+    # permanently unanswerable instead of merely unbound.
+    if (
+        expected_session_id is not None
+        and registered.session_id is not None
+        and registered.session_id != expected_session_id
+    ):
+        return False
+    if (
+        expected_task_id is not None
+        and registered.task_id is not None
+        and registered.task_id != expected_task_id
+    ):
+        return False
+    fut = pending_tool_approvals.get(request_id)
+    return fut is not None and not fut.done()
 
 
 def resolve_tool_approval(
@@ -608,20 +662,21 @@ def resolve_tool_approval(
     approved: bool,
     *,
     expected_platform: Optional[str] = None,
+    expected_session_id: Optional[str] = None,
+    expected_task_id: Optional[str] = None,
 ) -> bool:
     """Resolve a pending tool approval. Returns True if a matching pending
     request was found and resolved, False otherwise (already resolved,
-    timed out, or unknown id).
+    timed out, cross-session, or unknown id).
     """
-    fut = pending_tool_approvals.get(request_id)
-    registered = _pending_tool_approvals.get(request_id)
-    if (
-        fut is None
-        or fut.done()
-        or registered is None
-        or (expected_platform is not None and registered[0] != expected_platform)
+    if not is_tool_approval_pending(
+        request_id,
+        expected_platform=expected_platform,
+        expected_session_id=expected_session_id,
+        expected_task_id=expected_task_id,
     ):
         return False
+    fut = pending_tool_approvals[request_id]
     fut.set_result(approved)
     _pending_tool_approvals.pop(request_id, None)
     return True
@@ -1431,7 +1486,7 @@ def _execution_policy_from_tool_calls(
 
 _TOOL_SCOPE_ACTION_PATTERNS = {
     "start_background_task": (
-        r"\b(?:background task|background job|run later|in the background|while i (?:keep|continue))\b"
+        r"\b(?:background tasks?|background jobs?|run later|in the background|while i (?:keep|continue))\b"
     ),
     "browser_task": r"\b(?:open|visit|navigate|go to|browse|search|click|select|type|fill|download)\b",
     "desktop_open_app": r"\b(?:open|launch|start|use|write|type|edit|create)\b",
@@ -1456,7 +1511,7 @@ _TOOL_SCOPE_ACTION_PATTERNS = {
     "calendar_create": r"\b(?:create|schedule|add|book)\b",
     "calendar_update": r"\b(?:update|change|reschedule|edit)\b",
     "calendar_delete": r"\b(?:cancel|delete|remove)\b",
-    "automation_create": r"\b(?:remind|reminder|schedule|recurring|background task|background job)\b",
+    "automation_create": r"\b(?:remind|reminder|schedule|recurring|background tasks?|background jobs?)\b",
     "automation_update": r"\b(?:update|change|reschedule|edit|rename|relabel)\b",
     "automation_get": r"\b(?:show|list|check|what|which)\b",
     "automation_list": r"\b(?:show|list|check|what|which)\b",
@@ -1465,35 +1520,60 @@ _TOOL_SCOPE_ACTION_PATTERNS = {
 }
 
 
+# A PowerShell host wrapper names the same program it launches, so it is
+# transparent when deciding which program the owner asked for. The cmd wrapper is
+# stripped by charlie.tools at execution time and reused here.
+_POWERSHELL_WRAPPER_RE = re.compile(
+    r"^\s*(?:powershell|pwsh)(?:\.exe)?\s+(?:-\S+\s+)*?-command\s+",
+    re.IGNORECASE,
+)
+
+
+def _unwrap_shell_wrapper(command: str) -> str:
+    """Strip a leading console wrapper so ``cmd /c ver`` reads as ``ver``.
+
+    Windows requires a console host for built-ins such as ``ver``, so the model
+    legitimately proposes the wrapped form. The wrapper says how the program is
+    launched, not which program was asked for.
+    """
+    from charlie.tools import unwrap_redundant_shell_wrapper
+
+    text = str(command or "").strip()
+    stripped = _POWERSHELL_WRAPPER_RE.sub("", text, count=1).strip()
+    return unwrap_redundant_shell_wrapper(stripped) if stripped else text
+
+
 def _shell_command_is_requested(request: str, command: str) -> bool:
     """Match a shell call to the fact or command the user actually requested."""
+    from charlie.tools import unwrap_redundant_shell_wrapper
+
     command = re.sub(r"\s+", " ", str(command or "").strip()).casefold()
     request = str(request or "").casefold()
-    if command in {"python --version", "python -v", "python3 --version"}:
-        return bool(re.search(r"\bpython\b", request) and re.search(r"\bversion\b", request))
-    if command == "taskkill /?":
-        return bool(
-            re.search(r"\btaskkill\b", request)
-            and re.search(r"\b(?:help|heading|usage|description|first)\b", request)
-        )
-    if command == "where python":
-        return bool(
-            re.search(r"\bpython\b", request)
-            and re.search(
-                r"\b(?:where|which)\s+(?:is\s+)?(?:the\s+)?python\s+(?:installed|located|path|executable|interpreter|location)\b|"
-                r"\bpython\b.{0,32}\b(?:path|location|executable|interpreter)\b",
-                request,
-            )
-        )
 
-    quoted = re.search(rf"[`\"']{re.escape(command)}[`\"']", request) is not None
-    explicit = re.search(
-        rf"\b(?:run|execute)\s+(?:the\s+command\s+)?{re.escape(command)}(?:\s|$|[,.!?])",
-        request,
-    ) is not None
     if re.search(r"\b(?:don't|do not|never|avoid)\s+(?:run|execute|use)\b", request):
         return False
-    return quoted or explicit
+
+    # A wrapper is transparent, so both the full call and the program it launches
+    # are acceptable answers to "did the owner ask for this?".
+    candidates = [command]
+    unwrapped = _unwrap_shell_wrapper(command)
+    if unwrapped and unwrapped != command:
+        candidates.append(unwrapped)
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if re.search(rf"[`\"']{re.escape(candidate)}[`\"']", request):
+            return True
+        if re.search(
+            rf"\b(?:run|execute)\s+(?:the\s+command\s+)?{re.escape(candidate)}(?:\s|$|[,.!?])",
+            request,
+        ):
+            return True
+        program = re.split(r"[\s/\\]+", candidate, maxsplit=1)[0]
+        if program and re.search(rf"\b{re.escape(program)}\b", request):
+            return True
+    return False
 
 
 def _tool_target_has_provenance(
@@ -3076,6 +3156,29 @@ class Brain:
 
         self.world_model = WorldModel(db_path=config.world_model_db_path)
 
+        # Brain-owned state has no ToolRegistry adapter. Register internal schemas
+        # so its mutations still pass through the shared policy/lease boundary.
+        from charlie.capabilities import register_tool_in_index
+
+        for name, risk_class, lease, argument in (
+            ("world_model_rule_add", "security_sensitive", "world_model", "rule_text"),
+            ("world_model_rule_delete", "destructive", "world_model", "query"),
+            ("brain_goal_set", "reversible", "brain_state", "goal"),
+        ):
+            register_tool_in_index(
+                name=name,
+                description=f"Internal Brain-owned {name.replace('_', ' ')} operation.",
+                schema={
+                    "type": "object",
+                    "properties": {argument: {"type": "string", "minLength": 1}},
+                    "required": [argument],
+                    "additionalProperties": False,
+                },
+                owner="brain" if name == "brain_goal_set" else "world_model",
+                risk_class=risk_class,
+                required_leases=(lease,),
+            )
+
     def _record_correction_persistence(self, error: Optional[str]) -> None:
         """Record whether the fire-and-forget correction write reached disk."""
 
@@ -4606,14 +4709,18 @@ class Brain:
         (matching charlie.recovery.request_recovery_approval's fail-safe stance).
         A missing timeout uses the same bounded default.
         """
+        task_id = task_id or None
+        if platform == "web" and not session_id:
+            logger.warning("Web approval refused before prompting: no originating session")
+            return ApprovalDecision.UNAVAILABLE
         # Keyed by task/turn, so an unrelated gated call waits its own bounded turn
         # instead of being refused, while a repeat for the same task still declines.
         approval_scope = task_id or turn_id or session_id or f"scope:{uuid4().hex}"
         pending_scope = next(
             (
                 request_id
-                for request_id, (_platform, scope) in _pending_tool_approvals.items()
-                if scope == approval_scope
+                for request_id, record in _pending_tool_approvals.items()
+                if record.scope_key == approval_scope
             ),
             None,
         )
@@ -4644,7 +4751,15 @@ class Brain:
         pending_tool_approvals[request_id] = fut
         # Register before invoking the owner channel: Telegram can return a
         # fast button callback while send_approval_request is still completing.
-        _pending_tool_approvals[request_id] = (platform, approval_scope)
+        _pending_tool_approvals[request_id] = ApprovalRecord(
+            platform=platform,
+            scope_key=approval_scope,
+            operation=tool_name,
+            task_id=task_id,
+            session_id=session_id,
+            turn_id=turn_id,
+            created_at=loop.time(),
+        )
 
         try:
             try:
@@ -6287,8 +6402,17 @@ class Brain:
                 "category": "fact",
                 "content": explicit_memory,
             }
-            result = await asyncio.to_thread(tool_registry.execute_tool, "memory", memory_args)
-            if str(result).startswith("Remembered structured memory id="):
+            memory_outcome = await self.execute_tool_operation(
+                "memory",
+                memory_args,
+                request=original_user_input,
+                task_id=task_id,
+                session_id=session_id,
+                turn_id=turn_id,
+                platform=platform,
+                execution_owner_id=execution_owner_id,
+            )
+            if memory_outcome.result.startswith("Remembered structured memory id="):
                 if self.memory_service and self.memory_service.semantic_available():
                     try:
                         await asyncio.to_thread(
@@ -6300,16 +6424,8 @@ class Brain:
                         )
                     except Exception:
                         logger.debug("Optional semantic memory mirror failed", exc_info=True)
-                result = f"Remembered: {explicit_memory}"
-            logger.info("Explicit memory request handled deterministically: %s", result)
-            outcome = _direct_operation_result(
-                tool_name="memory",
-                capability="memory",
-                operation="memory.remember",
-                raw_result=result,
-                args=memory_args,
-            )
-            yield _result_envelope_to_model_text(outcome)
+            logger.info("Explicit memory request handled deterministically: %s", memory_outcome.result)
+            yield _result_envelope_to_model_text(memory_outcome)
             return
         explicit_recall = _detect_explicit_recall(user_input)
         if explicit_recall is not None:
@@ -6369,38 +6485,21 @@ class Brain:
                 rationale="opinion teaching matcher selected memory update",
             )
             logger.info("Opinion teaching detected: %s -> %s", user_input, opinion)
-            try:
-                result = await asyncio.to_thread(
-                    tool_registry.execute_tool,
-                    "memory",
-                    {
-                        "action": "add",
-                        "target": "opinions",
-                        "content": opinion,
-                    },
-                )
+            opinion_args = {"action": "add", "target": "opinions", "content": opinion}
+            opinion_outcome = await self.execute_tool_operation(
+                "memory",
+                opinion_args,
+                request=original_user_input,
+                task_id=task_id,
+                session_id=session_id,
+                turn_id=turn_id,
+                platform=platform,
+                execution_owner_id=execution_owner_id,
+            )
+            if opinion_outcome.result.startswith("Updated opinions:"):
                 self.reload_context()
-                logger.info("Opinion stored: %s", result)
-                outcome = _direct_operation_result(
-                    tool_name="memory",
-                    capability="memory",
-                    operation="memory.add",
-                    raw_result=result,
-                    args={"action": "add", "target": "opinions", "content": opinion},
-                )
-                yield _result_envelope_to_model_text(outcome)
-            except Exception as e:
-                logger.error("Failed to store opinion: %s", e, exc_info=True)
-                outcome = _direct_operation_result(
-                    tool_name="memory",
-                    capability="memory",
-                    operation="memory.add",
-                    raw_result=f"Error: Failed to store opinion: {e}",
-                    status=ResultStatus.FAILED,
-                    reason="Opinion memory update failed.",
-                    args={"action": "add", "target": "opinions", "content": opinion},
-                )
-                yield _result_envelope_to_model_text(outcome)
+            logger.info("Opinion teaching result: %s", opinion_outcome.result)
+            yield _result_envelope_to_model_text(opinion_outcome)
             return
         # --- Fast-path: standing instruction (behavior rule, no LLM needed) ---
         instruction = _detect_standing_instruction(user_input)
@@ -6412,16 +6511,32 @@ class Brain:
                 confidence=1.0,
                 rationale="standing-instruction matcher selected memory update",
             )
-            self.world_model.add_rule(instruction, "teaching")
-            logger.info("Standing instruction learned: %s", instruction)
-            outcome = _direct_operation_result(
-                tool_name="memory",
-                capability="memory",
-                operation="memory.rule.add",
-                raw_result="Got it, I'll remember that.",
-                args={"action": "rule_add", "content": instruction},
-                data={"instruction": instruction},
+
+            def add_world_model_rule() -> ToolExecutionResult:
+                rule_id = self.world_model.add_rule(instruction, "teaching")
+                readback = any(
+                    observed_id == rule_id and observed_text == instruction
+                    for observed_id, observed_text, *_rest in self.world_model.list_rules(include_decayed=True)
+                )
+                return ToolExecutionResult(
+                    "I saved the instruction and read it back."
+                    if readback else "I tried to save the instruction, but couldn't confirm it was saved.",
+                    {"verified": readback, "rule_id": rule_id, "instruction": instruction},
+                    "world_model_rule",
+                )
+
+            outcome = await self.execute_tool_operation(
+                "world_model_rule_add",
+                {"rule_text": instruction},
+                request=original_user_input,
+                task_id=task_id,
+                session_id=session_id,
+                turn_id=turn_id,
+                platform=platform,
+                execution_owner_id=execution_owner_id,
+                execute_override=add_world_model_rule,
             )
+            logger.info("Standing instruction result: %s", outcome.result)
             yield _result_envelope_to_model_text(outcome)
             return
         # --- Fast-path: review learned rules (deterministic, no LLM needed) ---
@@ -6450,21 +6565,37 @@ class Brain:
                 confidence=1.0,
                 rationale="forget-rule matcher selected memory update",
             )
-            matches = self.world_model.find_rules_matching(forget_text)
-            for rule_id, _text in matches:
-                self.world_model.delete_rule(rule_id)
-            if matches:
-                logger.info("Forgot %d rule(s) matching '%s'", len(matches), forget_text)
-                result_text = f"Forgot {len(matches)} thing{'s' if len(matches) != 1 else ''} about that."
-            else:
-                result_text = "I couldn't find anything matching that to forget."
-            outcome = _direct_operation_result(
-                tool_name="memory",
-                capability="memory",
-                operation="memory.rule.delete",
-                raw_result=result_text,
-                args={"action": "rule_delete", "query": forget_text},
-                data={"matched_count": len(matches)},
+
+            def delete_world_model_rules() -> ToolExecutionResult:
+                matches = [
+                    (rule_id, text)
+                    for rule_id, text in self.world_model.find_rules_matching(forget_text)
+                    if forget_text.casefold() in text.casefold()
+                ]
+                if not matches:
+                    return ToolExecutionResult(
+                        "I couldn't confirm whether a matching instruction exists.",
+                        {"verified": False, "matched_count": 0},
+                        "world_model_rule",
+                    )
+                for rule_id, _text in matches:
+                    self.world_model.delete_rule(rule_id)
+                return ToolExecutionResult(
+                    "I attempted to forget the matching instruction, but couldn't verify its removal.",
+                    {"verified": False, "matched_count": len(matches)},
+                    "world_model_rule",
+                )
+
+            outcome = await self.execute_tool_operation(
+                "world_model_rule_delete",
+                {"query": forget_text},
+                request=original_user_input,
+                task_id=task_id,
+                session_id=session_id,
+                turn_id=turn_id,
+                platform=platform,
+                execution_owner_id=execution_owner_id,
+                execute_override=delete_world_model_rules,
             )
             yield _result_envelope_to_model_text(outcome)
             return
@@ -6477,17 +6608,31 @@ class Brain:
                 confidence=1.0,
                 rationale="explicit goal command selected local goal state",
             )
-            self._active_goal = goal_text
-            self._goal_turns_remaining = 5
-            logger.info("Goal set: %s", goal_text)
-            outcome = _direct_operation_result(
-                tool_name="start_background_task",
-                capability="task",
-                operation="task.goal.set",
-                raw_result=f"Got it, I'll focus on: {goal_text}.",
-                args={"action": "set_goal", "content": goal_text},
-                data={"goal": goal_text, "turns_remaining": self._goal_turns_remaining},
+
+            def set_brain_goal() -> ToolExecutionResult:
+                self._active_goal = goal_text
+                self._goal_turns_remaining = 5
+                verified = self._active_goal == goal_text and self._goal_turns_remaining == 5
+                return ToolExecutionResult(
+                    f"Goal set for the next {self._goal_turns_remaining} turns."
+                    if verified else "I couldn't confirm the active goal was set.",
+                    {"verified": verified, "goal": self._active_goal,
+                     "turns_remaining": self._goal_turns_remaining},
+                    "brain_goal",
+                )
+
+            outcome = await self.execute_tool_operation(
+                "brain_goal_set",
+                {"goal": goal_text},
+                request=original_user_input,
+                task_id=task_id,
+                session_id=session_id,
+                turn_id=turn_id,
+                platform=platform,
+                execution_owner_id=execution_owner_id,
+                execute_override=set_brain_goal,
             )
+            logger.info("Goal set result: %s", outcome.result)
             yield _result_envelope_to_model_text(outcome)
             return
 
@@ -6647,10 +6792,20 @@ class Brain:
             if fp_match.intent == "weather_location_required":
                 yield str(execute_fast_path(fp_match))
                 return
-            if fp_match.target_domain == "media" or fp_match.tool_name in {
-                "open_windows_settings", "weather_get", "timer_create", "timer_cancel", "stopwatch_control",
-                "dashboard_widget_control",
-            }:
+            fp_operation = capability_index.get_operation(fp_match.tool_name)
+            canonical_mutation = bool(
+                fp_operation
+                and (fp_operation.risk_class != "safe" or fp_operation.verifier)
+            )
+            requires_canonical_execution = (
+                fp_match.target_domain == "media"
+                or fp_match.tool_name in {
+                    "open_windows_settings", "weather_get", "timer_create", "timer_cancel",
+                    "stopwatch_control", "dashboard_widget_control", "desktop_focus", "desktop_window",
+                }
+                or canonical_mutation
+            )
+            if requires_canonical_execution:
                 envelope = await self.execute_tool_operation(
                     fp_match.tool_name,
                     fp_match.arguments,
@@ -6660,7 +6815,6 @@ class Brain:
                     turn_id=turn_id,
                     execution_owner_id=execution_owner_id,
                     platform=platform,
-                    operation_override=fp_match.semantic_op_id,
                 )
                 yield _result_envelope_to_user_text(envelope)
                 return

@@ -135,7 +135,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "id": "system.tool.propose",
         "domain": "system",
         "tool_registry_owner": "tools",
-        "risk_class": "destructive",
+        "risk_class": "reversible",
         "timeout_sec": 15.0,
     },
     "system_control": {
@@ -206,6 +206,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "risk_class": "destructive",
         "required_leases": ("calendar",),
         "timeout_sec": 15.0,
+        "verifier": "verify_calendar_delete_readback",
     },
     "calendar_get": {
         "id": "calendar.events.get",
@@ -242,6 +243,8 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "risk_class": "safe",
         "timeout_sec": 5.0,
         "cacheable": False,
+        "verifier": "verify_stopwatch_readback",
+        "required_leases": ("stopwatch",),
     },
     "dashboard_widget_control": {
         "id": "dashboard.widget.visibility",
@@ -250,6 +253,8 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "risk_class": "safe",
         "timeout_sec": 5.0,
         "cacheable": False,
+        "verifier": "verify_widget_visibility_readback",
+        "required_leases": ("dashboard_widgets",),
     },
     "weather_get": {
         "id": "weather.current.read",
@@ -508,7 +513,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "id": "terminal.shell.execute",
         "domain": "terminal",
         "tool_registry_owner": "tools",
-        "risk_class": "reversible",
+        "risk_class": "destructive",
         "required_leases": ("terminal",),
         "timeout_sec": 30.0,
         "verifier": "verify_terminal_command",
@@ -525,7 +530,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "id": "file.system.write",
         "domain": "file",
         "tool_registry_owner": "tools",
-        "risk_class": "reversible",
+        "risk_class": "destructive",
         "required_leases": ("file",),
         "timeout_sec": 10.0,
         "verifier": "verify_file_write",
@@ -543,7 +548,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "id": "memory.core.manage",
         "domain": "memory",
         "tool_registry_owner": "memory",
-        "risk_class": "reversible",
+        "risk_class": "destructive",
         "timeout_sec": 15.0,
     },
     "vector_memory": {
@@ -552,6 +557,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "tool_registry_owner": "memory",
         "risk_class": "safe",
         "timeout_sec": 15.0,
+        "verifier": "unavailable",
     },
     "session_search": {
         "id": "memory.session.search",

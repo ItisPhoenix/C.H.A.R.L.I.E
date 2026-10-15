@@ -832,12 +832,29 @@ def _process_basename(value: str) -> str:
     return value.replace("\\", "/").rsplit("/", 1)[-1]
 
 
+def _process_names_match(left: str, right: str) -> bool:
+    """Windows resolves ``cmd`` and ``cmd.exe`` to the same program.
+
+    Registry entries carry the canonical ``.exe`` name while a caller-supplied
+    hint often omits the suffix, so comparing them literally rejects valid hints.
+    """
+
+    def normalize(value: str) -> str:
+        text = str(value or "").strip().casefold()
+        return text if text.endswith(".exe") else f"{text}.exe"
+
+    return normalize(left) == normalize(right)
+
+
 def _process_hint_matches_app(name: str, hint: str, entry: Any) -> bool:
-    basename = _process_basename(hint).casefold()
+    basename = _process_basename(hint)
     if entry:
-        return basename in {value.casefold() for value in entry.close_processes}
+        return any(
+            _process_names_match(basename, value)
+            for value in getattr(entry, "close_processes", ())
+        )
     stem = basename[:-4] if basename.endswith(".exe") else basename
-    return stem == name.strip().casefold()
+    return stem == name.strip().casefold() or _process_names_match(basename, name)
 
 
 def _current_window_target() -> Optional[dict[str, Any]]:
