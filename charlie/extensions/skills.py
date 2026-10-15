@@ -90,6 +90,9 @@ def register_skill_scripts(
             },
             owner="extensions",
             risk_class="security_sensitive",
+            # A bundled script can touch the filesystem and spawn processes, so it
+            # must serialize against other filesystem/terminal mutation.
+            required_leases=("file", "terminal"),
         )(_invoke)
         registered.append(tool_name)
     return registered

@@ -197,6 +197,7 @@ class CodeAdapter:
                             parameters_schema={"type": "object"},
                             risk_class="reversible",
                             func=_dispatch,
+                            required_leases=("file", "terminal"),
                         )
                     },
                     availability_check=lambda: module_path.exists(),

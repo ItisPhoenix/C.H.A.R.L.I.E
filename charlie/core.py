@@ -114,12 +114,38 @@ class OperationCancelled(asyncio.CancelledError):
         self.envelope = envelope
 
 
-async def _await_executor_quiescence(worker: asyncio.Future[Any]) -> None:
-    """Wait for the actual worker future after its asyncio owner is cancelled."""
+# A cancelled worker normally drains in microseconds. The bound exists only so a
+# worker that never returns cannot leave a cancelled turn holding control.
+_EXECUTOR_QUIESCENCE_TIMEOUT_SEC = 5.0
+
+
+async def _await_executor_quiescence(
+    worker: asyncio.Future[Any],
+    *,
+    timeout: float = _EXECUTOR_QUIESCENCE_TIMEOUT_SEC,
+) -> bool:
+    """Wait for the actual worker future after its asyncio owner is cancelled.
+
+    Returns True once the worker drained. False means the worker outlived the
+    bound and still holds whatever it was given: waiting on it forever would let
+    cancelled work retain control indefinitely, so the caller is told instead.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, timeout)
     while not worker.done():
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
         try:
-            await asyncio.shield(worker)
+            await asyncio.wait_for(asyncio.shield(worker), timeout=remaining)
+        except asyncio.TimeoutError:
+            return False
         except asyncio.CancelledError:
+            # Either the worker completed (shield re-raises its stored
+            # cancellation) or this coroutine was cancelled again. Only the
+            # former ends the wait; the latter keeps the original bound.
+            if worker.done():
+                break
             continue
         except Exception:
             # Only ordinary failures end the wait. SystemExit and
@@ -127,6 +153,23 @@ async def _await_executor_quiescence(worker: asyncio.Future[Any]) -> None:
             # for a worker, not to decide that an interpreter shutdown is
             # merely another worker error.
             break
+    return worker.done()
+
+
+async def _release_bundle(bundle: Any) -> None:
+    try:
+        await bundle.release()
+    except Exception:  # pragma: no cover - release is best effort at teardown
+        logger.warning("Fenced capability lease release failed", exc_info=True)
+
+
+def _release_when_done(bundle: Any) -> None:
+    """Release a fenced lease bundle once its orphaned worker has finished."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(_release_bundle(bundle))
 
 
 def _invoke_callback_with_identity(
@@ -5123,8 +5166,14 @@ class Brain:
                 )
             )
 
+        # Set when a cancelled executor worker outlives its quiescence bound.
+        # The lease site reads it to fence instead of releasing a capability the
+        # orphaned thread is still holding.
+        orphan_worker: Optional[asyncio.Future[Any]] = None
+
         async def _run() -> Any:
             nonlocal execution_context
+            nonlocal orphan_worker
             if execute_override is not None:
                 result = execute_override()
                 return await result if inspect.isawaitable(result) else result
@@ -5184,7 +5233,8 @@ class Brain:
                 return await asyncio.shield(worker)
             except asyncio.CancelledError as cancellation:
                 context.request_cancel()
-                await _await_executor_quiescence(worker)
+                if not await _await_executor_quiescence(worker):
+                    orphan_worker = worker
                 raise cancellation
 
         async def _notify_execution_start() -> None:
@@ -5259,12 +5309,28 @@ class Brain:
                 # cancellation is a threading.Event and bridging it here would need its own
                 # tested adapter.
                 lease_timeout = _tool_timeout(tool_name)
-                async with await default_lease_manager.acquire_many(
+                lease_bundle = await default_lease_manager.acquire_many(
                     required_leases,
                     execution_owner_id,
                     timeout=lease_timeout,
-                ):
+                )
+                try:
                     return await _run_with_physical_input_session()
+                finally:
+                    if orphan_worker is None:
+                        await lease_bundle.release()
+                    else:
+                        # The cancelled worker outlived its quiescence bound, so it
+                        # is still holding the real resource. Releasing here would
+                        # admit a second holder against a live holder. Fence until
+                        # the orphan actually finishes.
+                        fenced = default_lease_manager.fence(
+                            execution_owner_id, required_leases
+                        )
+                        if fenced:
+                            orphan_worker.add_done_callback(
+                                lambda _done, _bundle=lease_bundle: _release_when_done(_bundle)
+                            )
             if tool_registry.is_interactive(tool_name):
                 async with lock:
                     return await _run_with_physical_input_session()

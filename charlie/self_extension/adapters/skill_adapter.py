@@ -394,6 +394,7 @@ class SkillAdapter:
                         description=f"[{name}] bundled script",
                         parameters_schema={"type": "object"},
                         risk_class="reversible",
+                        required_leases=("file", "terminal"),
                     )
 
                 desc = CapabilityDescriptor(

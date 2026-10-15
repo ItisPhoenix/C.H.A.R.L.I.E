@@ -550,6 +550,9 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "tool_registry_owner": "memory",
         "risk_class": "destructive",
         "timeout_sec": 15.0,
+        # The store and graph use thread-local connections, so concurrent mutation
+        # of the same memory can interleave.
+        "required_leases": ("memory",),
     },
     "vector_memory": {
         "id": "memory.vector.search",
@@ -579,6 +582,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "tool_registry_owner": "memory",
         "risk_class": "reversible",
         "timeout_sec": 15.0,
+        "required_leases": ("memory",),
     },
     "graph_query": {
         "id": "memory.graph.query",
@@ -593,6 +597,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "tool_registry_owner": "memory",
         "risk_class": "destructive",
         "timeout_sec": 15.0,
+        "required_leases": ("memory",),
     },
     # Task
     "start_background_task": {
@@ -601,6 +606,8 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "tool_registry_owner": "tools",
         "risk_class": "reversible",
         "timeout_sec": 15.0,
+        # Task admission mutates the shared journal and worker pool.
+        "required_leases": ("task",),
     },
     "charlie_self_query": {
         "id": "system.charlie_self_query",
@@ -622,6 +629,9 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "tool_registry_owner": "extensions",
         "risk_class": "reversible",
         "timeout_sec": 15.0,
+        # Proposal writes source and activates a contained worker, so it must
+        # serialize against filesystem and process mutation.
+        "required_leases": ("file", "terminal"),
     },
 }
 
@@ -1075,7 +1085,9 @@ def register_tool_in_index(
     if cap_desc is None:
         provenance = "builtin"
         source = None
-        if domain == "extensions" or domain.startswith("extension"):
+        # A skill registration reaches this path with owner="skills", so matching
+        # only the extensions domain would let skill tools execute unleased.
+        if domain in {"extensions", "skills"} or domain.startswith("extension"):
             provenance = "extension"
 
         owner_module = _DEFAULT_DOMAIN_OWNERS.get(domain, f"charlie.{domain}")

@@ -371,6 +371,42 @@ class CapabilityLeaseManager:
     def is_revoked(self, capability: str) -> bool:
         return self.revocation(capability) is not None
 
+    def fence(self, owner_id: str, capabilities: Iterable[str]) -> tuple[str, ...]:
+        """Keep capabilities unacquirable after a non-quiescent cancellation.
+
+        A worker that outlived its cancellation is still holding the real
+        resource, so the lease must not be handed to a second holder. Ownership
+        stays recorded and the capability is fenced, exactly as a takeover of
+        still-running work is; no takeover listener fires, because this records
+        a known-orphaned resource rather than transferring authority. The fence
+        clears when the owner releases.
+        """
+        requested = tuple(sorted({_validate_capability(v) for v in capabilities}))
+        fenced: list[str] = []
+        with _lock:
+            for capability in requested:
+                if _owners.get(capability) != owner_id:
+                    continue
+                if capability in _revocations:
+                    fenced.append(capability)
+                    continue
+                _revocations[capability] = CapabilityRevocation(
+                    capability=capability,
+                    owner_id=owner_id,
+                    token=make_id(12),
+                    revoked_at=time.monotonic(),
+                )
+                fenced.append(capability)
+        if fenced:
+            logger.warning(
+                "Capability lease fenced: owner=%s capabilities=%s (worker outlived "
+                "cancellation; no new holder admitted until it releases)",
+                owner_id,
+                ",".join(fenced),
+            )
+        _wake(requested)
+        return tuple(fenced)
+
     def _try_acquire(self, capability: str, owner_id: str) -> Optional[CapabilityLease]:
         lease_id = f"{owner_id}:{make_id(8)}"
         try:
