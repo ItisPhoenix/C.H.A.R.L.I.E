@@ -7,6 +7,7 @@ import base64
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from html import unescape
 from html.parser import HTMLParser
@@ -23,6 +24,26 @@ except ImportError:  # pragma: no cover - exercised only in minimal installs
     _CurlAsyncSession = None
 
 logger = logging.getLogger("charlie.research.providers")
+
+# Providers are rebuilt per search, so a failure has to be remembered outside the
+# instance. Providers run concurrently and the whole search waits for the slowest,
+# so one unreachable provider otherwise taxes every request with its full connect
+# timeout. Only transport failures cool down: an empty result set is evidence, not
+# an outage, and a provider that recovers must be retried once the window expires.
+PROVIDER_FAILURE_COOLDOWN_S = 120.0
+_provider_cooldown_until: Dict[str, float] = {}
+
+
+def provider_is_cooling_down(name: str) -> bool:
+    return time.monotonic() < _provider_cooldown_until.get(name, 0.0)
+
+
+def _begin_provider_cooldown(name: str) -> None:
+    _provider_cooldown_until[name] = time.monotonic() + PROVIDER_FAILURE_COOLDOWN_S
+
+
+def _clear_provider_cooldown(name: str) -> None:
+    _provider_cooldown_until.pop(name, None)
 
 
 def _normalize_duckduckgo_href(href: str) -> str:
@@ -692,6 +713,12 @@ async def search_with_fallback(
     async def run(
         provider: SearchProvider,
     ) -> Tuple[str, List[SearchResult], Optional[str], str]:
+        if provider_is_cooling_down(provider.name):
+            logger.info(
+                "Research provider %s skipped; still cooling down after a transport failure",
+                provider.name,
+            )
+            return provider.name, [], None, "unavailable"
         try:
             hits = await provider.search(query, limit=limit, domain_filters=domain_filters)
             hits = [hit for hit in hits if _matches_domain_filters(hit.url, domain_filters)]
@@ -702,11 +729,14 @@ async def search_with_fallback(
             logger.warning("Research provider %s has no usable configuration for %r", provider.name, query)
             return provider.name, [], type(exc).__name__, "unconfigured"
         except ProviderUnavailableError as exc:
+            _begin_provider_cooldown(provider.name)
             logger.warning("Research provider %s cannot search for %r: %s", provider.name, query, exc)
             return provider.name, [], type(exc).__name__, "unavailable"
         except Exception as exc:
+            _begin_provider_cooldown(provider.name)
             logger.warning("Research provider %s failed for %r", provider.name, query, exc_info=True)
             return provider.name, [], type(exc).__name__, "failed"
+        _clear_provider_cooldown(provider.name)
         return provider.name, hits, None, "ok" if hits else "empty"
 
     provider_results = await asyncio.gather(*(run(p) for p in providers))
