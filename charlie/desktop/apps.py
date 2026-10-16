@@ -307,8 +307,16 @@ def close_apps(
                     break
                 continue
             try:
+                from charlie.desktop.windows import window_target_is_current
+
+                # Kill the verified PID, never the image name: /IM would close
+                # every other instance the single-window guard never checked.
+                if not window_target_is_current(target):
+                    logger.info("Refusing to close %s: window identity changed before kill", app)
+                    failed = True
+                    break
                 result = subprocess.run(
-                    ["taskkill", "/IM", process, "/F"],
+                    ["taskkill", "/PID", str(target.get("pid") or 0), "/F"],
                     capture_output=True,
                     text=True,
                     timeout=5,
