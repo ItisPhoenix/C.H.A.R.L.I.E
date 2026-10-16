@@ -310,7 +310,10 @@ def _preempt_foreground_for_speech(brain: Any, task: Any) -> bool:
 
 def _parse_owner_text_approval(text: str, *, platform: str, approval_channel: str) -> Optional[bool]:
     """Parse typed approval only on the owner channel that issued the prompt."""
-    if platform == approval_channel and platform in {"voice", "console"}:
+    if platform != approval_channel:
+        # Another channel's approval is not ours to answer.
+        return None
+    if platform in {"voice", "console"}:
         return parse_yes_no(text)
     from charlie.telegram_bot import parse_text_approval_response
 
@@ -2027,19 +2030,16 @@ def _clean_background_result(full_result: str, fallback_summary: str = "") -> st
     return "\n".join(deduped) or text
 
 
+_CATCHUP_SPEECH_MAX_CHARS = 400
+
+
 def _compact_catchup_speech(catchup_message: str) -> str:
-    """Keep idle-return voice updates short; the dashboard retains full details."""
+    """Shorten idle-return speech without replacing the real result."""
     text = " ".join((catchup_message or "").split())
-    if re.search(r"(?i)research", text) and re.search(
-        r"(?i)(?:failed|couldn['’]t verify|insufficient|without enough)", text
-    ):
-        return "Research finished without enough verified evidence. Check the dashboard."
-    count = re.search(r"(?i)\b(\d+)\s+things finished\b", text)
-    if count:
-        return f"{count.group(1)} background tasks finished. Check the dashboard."
-    if re.search(r"(?i)\bfailed\b", text):
-        return "A background task failed. Check the dashboard."
-    return "A background task finished. Check the dashboard."
+    if len(text) <= _CATCHUP_SPEECH_MAX_CHARS:
+        return text
+    clipped = text[:_CATCHUP_SPEECH_MAX_CHARS].rsplit(" ", 1)[0]
+    return clipped.rstrip(" ,;:.") + "."
 
 
 async def _deliver_background_result(
@@ -5867,7 +5867,9 @@ async def main() -> int:
                         rationale="process restarted while a background task was still running",
                     ),
                 )
-                voice.speak(_interrupted_msg, "neutral")
+                # Only speak an interrupted task that belonged to the voice channel.
+                if interrupted_task.get("approval_platform") == "voice":
+                    voice.speak(_interrupted_msg, "neutral")
 
             def _read_cpu_ram_percent() -> Tuple[float, float]:
                 import psutil
