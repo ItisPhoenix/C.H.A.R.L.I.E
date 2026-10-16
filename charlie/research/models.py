@@ -410,6 +410,12 @@ class ResearchReport:
     def coverage_summary(self) -> str:
         lines = []
         for question in self.coverage:
+            if question.status == "unplanned":
+                if not (self.evidence or self.citations):
+                    missing = "; ".join(question.missing_evidence)
+                    suffix = f" Missing evidence: {missing}." if missing else ""
+                    lines.append(f"UNRESOLVED: {question.question}.{suffix}")
+                continue
             passage_ids = list(dict.fromkeys(question.supporting_claim_ids + question.refuting_claim_ids))
             citations = f" (evidence passages: {', '.join(passage_ids)})" if passage_ids else ""
             if question.conflict:

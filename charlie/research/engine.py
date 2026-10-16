@@ -195,10 +195,13 @@ def _update_report_coverage(report: ResearchReport) -> bool:
     gaps = []
     for question in report.coverage:
         if not question.evidence_requirements:
-            question.status = "unresolved"
+            # Planner placeholder, not a real obligation: do not report it as an
+            # unresolved requirement while the report holds fetched evidence.
+            question.status = "unplanned"
             question.supporting_claim_ids = []
-            question.missing_evidence = ["An evidence obligation plan was not available"]
-            gaps.append(f"Unresolved: {question.question}")
+            if not report.evidence and not report.citations:
+                question.missing_evidence = ["An evidence obligation plan was not available"]
+                gaps.append(f"Unresolved: {question.question}")
             continue
         facts = [
             fact for fact in report.facts
