@@ -159,6 +159,15 @@ _QUERY_GENERIC_NOISE_RE = re.compile(
     r"\b(?:best|latest|current|compare|options?|alternatives?|using)\b",
     re.IGNORECASE,
 )
+_QUERY_QUESTION_NOISE_RE = re.compile(
+    r"\b(?:what|which|when|where|who|whom|whose|how|why|"
+    r"is|are|was|were|be|been|being|do|does|did|has|have|had|"
+    r"can|could|should|would|will|shall|may|might|must|"
+    r"tell|me|my|please|it|its|that|this|there|and|or|"
+    r"i|you|we|us|they|them|he|she|his|her|"
+    r"the|a|an)\b",
+    re.IGNORECASE,
+)
 _QUERY_RELEASE_NOISE_RE = re.compile(
     r"\b(?:stable|official|sources?)\b",
     re.IGNORECASE,
@@ -168,6 +177,8 @@ _QUERY_RELEASE_NOISE_RE = re.compile(
 def _normalise_provider_query(query: str) -> str:
     """Remove search-instruction filler while preserving the user's subject."""
     value = _QUERY_LEADING_NOISE_RE.sub("", query or "")
+    # Providers answer keyword queries; a bare question returns dictionaries.
+    value = _QUERY_QUESTION_NOISE_RE.sub(" ", value)
     value = _QUERY_GENERIC_NOISE_RE.sub(" ", value)
     if re.search(r"\b(?:release|version|date)\b", value, re.IGNORECASE):
         value = _QUERY_RELEASE_NOISE_RE.sub(" ", value)

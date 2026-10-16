@@ -48,11 +48,14 @@ def _tokens(text: str) -> set[str]:
 
 
 def _query_entity_tokens(query: str) -> set[str]:
+    words = query.split()
     phrases = _CAPITALIZED_ENTITY_PHRASE_RE.findall(query)
     acronyms = _ACRONYM_RE.findall(query)
+    # A lone capitalised word is an entity too; skip the sentence-initial one.
+    singles = [w for i, w in enumerate(words) if i and w[:1].isupper() and w[1:].islower()]
     return {
         token
-        for value in [*phrases, *acronyms]
+        for value in [*phrases, *acronyms, *singles]
         for token in _tokens(value)
         if token not in _STOPWORDS
     }
