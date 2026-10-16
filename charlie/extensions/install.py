@@ -76,6 +76,7 @@ def install_extension(
             from charlie.extensions.skills import parse_skill_md, register_skill_scripts
 
             manifest = parse_skill_md(raw_text)
+            manifest.base_dir = os.path.dirname(source) if source else None
             runner = script_runner or run_skill_script
             return register_skill_scripts(registry, manifest, runner)
         if kind == "openapi":

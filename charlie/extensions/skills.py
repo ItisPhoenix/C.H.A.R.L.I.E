@@ -29,6 +29,24 @@ class SkillManifest:
     metadata: Dict[str, Any]
     instructions: str
     scripts: List[str] = field(default_factory=list)
+    base_dir: Optional[str] = None
+
+
+def resolve_skill_script(base_dir: Optional[str], script_path: str) -> str:
+    """Resolve a bundled script inside its skill directory, or refuse.
+
+    A script named in frontmatter previously became the literal argv[0], so a
+    skill could point at any absolute path on the host.
+    """
+    if os.path.isabs(script_path):
+        raise ValueError(f"skill script path must be relative: {script_path}")
+    if base_dir is None:
+        return script_path
+    root = os.path.realpath(base_dir)
+    resolved = os.path.realpath(os.path.join(root, script_path))
+    if resolved != root and not resolved.startswith(root + os.sep):
+        raise ValueError(f"skill script escapes its skill directory: {script_path}")
+    return resolved
 
 
 def parse_skill_md(text: str) -> SkillManifest:
@@ -69,8 +87,9 @@ def register_skill_scripts(
     tool -- a thin wrapper that hands off to `runner(script_path, args)`.
     Returns the registered tool names."""
     registered: List[str] = []
-    for script_path in manifest.scripts:
-        tool_name = f"skill_{_slugify(manifest.name)}_{_slugify(script_path)}"
+    for raw_script in manifest.scripts:
+        script_path = resolve_skill_script(manifest.base_dir, raw_script)
+        tool_name = f"skill_{_slugify(manifest.name)}_{_slugify(raw_script)}"
 
         def _invoke(script_path=script_path, args: List[str] = None, **_: Any) -> str:
             return runner(script_path, list(args or []))
