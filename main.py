@@ -2007,6 +2007,13 @@ def _wire_memory_service(memory_service: MemoryService) -> None:
     tool_registry.set_memory_service(memory_service)
 
 
+# Turns whose assistant reply was already archived by the research callback.
+# Both the research path and the normal final-reply path append for the same
+# turn, which stored every researched answer twice.
+_RESEARCH_ARCHIVED_TURNS: set = set()
+_RESEARCH_ARCHIVED_TURNS_MAX = 256
+
+
 def _clean_background_result(full_result: str, fallback_summary: str = "") -> str:
     """Render only useful result content for the owner channel."""
     text = " ".join((full_result or fallback_summary or "").split()).strip()
@@ -3457,6 +3464,10 @@ async def main() -> int:
                 try:
                     store.append("assistant", answer, session_id=session_id, turn_id=turn_id)
                     store.touch_session(session_id)
+                    if turn_id:
+                        if len(_RESEARCH_ARCHIVED_TURNS) >= _RESEARCH_ARCHIVED_TURNS_MAX:
+                            _RESEARCH_ARCHIVED_TURNS.clear()
+                        _RESEARCH_ARCHIVED_TURNS.add(turn_id)
                 except SessionNotFoundError:
                     logger.warning(
                         "session_persistence_dropped | phase=sustained_research_answer "
@@ -5044,18 +5055,21 @@ async def main() -> int:
                                 logger.warning(
                                     "Could not stage a repeated-success skill candidate", exc_info=True
                                 )
-                    try:
-                        store.append("assistant", final_reply, session_id=session_id, turn_id=request.turn_id)
-                        store.touch_session(session_id)
-                    except SessionNotFoundError:
-                        logger.warning(
-                            "session_persistence_dropped | phase=assistant | session_id=%s "
-                            "| turn_id=%s | reason=session_deleted",
-                            session_id,
-                            request.turn_id,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to archive assistant message or touch session: {e}")
+                    if request.turn_id and request.turn_id in _RESEARCH_ARCHIVED_TURNS:
+                        _RESEARCH_ARCHIVED_TURNS.discard(request.turn_id)
+                    else:
+                        try:
+                            store.append("assistant", final_reply, session_id=session_id, turn_id=request.turn_id)
+                            store.touch_session(session_id)
+                        except SessionNotFoundError:
+                            logger.warning(
+                                "session_persistence_dropped | phase=assistant | session_id=%s "
+                                "| turn_id=%s | reason=session_deleted",
+                                session_id,
+                                request.turn_id,
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to archive assistant message or touch session: {e}")
                     if platform == "telegram" and telegram_bot:
                         try:
                             message_id = await telegram_bot.send_message(config.telegram_user_id, final_reply)
