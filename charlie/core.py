@@ -438,6 +438,9 @@ def _research_grounded_findings(report: Any) -> List[str]:
     ]
 
 
+_RESEARCH_FALLBACK_MAX_FINDINGS = 8
+
+
 def _research_fallback_answer(
     report: Any, quick_search: bool
 ) -> Tuple[str, bool, bool]:
@@ -451,6 +454,9 @@ def _research_fallback_answer(
     findings = _research_grounded_findings(report)
     if not findings:
         return _research_no_evidence_refusal("insufficient-evidence"), True, True
+    # Evidence is returned in rank order, so the head is the most relevant.
+    # Dumping every span buried the actual answer under unrelated history.
+    findings = findings[:_RESEARCH_FALLBACK_MAX_FINDINGS]
 
     deterministic = report.deterministic_answer()
     if not deterministic.strip().lower().startswith("unresolved:"):
