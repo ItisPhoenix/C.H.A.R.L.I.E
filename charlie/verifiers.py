@@ -151,16 +151,25 @@ def verify_app_launch(
     )
 
 
+def _foreground_window_title() -> str:
+    """Foreground window title via ctypes; pywin32 is not a project dependency."""
+    import ctypes  # local: keeps import cost off the module import path
+
+    user32 = ctypes.windll.user32
+    hwnd = user32.GetForegroundWindow()
+    length = user32.GetWindowTextLengthW(hwnd)
+    buffer = ctypes.create_unicode_buffer(length + 1)
+    user32.GetWindowTextW(hwnd, buffer, length + 1)
+    return buffer.value
+
+
 def verify_app_focus(target_title_or_app: str) -> VerificationResult:
     """Verify that the target window is currently foreground / active."""
     start = time.perf_counter()
     try:
-        import win32gui  # type: ignore
-
-        hwnd = win32gui.GetForegroundWindow()
-        title = win32gui.GetWindowText(hwnd).lower()
+        title = _foreground_window_title().lower()
         target = target_title_or_app.lower().strip()
-        if target in title or title.startswith(target):
+        if target and (target in title or title.startswith(target)):
             latency = (time.perf_counter() - start) * 1000.0
             return VerificationResult(
                 status="completed",
@@ -174,14 +183,16 @@ def verify_app_focus(target_title_or_app: str) -> VerificationResult:
             verified=False,
             message=f"Foreground window is '{title}', expected target containing '{target}'",
             latency_ms=round(latency, 2),
+            verification_status="verification_failed",
         )
     except Exception as e:
         latency = (time.perf_counter() - start) * 1000.0
         return VerificationResult(
             status="unverified",
             verified=False,
-            message=f"Foreground window focus check bypassed or unavailable: {e}",
+            message=f"Foreground window focus check unavailable: {e}",
             latency_ms=round(latency, 2),
+            verification_status="verification_unavailable",
         )
 
 
@@ -547,7 +558,7 @@ def run_verifier_for_match(
             return verify_volume(expected_pct=pct, expected_muted=expected_muted)
 
         if verifier_name == "verify_app_focus":
-            title = arguments.get("title") or arguments.get("app") or ""
+            title = arguments.get("title") or arguments.get("window") or arguments.get("app") or ""
             return verify_app_focus(str(title))
 
         if verifier_name in {"verify_app_launch", "verify_app_close"}:

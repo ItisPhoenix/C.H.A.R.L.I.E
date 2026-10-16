@@ -323,6 +323,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "risk_class": "reversible",
         "required_leases": ("desktop",),
         "timeout_sec": 15.0,
+        "verifier": "verify_app_launch",
     },
     "desktop_close_app": {
         "id": "desktop.app.close",
@@ -340,6 +341,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "risk_class": "reversible",
         "required_leases": ("desktop",),
         "timeout_sec": 15.0,
+        "verifier": "verify_browser_navigate",
     },
     "desktop_observe": {
         "id": "desktop.screen.observe",
@@ -447,6 +449,7 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "required_leases": ("desktop",),
         "timeout_sec": 15.0,
         "executor_type": "com_thread",
+        "verifier": "verify_app_focus",
     },
     "desktop_window": {
         "id": "desktop.window.control",
