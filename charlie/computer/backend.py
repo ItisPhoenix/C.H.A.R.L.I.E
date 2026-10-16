@@ -635,6 +635,7 @@ class DesktopBackend:
         if not names:
             return "Refused: no application was specified."
         results = []
+        launched: list[str] = []
         for index, name in enumerate(names):
             hint = str(commands[index]) if index < len(commands) and commands[index] else None
             entry = _app_entry(name)
@@ -642,10 +643,13 @@ class DesktopBackend:
                 results.append(f"Refused: the process hint did not match {name}.")
                 continue
             targets = _native_app_windows(name, [hint] if hint else None)
+            if not targets:
+                # Closed app: launch it by resolved identity, not a model shell command.
+                launched.append(name)
+                continue
             if len(targets) != 1:
                 results.append(
-                    f"I couldn't focus {name}; no unique live app window was found. "
-                    "This desktop control can only focus apps that are already running."
+                    f"I couldn't focus {name}; {len(targets)} live app windows matched."
                 )
                 continue
             try:
@@ -656,9 +660,17 @@ class DesktopBackend:
                 results.append("Executed but not verified (Cua focus timed out).")
             except CuaBridgeError:
                 results.append("I couldn't confirm the requested app window through desktop control.")
-        if all(result.startswith("Opened the app and confirmed") for result in results):
+        if launched:
+            try:
+                from charlie.desktop.apps import launch_apps
+
+                results.append(launch_apps(launched))
+            except Exception as exc:  # a launcher failure must not mask focus results
+                logger.warning("app launch failed for %s: %s", launched, exc, exc_info=True)
+                results.append(f"I couldn't launch {', '.join(launched)}.")
+        if results and all(result.startswith("Opened the app and confirmed") for result in results):
             return "Opened the app and confirmed its exact window through bounded Cua."
-        return "I couldn't open every requested app. " + " ".join(results)
+        return " ".join(result for result in results if result) or "I couldn't open the requested app."
 
     def close_apps(
         self, apps: list[str], process_hints: Optional[list[str]] = None
