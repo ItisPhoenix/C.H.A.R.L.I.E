@@ -5,8 +5,6 @@ import json
 import logging
 import os
 import re
-import shutil
-import tempfile
 import time
 import unicodedata
 import uuid
@@ -304,7 +302,9 @@ class SelfExtensionOrchestrator:
                 expected_output=expected,
                 launch_argv=[
                     f"code:{name}",
-                    f"sha256:{hashlib.sha256(source.encode('utf-8')).hexdigest()[:16]}",
+                    # Full digest: this value is what the owner approves and what
+                    # the binding covers, so a 16-hex prefix is forgeable.
+                    f"sha256:{hashlib.sha256(source.encode('utf-8')).hexdigest()}",
                 ],
             )
             request.affected_capabilities = [f"code_{name}"]
@@ -380,12 +380,13 @@ class SelfExtensionOrchestrator:
             try:
                 name, source, inputs = self._parse_code_proposal(source_text, requested_name)
                 self._check_code_contract(source, name, inputs)
-                observed = self._probe_generated_function(source, name, inputs)
             except ValueError as exc:
                 rejection = str(exc)
                 logger.info("CODE_SMALL proposal rejected (attempt %s): %s", attempt + 1, rejection)
                 continue
-            return name, source, inputs, observed
+            # No execution here: this is the proposal path, before the owner has
+            # approved anything. The first run is the approved apply/verify step.
+            return name, source, inputs, None
 
         raise ValueError(
             f"the model did not produce a policy-clean, worker-verified pure function: {rejection}"
@@ -505,29 +506,6 @@ class SelfExtensionOrchestrator:
         required = [a.arg for a in func.args.args if a.default is None and a.arg not in inputs]
         if required:
             raise ValueError(f"test_inputs omit required parameter(s) {required}.")
-
-    @staticmethod
-    def _probe_generated_function(source: str, name: str, inputs: Dict[str, Any]) -> Any:
-        """Run the proposal once in the contained worker and return its observed result.
-
-        The observed value becomes the plan's expected output, so verification
-        never rests on a model-stated result.
-        """
-        workdir = Path(tempfile.mkdtemp(prefix="charlie-code-plan-"))
-        try:
-            module_path = workdir / f"{name}.py"
-            module_path.write_text(source, encoding="utf-8")
-            ok, observed, error = run_worker(
-                module_path=module_path,
-                func_name=name,
-                test_inputs=inputs,
-                expected_output=None,
-            )
-        finally:
-            shutil.rmtree(workdir, ignore_errors=True)
-        if not ok:
-            raise ValueError(f"the function failed worker execution: {error}")
-        return observed
 
     # ─────────────────────────────────────────────────────────────────────────
     # Event emission (canonical EventType)
