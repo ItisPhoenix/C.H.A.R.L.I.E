@@ -242,7 +242,10 @@ class DesktopBackend:
                 continue
             label = str(element.get("label") or "").strip()
             role = str(element.get("role") or "Element")
-            mark_id = index
+            # click_mark/type_text resolve marks via element_index, so key them the same.
+            mark_id = element.get("element_index")
+            if not isinstance(mark_id, int):
+                mark_id = index
             marks[mark_id] = token
             lines.append(f"[{mark_id}] {role} \"{label}\"")
         with self._lock:
@@ -944,7 +947,11 @@ def _screenshot_data_url(payload: Any) -> Optional[str]:
     if not images:
         return None
     image = images[0]
-    data = image.get("data") if isinstance(image, dict) else getattr(image, "data", None)
+    # SDK field is data_base64; "data" exists on neither the typed nor JSON form.
+    if isinstance(image, dict):
+        data = image.get("data_base64") or image.get("data")
+    else:
+        data = getattr(image, "data_base64", None) or getattr(image, "data", None)
     mime = image.get("mime_type") if isinstance(image, dict) else getattr(image, "mime_type", None)
     if not mime and isinstance(image, dict):
         mime = image.get("mimeType")

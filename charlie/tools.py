@@ -2695,6 +2695,9 @@ def desktop_screenshot() -> str:
     text_result, image = get_backend().capture_window()
     if config.vision_enabled and image:
         set_pending_vision_image(image)
+    elif not image:
+        # Silent text-only return reads as a successful screenshot to the model.
+        return f"{text_result}\nNo window image was captured; nothing was observed visually."
     return text_result
 
 
