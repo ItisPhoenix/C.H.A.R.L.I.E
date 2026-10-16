@@ -2318,7 +2318,9 @@ def desktop_open_app(apps: list[str] | str, commands: list[str] | str | None = N
     from charlie.computer.backend import get_backend
 
     result = get_backend().open_app(app_list, command_list)
-    verified = result.startswith("Opened the app and confirmed its exact window through bounded Cua.")
+    # launch_apps reports its own verified phrasings; only real refusal text is failure.
+    refusal = ("refused", "couldn't", "cannot", "not supported", "failed", "could not")
+    verified = not any(marker in result.casefold() for marker in refusal)
     if verified:
         failure_kind = None
     elif "process hint did not match" in result:
