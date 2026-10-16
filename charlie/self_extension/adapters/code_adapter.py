@@ -204,6 +204,25 @@ class CodeAdapter:
                 )
                 self._capability_index.register_capability(desc)
 
+            # Also register it as an invokable tool. The capability index alone
+            # only made the function introspectable; tool dispatch resolves
+            # callables from ToolRegistry, so without this an approved extension
+            # could never be called.
+            from charlie.tools import registry as tool_registry
+
+            arg_names = [a.arg for a in (func_node.args.args if func_node else [])]
+            tool_registry.register_tool(
+                name=name,
+                description=docstring,
+                schema={
+                    "type": "object",
+                    "properties": {arg: {} for arg in arg_names},
+                },
+                owner="extensions",
+                risk_class="reversible",
+                required_leases=("file", "terminal"),
+            )(_dispatch)
+
             return CodeAdapterResult(
                 success=True,
                 message=f"Code extension '{name}' validated, worker-tested, and registered.",
