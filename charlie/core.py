@@ -7521,10 +7521,25 @@ class Brain:
                         for item in research_report.evidence
                         if item.source_id in cited
                     ]
+                    if not findings:
+                        # Citations did not line up with the extracted evidence, so
+                        # the fallback had nothing but the gap line and answered
+                        # "Unresolved: <the question>". Each evidence span already
+                        # carries its own source id, so use them directly.
+                        findings = [
+                            f"- {' '.join(item.statement.split())} [{item.source_id}]"
+                            for item in research_report.evidence
+                            if item.statement
+                        ]
                     if quick_search:
                         answer = "I couldn't verify the requested detail from the sources I found."
                     elif not findings:
                         answer = _research_no_evidence_refusal("insufficient-evidence")
+                    elif research_report.deterministic_answer().strip().lower().startswith("unresolved:"):
+                        answer = (
+                            "I couldn't confirm a single answer from these sources. "
+                            "Here is what they do state:\n" + "\n".join(findings)
+                        )
                     else:
                         answer = research_report.deterministic_answer()
                         claim_valid = validate_claim_support(answer, research_report)

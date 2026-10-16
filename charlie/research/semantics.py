@@ -19,12 +19,16 @@ import asyncio
 import logging
 import math
 import os
+import time
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
 import httpx
 
 logger = logging.getLogger("charlie.research.semantics")
+
+EMBEDDING_FAILURE_COOLDOWN_S = 120.0
+_embedding_cooldown_until = 0.0
 
 # How much leading document text to embed. Headings and the opening summary
 # carry the topic; embedding a whole page wastes latency for no ranking gain.
@@ -157,11 +161,21 @@ async def gather_semantic_scores(
     **kwargs,
 ) -> SemanticRelevance:
     """Single entry point so callers never block on a missing service."""
+    global _embedding_cooldown_until
+    # An unreachable embedding service used to cost the full timeout on every
+    # query, which is a large slice of the whole research budget for a
+    # guaranteed failure. Cool it down the same way unreachable providers are.
+    if time.monotonic() < _embedding_cooldown_until:
+        return SemanticRelevance({}, "unavailable")
     try:
         return await asyncio.wait_for(
             compute_semantic_relevance(query, documents, **kwargs),
             timeout=float(kwargs.get("timeout_s", 15.0)),
         )
     except asyncio.TimeoutError:
+        _embedding_cooldown_until = time.monotonic() + EMBEDDING_FAILURE_COOLDOWN_S
         logger.warning("Semantic relevance timed out; falling back to token overlap.")
         return SemanticRelevance({}, "unavailable")
+    except Exception:
+        _embedding_cooldown_until = time.monotonic() + EMBEDDING_FAILURE_COOLDOWN_S
+        raise
