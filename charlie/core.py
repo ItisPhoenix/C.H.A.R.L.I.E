@@ -420,6 +420,55 @@ def _research_no_evidence_refusal(stop_reason: str) -> str:
     )
 
 
+def _research_grounded_findings(report: Any) -> List[str]:
+    """Cited evidence spans, preferring cited ones but never returning nothing
+    while the report holds evidence."""
+    cited = {item.source_id for item in report.citations}
+    findings = [
+        f"- {' '.join(item.statement.split())} [{item.source_id}]"
+        for item in report.evidence
+        if item.statement and item.source_id in cited
+    ]
+    if findings:
+        return findings
+    return [
+        f"- {' '.join(item.statement.split())} [{item.source_id}]"
+        for item in report.evidence
+        if item.statement
+    ]
+
+
+def _research_fallback_answer(
+    report: Any, quick_search: bool
+) -> Tuple[str, bool, bool]:
+    """Answer a rejected research synthesis from the report's own evidence.
+
+    Returns the answer plus its claim and numeric grounding verdicts.
+    """
+    if quick_search:
+        return "I couldn't verify the requested detail from the sources I found.", True, True
+
+    findings = _research_grounded_findings(report)
+    if not findings:
+        return _research_no_evidence_refusal("insufficient-evidence"), True, True
+
+    deterministic = report.deterministic_answer()
+    if not deterministic.strip().lower().startswith("unresolved:"):
+        return (
+            deterministic,
+            validate_claim_support(deterministic, report),
+            validate_numeric_grounding(deterministic, report),
+        )
+
+    # Only the coverage-gap echo: state the evidence instead of restating the
+    # question as unresolved.
+    answer = (
+        "I couldn't confirm a single answer from these sources. "
+        "Here is what they do state:\n" + "\n".join(findings)
+    )
+    return answer, validate_claim_support(answer, report), validate_numeric_grounding(answer, report)
+
+
 # Narrower sibling of router.SCREEN_QUERY_RE: phrasing that implies the user wants
 # graphical/visual understanding (an icon, photo, game frame) that OCR/UIA
 # marks can't describe. When this matches and a vision model is configured,
@@ -7515,41 +7564,15 @@ class Brain:
                         "Research synthesis rejected | claim_valid=%s | numeric_valid=%s | documents=%d | passages=%d",
                         claim_valid, numeric_valid, len(research_report.sources), len(research_report.passages),
                     )
-                    cited = {item.source_id for item in research_report.citations}
-                    findings = [
-                        f"- {item.statement} [{item.source_id}]"
-                        for item in research_report.evidence
-                        if item.source_id in cited
-                    ]
-                    if not findings:
-                        # Citations did not line up with the extracted evidence, so
-                        # the fallback had nothing but the gap line and answered
-                        # "Unresolved: <the question>". Each evidence span already
-                        # carries its own source id, so use them directly.
-                        findings = [
-                            f"- {' '.join(item.statement.split())} [{item.source_id}]"
-                            for item in research_report.evidence
-                            if item.statement
-                        ]
-                    if quick_search:
-                        answer = "I couldn't verify the requested detail from the sources I found."
-                    elif not findings:
-                        answer = _research_no_evidence_refusal("insufficient-evidence")
-                    elif research_report.deterministic_answer().strip().lower().startswith("unresolved:"):
-                        answer = (
-                            "I couldn't confirm a single answer from these sources. "
-                            "Here is what they do state:\n" + "\n".join(findings)
+                    answer, claim_valid, numeric_valid = _research_fallback_answer(
+                        research_report, quick_search
+                    )
+                    if not claim_valid or not numeric_valid:
+                        logger.warning(
+                            "Research fallback rejected | claim_valid=%s | numeric_valid=%s | documents=%d | passages=%d",
+                            claim_valid, numeric_valid, len(research_report.sources), len(research_report.passages),
                         )
-                    else:
-                        answer = research_report.deterministic_answer()
-                        claim_valid = validate_claim_support(answer, research_report)
-                        numeric_valid = validate_numeric_grounding(answer, research_report)
-                        if not claim_valid or not numeric_valid:
-                            logger.warning(
-                                "Research fallback rejected | claim_valid=%s | numeric_valid=%s | documents=%d | passages=%d",
-                                claim_valid, numeric_valid, len(research_report.sources), len(research_report.passages),
-                            )
-                            answer = _research_no_evidence_refusal("insufficient-evidence")
+                        answer = _research_no_evidence_refusal("insufficient-evidence")
                 if quick_search:
                     answer = compact_quick_search_answer(answer) or (
                         "I couldn't verify the requested detail from the sources I found."
