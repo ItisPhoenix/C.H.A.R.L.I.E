@@ -760,7 +760,7 @@ async def _store_result(
         # an escaping exception here was reported as a task failure while the
         # journal already said COMPLETED.
         store = ResultsStore(db_path=task.brain.config.session_db_path)
-        if not store.store(task.id, summary, full_result, int(level)):
+        if not store.store(task.id, summary, full_result, int(level), task.approval_platform or ""):
             logger.warning("Background-task result was not retained; skipping notifications for %s", task.id)
             return {"local_event": "failed"}
         if task.cancel_requested:

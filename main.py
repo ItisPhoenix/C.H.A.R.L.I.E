@@ -4637,10 +4637,9 @@ async def main() -> int:
             from charlie.core import get_active_tool_approval
 
             pending_approval = get_active_tool_approval()
-            # Telegram ingress handles explicit text responses before dispatch;
-            # every other owner message remains a normal turn and is queued
-            # behind a foreground approval by _should_queue_active_turn.
-            if pending_approval and platform != "telegram":
+            # A pending approval only captures turns from its own channel.
+            pending_channel = pending_approval[1] if pending_approval else None
+            if pending_approval and platform != "telegram" and platform == pending_channel:
                 pending_approval_id, approval_channel = pending_approval
                 record_primary_decision(
                     intent="control",
@@ -5587,14 +5586,16 @@ async def main() -> int:
                         idle_s = await asyncio.to_thread(user_idle_seconds)
                         is_idle = idle_s >= _IDLE_RETURN_THRESHOLD_S
                         if was_idle and not is_idle:
-                            catchup_msg = await asyncio.to_thread(results_store.consume_catchup)
-                            if catchup_msg:
+                            catchup = await asyncio.to_thread(results_store.consume_catchup)
+                            if catchup:
+                                catchup_msg, voice_origin = catchup
                                 await bus.emit(
                                     "alert",
                                     {"severity": "info", "message": catchup_msg},
                                     meta=EventMeta(source=EventSource.TASK, rationale="idle-return catch-up"),
                                 )
-                                voice.speak(_compact_catchup_speech(catchup_msg), "neutral")
+                                if voice_origin:
+                                    voice.speak(_compact_catchup_speech(catchup_msg), "neutral")
                         was_idle = is_idle
                     await asyncio.sleep(1.0)
             except asyncio.CancelledError:

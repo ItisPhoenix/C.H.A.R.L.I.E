@@ -13,7 +13,7 @@ import os
 import sqlite3
 import threading
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from charlie.utils import utc_now_iso
 
@@ -84,7 +84,8 @@ class ResultsStore:
                         created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
                         telegram_status TEXT NOT NULL DEFAULT 'not_configured',
                         local_event_status TEXT NOT NULL DEFAULT 'not_configured',
-                        voice_status TEXT NOT NULL DEFAULT 'not_configured'
+                        voice_status TEXT NOT NULL DEFAULT 'not_configured',
+                        channel TEXT NOT NULL DEFAULT ''
                     );
                 """)
             columns = {row[1] for row in self.conn.execute("PRAGMA table_info(task_results)")}
@@ -93,17 +94,22 @@ class ResultsStore:
                     self.conn.execute(
                         f"ALTER TABLE task_results ADD COLUMN {column} TEXT NOT NULL DEFAULT 'not_configured'"
                     )
+            if "channel" not in columns:
+                self.conn.execute(
+                    "ALTER TABLE task_results ADD COLUMN channel TEXT NOT NULL DEFAULT ''"
+                )
         except sqlite3.Error as e:
             logger.error(f"Results DB initialization failed: {e}")
             raise
 
-    def store(self, task_id: str, summary: str, full_result: str, attention_level: int) -> bool:
+    def store(self, task_id: str, summary: str, full_result: str, attention_level: int,
+              channel: str = "") -> bool:
         try:
             with self.conn:
                 self.conn.execute(
-                    "INSERT INTO task_results (task_id, summary, full_result, attention_level, created_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (task_id, summary, full_result, attention_level, utc_now_iso()),
+                    "INSERT INTO task_results (task_id, summary, full_result, attention_level, channel, "
+                    "created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (task_id, summary, full_result, attention_level, channel or "", utc_now_iso()),
                 )
             return True
         except sqlite3.Error as e:
@@ -155,17 +161,17 @@ class ResultsStore:
             logger.error(f"update result delivery status failed: {e}")
             return False
 
-    def consume_catchup(self, min_level: int = 2) -> Optional[str]:
-        """One nudge for everything unseen since the last call -- never a storm.
+    def consume_catchup(self, min_level: int = 2) -> Optional[Tuple[str, bool]]:
+        """Return ``(message, voice_only)`` for everything unseen since the last call.
 
-        Reads unseen rows at/above min_level and marks them seen in the same
-        pass, so a second call returns None until something new lands --
-        this IS the "fires exactly once" guarantee, not caller discipline.
+        Marks rows seen in the same pass, so this IS the "fires exactly once"
+        guarantee. ``voice_only`` is True only when every row is voice-originated,
+        so results belonging to another channel are never spoken locally.
         """
         try:
             with self.conn:
                 rows = self.conn.execute(
-                    "SELECT task_id, summary FROM task_results "
+                    "SELECT task_id, summary, channel FROM task_results "
                     "WHERE seen = 0 AND attention_level >= ? ORDER BY id ASC",
                     (min_level,),
                 ).fetchall()
@@ -180,9 +186,13 @@ class ResultsStore:
             return None
 
         summaries = [r[1] for r in rows]
+        voice_only = all((r[2] or "") == "voice" for r in rows)
         if len(summaries) == 1:
-            return f"While you were away: {summaries[0]}"
-        return f"While you were away, {len(summaries)} things finished: " + "; ".join(summaries)
+            return f"While you were away: {summaries[0]}", voice_only
+        return (
+            f"While you were away, {len(summaries)} things finished: " + "; ".join(summaries),
+            voice_only,
+        )
 
     def close(self) -> None:
         if self.conn:
