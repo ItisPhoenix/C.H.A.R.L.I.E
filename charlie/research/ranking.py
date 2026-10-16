@@ -79,8 +79,8 @@ def search_result_matches_query(query: str, result: SearchResult) -> bool:
     if len(terms) == 1 and len(next(iter(terms))) == 2:
         identity = _tokens(f"{result.title} {result.domain or urlparse(result.url).hostname or ''}")
         return bool(terms & identity)
-    required_overlap = 1 if len(terms) <= 3 else 2
-    return len(terms & content) >= required_overlap
+    # Requiring two discarded genuine hits: a real hit usually matches only the product name.
+    return len(terms & content) >= 1
 
 
 def _freshness_timestamp(value: str | None) -> float:

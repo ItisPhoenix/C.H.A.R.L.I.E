@@ -772,7 +772,7 @@ class ResearchEngine:
         mode: ResearchMode,
     ) -> List[SourceDocument]:
         limit = int(getattr(self.config, "research_max_sources", 12))
-        if not documents or mode is ResearchMode.QUICK:
+        if not documents:
             return await rank_documents(documents, plan, limit)
 
         pairs = [
@@ -788,7 +788,7 @@ class ResearchEngine:
             pairs,
             base_url=getattr(self.config, "memory_embedding_url", ""),
             model=getattr(self.config, "memory_embedding_model", ""),
-            timeout_s=min(2.0, max(0.01, self._remaining_acquisition_s() or 2.0)),
+            timeout_s=min(8.0, max(0.01, self._remaining_acquisition_s() or 8.0)),
         )
         return await rank_documents(documents, plan, limit, semantic=semantic)
 
