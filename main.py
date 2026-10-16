@@ -2013,14 +2013,6 @@ def _clean_background_result(full_result: str, fallback_summary: str = "") -> st
     if not text:
         return ""
 
-    python_match = re.search(r"\bPython\s+version\s*:\s*(\d+(?:\.\d+)+)", text, re.IGNORECASE)
-    taskkill_match = re.search(r"`(TASKKILL\s+[^`]+)`", text, re.IGNORECASE)
-    if taskkill_match is None:
-        taskkill_match = re.search(r"\b(TASKKILL\s+\[/S\s+[^\n]+)", text, re.IGNORECASE)
-    if python_match and taskkill_match:
-        heading = (taskkill_match.group(1) or taskkill_match.group(0)).strip("`*_ ")
-        return f"Python version: {python_match.group(1)}\nTaskkill help heading: {heading}"
-
     text = re.sub(r"^Background task\s+['\"].*?['\"]\s+(?:done|failed)\.\s*(?:Result:\s*)?", "", text, flags=re.I)
     text = re.sub(r"\b(?:Done\.?|Here(?:'s| is) what I found:\s*)", "", text, flags=re.I)
     parts = [part.strip() for part in re.split(r"\s{2,}|\n+", text) if part.strip()]

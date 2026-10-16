@@ -883,6 +883,15 @@ class CharlieDoctor:
         """
         journal = self._task_journal
         if journal is None:
+            # Production constructs the doctor without a journal; the introspector
+            # owns it. Without this the check always warned on a healthy runtime.
+            getter = getattr(self._introspector, "_get_task_journal", None)
+            if callable(getter):
+                try:
+                    journal = getter()
+                except Exception:
+                    journal = None
+        if journal is None:
             return DiagnosticCheck(
                 check_id="task_journal",
                 category="tasks",
@@ -1765,6 +1774,17 @@ class CharlieDoctor:
                     "and requires explicit confirmation."
                 ),
                 "requires_approval": True,
+            }
+
+        if repair_id in consequential_repairs:
+            # Gated as consequential but has no handler. Approving it must not
+            # count a failed attempt, or three approvals trip the breaker and
+            # disable repairs that do work.
+            return {
+                "success": False,
+                "repair_id": repair_id,
+                "message": f"Repair '{repair_id}' is not implemented; nothing was changed.",
+                "implemented": False,
             }
 
         try:
