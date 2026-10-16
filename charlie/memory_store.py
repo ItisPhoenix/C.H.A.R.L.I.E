@@ -27,6 +27,12 @@ _FACT_EXTRACT_MODEL = ""
 # (different-dimension) model while the remote service is starting.
 _EMBEDDING_RETRY_ATTEMPTS = 3
 _EMBEDDING_RETRY_DELAY_SEC = 2.0
+# Per-request budget for the primary embedding service. Measured warm latency is
+# ~0.5s, but a cold Ollama host must page the model in from disk first, which
+# exceeds the old 10s budget. Falling back there is not a soft failure: it swaps
+# a 768-dim remote model for the 384-dim local one and every later query against
+# the existing collection then mismatches.
+_EMBEDDING_REQUEST_TIMEOUT_S = 60.0
 
 # --- Recalled-memory prompt fence ---
 # Retrieved memory is attacker-influenceable data (anything the user or a
@@ -119,7 +125,7 @@ class _RemoteEmbeddingFunction:
 
         if self._request_shape in ("batch", "native_batch"):
             payload = {"model": self.model, "input": texts}
-            request_options = {"json": payload, "timeout": 10.0}
+            request_options = {"json": payload, "timeout": _EMBEDDING_REQUEST_TIMEOUT_S}
             if self._request_shape == "native_batch":
                 request_options["trust_env"] = False
             resp = httpx.post(self._url, **request_options)
@@ -132,7 +138,7 @@ class _RemoteEmbeddingFunction:
             results: List[List[float]] = []
             for text in texts:
                 payload = {"model": self.model, "prompt": text}
-                resp = httpx.post(self._url, json=payload, timeout=10.0)
+                resp = httpx.post(self._url, json=payload, timeout=_EMBEDDING_REQUEST_TIMEOUT_S)
                 resp.raise_for_status()
                 results.append(resp.json()["embedding"])
             return results
