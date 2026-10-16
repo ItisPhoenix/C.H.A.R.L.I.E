@@ -425,20 +425,35 @@ def _research_grounded_findings(report: Any) -> List[str]:
     while the report holds evidence."""
     cited = {item.source_id for item in report.citations}
     findings = [
-        f"- {' '.join(item.statement.split())} [{item.source_id}]"
+        f"{' '.join(item.statement.split())} [{item.source_id}]"
         for item in report.evidence
         if item.statement and item.source_id in cited
     ]
     if findings:
         return findings
     return [
-        f"- {' '.join(item.statement.split())} [{item.source_id}]"
+        f"{' '.join(item.statement.split())} [{item.source_id}]"
         for item in report.evidence
         if item.statement
     ]
 
 
 _RESEARCH_FALLBACK_MAX_FINDINGS = 8
+_RESEARCH_PROSE_SENTENCES_PER_PARAGRAPH = 3
+
+
+def _research_evidence_prose(findings: List[str]) -> str:
+    """Render cited spans as short prose paragraphs, never a bullet dump."""
+    sentences: List[str] = []
+    for finding in findings:
+        text = " ".join(finding.split()).rstrip()
+        if text and text[-1] not in ".!?:;":
+            text += "."
+        sentences.append(text)
+    step = _RESEARCH_PROSE_SENTENCES_PER_PARAGRAPH
+    return "\n\n".join(
+        " ".join(sentences[start:start + step]) for start in range(0, len(sentences), step)
+    )
 
 
 def _research_fallback_answer(
@@ -466,11 +481,11 @@ def _research_fallback_answer(
             validate_numeric_grounding(deterministic, report),
         )
 
-    # Only the coverage-gap echo: state the evidence instead of restating the
-    # question as unresolved.
+    # Only the coverage-gap echo: state the evidence as prose instead of
+    # restating the question as unresolved or listing every span.
     answer = (
         "I couldn't confirm a single answer from these sources. "
-        "Here is what they do state:\n" + "\n".join(findings)
+        "What they do state:\n\n" + _research_evidence_prose(findings)
     )
     return answer, validate_claim_support(answer, report), validate_numeric_grounding(answer, report)
 

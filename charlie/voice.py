@@ -129,6 +129,17 @@ _TTS_RUN_END = object()
 _CHIME_ITEM = object()
 _LONG_SENTENCE_CHARS = 250
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?,;])\s+")
+# Emphasis markers must never reach TTS, or the synthesiser says "asterisk".
+_EMPHASIS_RE = re.compile(r"(?<!\w)([*_]{1,2})(?=\S)(.+?)(?<=\S)\1(?!\w)", re.S)
+_MARKDOWN_LINE_RE = re.compile(r"(?m)^[ \t]{0,3}(?:[-*+]|\d+[.)])[ \t]+")
+_MARKDOWN_HEADING_RE = re.compile(r"(?m)^[ \t]{0,3}#{1,6}[ \t]*")
+
+
+def strip_emphasis(text: str) -> str:
+    """Remove markdown emphasis, bullets and headings for spoken output."""
+    text = _EMPHASIS_RE.sub(r"\2", text)
+    text = _MARKDOWN_HEADING_RE.sub("", text)
+    return _MARKDOWN_LINE_RE.sub("", text)
 _ASR_WORKER_STAGE_MESSAGE = "asr_worker_stage"
 _ASR_WORKER_STALL_THRESHOLD_S = 9.0
 _ASR_WORKER_WATCHDOG_INTERVAL_S = 0.5
@@ -1120,6 +1131,7 @@ class VoiceEngine:
             return ""
         # Strip reasoning tags using shared helper
         text = strip_internal_reasoning(text)
+        text = strip_emphasis(text)
 
         # Echo detection
         if self.is_echo(text):
