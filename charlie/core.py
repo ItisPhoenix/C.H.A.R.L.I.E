@@ -7572,7 +7572,12 @@ class Brain:
                             "Research fallback rejected | claim_valid=%s | numeric_valid=%s | documents=%d | passages=%d",
                             claim_valid, numeric_valid, len(research_report.sources), len(research_report.passages),
                         )
-                        answer = _research_no_evidence_refusal("insufficient-evidence")
+                        # Keep grounded evidence over a bare refusal. The fallback
+                        # already says a single answer could not be confirmed and
+                        # lists only cited spans, so an unverified claim check must
+                        # not delete the sources the user would otherwise never see.
+                        if not research_report.evidence:
+                            answer = _research_no_evidence_refusal("insufficient-evidence")
                 if quick_search:
                     answer = compact_quick_search_answer(answer) or (
                         "I couldn't verify the requested detail from the sources I found."
