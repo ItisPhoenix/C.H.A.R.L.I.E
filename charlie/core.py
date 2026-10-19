@@ -2149,6 +2149,20 @@ _DOTS_PARAMETER_RE = re.compile(
 )
 
 
+def _split_for_streaming(text: str) -> List[str]:
+    """Split a finished answer into sentence-sized chunks for progressive TTS."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    chunks: List[str] = []
+    for part in parts:
+        part = part.strip()
+        if part:
+            chunks.append(part)
+    return chunks or [text]
+
+
 def _strip_dots_function_call_markup(text: str) -> str:
     cleaned = _DOTS_FUNCTION_CALL_RE.sub("", text or "")
     return re.sub(r"<dots_function_call\b[^>]*>.*\Z", "", cleaned, flags=re.IGNORECASE | re.DOTALL).strip()
@@ -7957,7 +7971,9 @@ class Brain:
                 # Trim history to max turns (keep pairs: user + assistant)
                 self.history = _recent_turn_history(self.history, self._history_max_turns)
                 if filtered:
-                    yield filtered
+                    for _sentence in _split_for_streaming(filtered):
+                        if _sentence:
+                            yield _sentence
                 if platform != "voice":
                     self.schedule_background_task(
                         self._extract_thread_update(original_user_input, filtered, session_id)
