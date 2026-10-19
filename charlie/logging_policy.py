@@ -105,6 +105,19 @@ class ConsolePolicyFilter(logging.Filter):
         return record.levelno == logging.INFO and _is_operational_info(record)
 
 
+class NoisyDependencyFilter(logging.Filter):
+    """Drop DEBUG from chatty deps even when they reset their own logger level."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.INFO:
+            return True
+        name = record.name.casefold()
+        return not any(
+            name == prefix or name.startswith(f"{prefix}.")
+            for prefix in NOISY_LOGGER_PREFIXES
+        )
+
+
 class ConciseConsoleFormatter(logging.Formatter):
     """Render exception summaries without leaking a traceback to the console."""
 

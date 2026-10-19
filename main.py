@@ -34,6 +34,7 @@ from charlie.logging_policy import (
     NOISY_LOGGER_PREFIXES,
     ConciseConsoleFormatter,
     ConsolePolicyFilter,
+    NoisyDependencyFilter,
     RedactingFormatter,
     env_flag,
     parse_log_level,
@@ -130,7 +131,9 @@ from charlie.log_redaction import SensitiveDataFilter, redact_sensitive_text
 
 redaction_filter = SensitiveDataFilter()
 file_handler.addFilter(redaction_filter)
+file_handler.addFilter(NoisyDependencyFilter())
 console_handler.addFilter(redaction_filter)
+console_handler.addFilter(NoisyDependencyFilter())
 console_handler.addFilter(ConsolePolicyFilter(console_log_level, diagnostics=console_diagnostics))
 root_logger.addHandler(file_handler)
 root_logger.addHandler(console_handler)
