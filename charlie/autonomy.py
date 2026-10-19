@@ -170,6 +170,12 @@ def classify_action(
     if tool_name in _DESKTOP_EFFECTOR_TOOLS:
         return RiskClass.SAFE, ""
 
+    # Remembering a user-stated fact is reversible and user-requested; it must
+    # not be blocked when no approval channel is available. Replacing or
+    # removing stays destructive and still requires approval.
+    if tool_name == "memory" and str((arguments or {}).get("action", "")).casefold() == "remember":
+        return RiskClass.REVERSIBLE, ""
+
     policy_result = security_policy.check_tool_call(tool_name, arguments, recent_external_texts)
     if policy_result.needs_approval:
         return RiskClass.SECURITY_SENSITIVE, policy_result.reason or ""
