@@ -135,9 +135,9 @@ console_handler.addFilter(ConsolePolicyFilter(console_log_level, diagnostics=con
 root_logger.addHandler(file_handler)
 root_logger.addHandler(console_handler)
 for _logger_name in NOISY_LOGGER_PREFIXES:
-    # Keep dependency records available to the DEBUG file handler. The console
-    # policy, not logger-level suppression, decides what users see.
-    logging.getLogger(_logger_name).setLevel(logging.INFO)
+    # These dependencies are chatty at DEBUG; keep them at WARNING so the file
+    # log stays readable and does not flood with httpcore/httpx trace lines.
+    logging.getLogger(_logger_name).setLevel(logging.WARNING)
 
 # 3. NOW IMPORT CHARLIE MODULES
 from charlie import background_task, telemetry
