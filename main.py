@@ -105,7 +105,7 @@ LOG_FILE = os.getenv("CHARLIE_LOG_FILE", "").strip() or LOG_FILE
 os.makedirs(os.path.dirname(os.path.abspath(LOG_FILE)), exist_ok=True)
 
 # 2. CONFIGURE SPLIT LOGGING
-file_log_level = parse_log_level(os.getenv("FILE_LOG_LEVEL"), logging.DEBUG)
+file_log_level = parse_log_level(os.getenv("FILE_LOG_LEVEL"), logging.INFO)
 console_log_level = parse_log_level(os.getenv("CONSOLE_LOG_LEVEL"), logging.INFO)
 console_diagnostics = env_flag("CONSOLE_DIAGNOSTICS")
 root_logger = logging.getLogger()
@@ -137,7 +137,7 @@ root_logger.addHandler(console_handler)
 for _logger_name in NOISY_LOGGER_PREFIXES:
     # Keep dependency records available to the DEBUG file handler. The console
     # policy, not logger-level suppression, decides what users see.
-    logging.getLogger(_logger_name).setLevel(logging.DEBUG)
+    logging.getLogger(_logger_name).setLevel(logging.INFO)
 
 # 3. NOW IMPORT CHARLIE MODULES
 from charlie import background_task, telemetry
@@ -2516,11 +2516,11 @@ async def main() -> int:
     try:
         try:
             store = SessionStore(config.session_db_path)
-            orphan_counter = getattr(store, "count_legacy_orphans", None)
-            if callable(orphan_counter):
-                orphan_counts = orphan_counter()
-                if any(orphan_counts.values()):
-                    logger.warning("legacy_session_orphans | counts=%s", orphan_counts)
+            repair = getattr(store, "repair_legacy_orphans", None)
+            if callable(repair):
+                repaired = repair()
+                if any(repaired.values()):
+                    logger.info("repaired_legacy_orphans | counts=%s", repaired)
         except Exception as e:
             logger.error(f"Failed to initialize SessionStore: {e}")
             raise

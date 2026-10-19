@@ -1022,6 +1022,31 @@ class SessionStore:
         except sqlite3.Error as exc:
             raise SessionStorageError("Failed to count legacy session orphans") from exc
 
+    def repair_legacy_orphans(self) -> dict[str, int]:
+        """Remove pre-existing rows with no parent session. Safe: such rows are
+        already unreachable through any session and only inflate the DB."""
+        try:
+            with self.conn:
+                messages = self.conn.execute(
+                    "DELETE FROM messages WHERE session_id IS NULL OR NOT EXISTS "
+                    "(SELECT 1 FROM sessions WHERE sessions.session_id = messages.session_id)"
+                ).rowcount
+                tool_events = self.conn.execute(
+                    "DELETE FROM tool_events WHERE NOT EXISTS "
+                    "(SELECT 1 FROM sessions WHERE sessions.session_id = tool_events.session_id)"
+                ).rowcount
+                dashboard_events = self.conn.execute(
+                    "DELETE FROM dashboard_events WHERE NOT EXISTS "
+                    "(SELECT 1 FROM sessions WHERE sessions.session_id = dashboard_events.session_id)"
+                ).rowcount
+            return {
+                "messages": int(messages or 0),
+                "tool_events": int(tool_events or 0),
+                "dashboard_events": int(dashboard_events or 0),
+            }
+        except sqlite3.Error as exc:
+            raise SessionStorageError("Failed to repair legacy session orphans") from exc
+
     def close(self) -> None:
         """Closes connection cleanly."""
         with self._connections_lock:
