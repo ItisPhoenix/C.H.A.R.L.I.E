@@ -357,7 +357,7 @@ class Config:
         metadata=_meta("RESEARCH_FETCH_TIMEOUT_S", "Research Advanced"),
     )
     research_total_timeout_quick_s: float = field(
-        default=float(os.getenv("RESEARCH_TOTAL_TIMEOUT_QUICK_S", "20")),
+        default=float(os.getenv("RESEARCH_TOTAL_TIMEOUT_QUICK_S", "40")),
         metadata=_meta("RESEARCH_TOTAL_TIMEOUT_QUICK_S", "Research Advanced"),
     )
     research_total_timeout_standard_s: float = field(
@@ -381,7 +381,7 @@ class Config:
         metadata=_meta("RESEARCH_SYNTHESIS_RESERVE_QUICK_S", "Research Advanced"),
     )
     research_synthesis_reserve_standard_s: float = field(
-        default=float(os.getenv("RESEARCH_SYNTHESIS_RESERVE_STANDARD_S", "12")),
+        default=float(os.getenv("RESEARCH_SYNTHESIS_RESERVE_STANDARD_S", "4")),
         metadata=_meta("RESEARCH_SYNTHESIS_RESERVE_STANDARD_S", "Research Advanced"),
     )
     research_synthesis_reserve_deep_s: float = field(

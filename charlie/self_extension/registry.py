@@ -182,7 +182,13 @@ class ExtensionRegistry:
             kind = entry.kind
             try:
                 if kind == ExtensionKind.CODE_SMALL:
-                    self._rehydrate_code(ext_id, entry, capability_index, code_worker_module)
+                    report.skipped_disabled += 1
+                    report.details.append({
+                        "id": ext_id,
+                        "status": "disabled",
+                        "reason": "Model-authored code extensions are disabled.",
+                    })
+                    continue
                 elif kind == ExtensionKind.SKILL:
                     self._rehydrate_skill(ext_id, entry, capability_index)
                 else:
@@ -210,7 +216,9 @@ class ExtensionRegistry:
         capability_index: Any,
         code_worker_module: Any,
     ) -> None:
-        """Validate source file + hash, then register subprocess-backed capability."""
+        """Reject legacy code-extension rehydration."""
+        raise ValueError("Model-authored code extensions are disabled.")
+
         from charlie.capabilities import CapabilityDescriptor, CapabilityOperation
 
         src_path_str = entry.metadata.get("module_path") or entry.source
@@ -271,15 +279,34 @@ class ExtensionRegistry:
         entry: "ExtensionEntry",
         capability_index: Any,
     ) -> None:
-        from charlie.capabilities import CapabilityDescriptor
+        from charlie.capabilities import CapabilityDescriptor, CapabilityOperation
+        from charlie.extensions.skills import parse_skill_md
+
+        content = Path(entry.source).read_bytes()
+        if hashlib.sha256(content).hexdigest()[:16] != entry.content_hash:
+            raise ValueError(f"Hash mismatch for skill '{entry.name}'.")
+        manifest = parse_skill_md(content.decode("utf-8"))
+        if manifest.name != entry.name:
+            raise ValueError(f"Name mismatch for skill '{entry.name}'.")
+
+        operations = {}
+        for script in manifest.scripts:
+            operations[script] = CapabilityOperation(
+                id=f"skill.{entry.name}.{script.replace('.', '_')}",
+                name=script,
+                description=f"[{entry.name}] bundled script",
+                parameters_schema={"type": "object"},
+                risk_class="reversible",
+                required_leases=("file", "terminal"),
+            )
 
         desc = CapabilityDescriptor(
             id=ext_id,
             name=entry.name,
-            description=f"Skill: {entry.name}",
-            owner="skills",
-            provenance="extension",  # skills are locally installed extensions
-            operations={},
+            description=manifest.description or f"Reusable procedure '{entry.name}'",
+            owner="extensions",
+            provenance="extension",
+            operations=operations,
             availability_check=lambda: True,
         )
         capability_index.register_capability(desc)

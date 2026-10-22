@@ -438,7 +438,7 @@ def _research_grounded_findings(report: Any) -> List[str]:
     ]
 
 
-_RESEARCH_FALLBACK_MAX_FINDINGS = 8
+_RESEARCH_FALLBACK_MAX_FINDINGS = 3
 _RESEARCH_PROSE_SENTENCES_PER_PARAGRAPH = 3
 
 
@@ -474,19 +474,15 @@ def _research_fallback_answer(
     findings = findings[:_RESEARCH_FALLBACK_MAX_FINDINGS]
 
     deterministic = report.deterministic_answer()
-    if not deterministic.strip().lower().startswith("unresolved:"):
+    if report.stop_reason == "evidence-sufficient" and not report.partial:
         return (
             deterministic,
             validate_claim_support(deterministic, report),
             validate_numeric_grounding(deterministic, report),
         )
 
-    # Only the coverage-gap echo: state the evidence as prose instead of
-    # restating the question as unresolved or listing every span.
-    answer = (
-        "I couldn't confirm a single answer from these sources. "
-        "What they do state:\n\n" + _research_evidence_prose(findings)
-    )
+    # A rejected synthesis must stay concise and use only the ranked evidence.
+    answer = "## Research status: incomplete\n\n" + _research_evidence_prose(findings)
     return answer, validate_claim_support(answer, report), validate_numeric_grounding(answer, report)
 
 
@@ -1629,7 +1625,6 @@ _TOOL_SCOPE_ACTION_PATTERNS = {
     "automation_get": r"\b(?:show|list|check|what|which)\b",
     "automation_list": r"\b(?:show|list|check|what|which)\b",
     "automation_cancel": r"\b(?:cancel|stop|remove)\b",
-    "propose_new_tool": r"\b(?:propose|create|stage)\b.*\b(?:tool|skill|capability)\b",
 }
 
 
@@ -3813,13 +3808,17 @@ class Brain:
                 )
             )
 
-    async def _research_browser_fetch(self, result: SearchResult) -> Optional[SourceDocument]:
+    async def _research_browser_fetch(
+        self, result: SearchResult, timeout_s: Optional[float] = None,
+    ) -> Optional[SourceDocument]:
         """Last-resort extraction callback; never used for ordinary QUICK research."""
         if not self.config.browser_enabled or not _BROWSER_AVAILABLE:
             return None
         from charlie.research.crawler import crawl_document
         try:
-            return await crawl_document(result, timeout_s=15.0)
+            return await crawl_document(
+                result, timeout_s=min(15.0, timeout_s) if timeout_s is not None else 15.0,
+            )
         except Exception:
             logger.info(
                 "Browser extraction escalation failed for host=%s",
@@ -3898,7 +3897,7 @@ class Brain:
         ], skip_tools=True)
         payload["max_tokens"] = 700
         try:
-            text, calls = await self._research_completion(payload, timeout=10.0)
+            text, calls = await self._research_completion(payload, timeout=12.0)
             match = re.search(r"\{[\s\S]*\}", text)
             data = json.loads(match.group(0)) if match and not calls else None
             return data if isinstance(data, dict) else {}
@@ -3988,7 +3987,7 @@ class Brain:
         payload["max_tokens"] = 350
         try:
             text, _ = await asyncio.wait_for(
-                self._stream_completion(payload, self._chat_generation), timeout=5.0
+                self._stream_completion(payload, self._chat_generation), timeout=12.0
             )
             match = re.search(r"\[[\s\S]*\]", text)
             queries = json.loads(match.group(0)) if match else None
@@ -4755,43 +4754,8 @@ class Brain:
         return outcome if return_envelope else outcome.result
 
     async def _handle_propose_new_tool(self, arguments: Dict[str, Any]) -> str:
-        """Tier-3 self-extension: validate authored code and queue a review
-        record. It never runs code or bypasses the normal owner approval gate.
-        """
-        from charlie import recovery
-        from charlie.extensions import build_skill_card
-        from charlie.extensions.generated import parse_generated_tool
-
-        name = arguments.get("name", "")
-        description = arguments.get("description", "")
-        code = arguments.get("code", "")
-        try:
-            parse_generated_tool(name, code)
-        except (ValueError, SyntaxError) as exc:
-            return f"Error: generated tool code is invalid, fix and retry: {exc}"
-
-        card = build_skill_card(name, "chat", [name], code)
-        try:
-            if recovery._event_bus:
-                await recovery._event_bus.emit(
-                    "extension_proposed",
-                    {
-                        "kind": "generated",
-                        "name": name,
-                        "source": "chat",
-                        "raw_text": code,
-                        "description": description,
-                        "declared_tools": [name],
-                        "warnings": card.warnings,
-                    },
-                    meta=EventMeta(
-                        source=EventSource.BRAIN,
-                        rationale=f"drafted a new tool '{name}' from a chat request, pending review",
-                    ),
-                )
-        except Exception:
-            logger.warning("Failed to broadcast extension_proposed event", exc_info=True)
-        return f"Drafted a new tool called '{name}' and queued it for owner review."
+        """Reject stale model tool calls without parsing or staging source."""
+        return "Code generation and self-repair are disabled. No code was staged."
 
     async def request_tool_approval(
         self,
@@ -7467,7 +7431,11 @@ class Brain:
                 search_results = research_report.prompt_context(
                     max_chars=4800 if quick_search else 12000
                 )
-                if research_report.stop_reason not in _FETCHED_RESEARCH_EVIDENCE_STOPS:
+                has_verified_passages = bool(research_report.evidence or research_report.facts)
+                if (
+                    research_report.stop_reason not in _FETCHED_RESEARCH_EVIDENCE_STOPS
+                    and not has_verified_passages
+                ):
                     search_results = (
                         f"RESEARCH STATUS: no fetched evidence (stop_reason="
                         f"{research_report.stop_reason or 'unknown'}).\n"
@@ -7480,13 +7448,17 @@ class Brain:
                         "RESEARCH STATUS: snippet-only, lower confidence. "
                         "Do not present current claims as verified; state the limitation."
                     )
-                elif research_report.stop_reason == "partial-evidence":
+                elif research_report.partial or research_report.stop_reason == "partial-evidence":
                     unresolved = [
                         item.question
                         for item in research_report.coverage
                         if item.status == "unresolved"
                     ]
-                    missing = "; ".join(unresolved or research_report.gaps) or "some requirements remain unverified"
+                    missing = "; ".join(unresolved or research_report.gaps) or (
+                        "research stopped before the report could be finalized"
+                        if research_report.stop_reason in {"timeout", "deadline"}
+                        else "some requirements remain unverified"
+                    )
                     search_results = (
                         f"{search_results}\n\nRESEARCH STATUS: partial evidence. "
                         f"Answer only supported requirements and disclose these gaps: {missing}."
@@ -7509,7 +7481,11 @@ class Brain:
             )
 
         def finalize_research_answer(answer: str) -> str:
-            if research_report is not None and research_report.stop_reason not in _FETCHED_RESEARCH_EVIDENCE_STOPS:
+            if (
+                research_report is not None
+                and research_report.stop_reason not in _FETCHED_RESEARCH_EVIDENCE_STOPS
+                and not (research_report.evidence or research_report.facts)
+            ):
                 answer = _research_no_evidence_refusal(research_report.stop_reason)
             elif research_report is not None:
                 answer = strip_invalid_citations(answer, research_report.citations)
@@ -7620,6 +7596,15 @@ class Brain:
                 else:
                     answer = format_research_answer(answer, original_user_input)
             if research_report is not None:
+                if (
+                    research_report.stop_reason in {"timeout", "deadline"}
+                    and (research_report.evidence or research_report.facts)
+                ):
+                    disclosure = "Research stopped early; this answer uses only fetched evidence."
+                    answer = (
+                        f"{answer.rstrip().rstrip('.!?')}; {disclosure.lower()}"
+                        if answer.strip() else disclosure
+                    )
                 research_report.answer = answer
                 research_report.finalize_outcome()
             return answer
@@ -7683,7 +7668,12 @@ class Brain:
         now = datetime.now()
         budget = IterationBudget(max_turns=self.config.iteration_budget_max)
         # Detect which evidence blocks are present for volatile tier
-        _ct = self._context_tier or ""
+        context_tier = self._context_tier or ""
+        if pure_research_synthesis:
+            context_tier = re.sub(
+                r"(?s)\[MEMORY\]\n.*?(?=\n\n\[USER\]\n)", "[MEMORY]\n", context_tier, count=1
+            )
+        _ct = context_tier
         _mem_parts = _ct.split("[MEMORY]\n", 1)
         has_memory = len(_mem_parts) > 1 and _mem_parts[1].split("\n")[0].strip() != ""
         _usr_parts = _ct.split("[USER]\n", 1)
@@ -7717,9 +7707,9 @@ class Brain:
             idle_seconds=(
                 desktop_session.user_idle_seconds() if _DESKTOP_AVAILABLE and desktop_session is not None else None
             ),
-            world_model_slice=self.world_model.context_slice(),
+            world_model_slice="" if pure_research_synthesis else self.world_model.context_slice(),
         )
-        system_msg = prompt_builder.assemble_system_prompt(self._stable_tier, self._context_tier, volatile)
+        system_msg = prompt_builder.assemble_system_prompt(self._stable_tier, context_tier, volatile)
         if pure_research_synthesis:
             if quick_search:
                 system_msg = (
@@ -7772,7 +7762,7 @@ class Brain:
             ) + "\nContinue the remaining request from these results; do not repeat a completed operation."
 
         # Fresh screen observations outrank memories of previous screens.
-        if self.memory_service and not direct_screen_query:
+        if self.memory_service and not direct_screen_query and not pure_research_synthesis:
             memory_query = user_input
             if _is_followup(user_input):
                 previous_request = next(

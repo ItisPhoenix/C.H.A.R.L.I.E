@@ -676,7 +676,8 @@ def _run_research_report(name: str, arguments: Dict[str, Any]):
         cache_scope=getattr(context, "session_id", None),
         **getattr(context, "research_callbacks", {}),
     )
-    decision = engine.decide(query, "auto")
+    requested_mode = "quick" if name == "web_search" else str(arguments.get("mode") or "auto")
+    decision = engine.decide(query, requested_mode)
     mode = decision.mode.value if decision.should_research and decision.mode is not None else "quick"
     if progress_callback and mode != "quick":
         engine.progress = lambda progress: progress_callback(progress, query)
@@ -1893,34 +1894,6 @@ def memory(
     except Exception as e:
         logger.exception("Memory tool error: action=%s target=%s", action, target)
         return f"Error updating memory: {e}"
-
-
-@registry.register_tool(
-    name="propose_new_tool",
-    description=(
-        "Tier-3 self-extension: author a brand-new tool in Python and queue it for "
-        "your review. Use only when no existing tool covers the request and you're asked "
-        "to 'learn' or permanently gain a new capability -- never for a one-off task. "
-        "Always requires explicit owner approval before it can run."
-    ),
-    schema={
-        "type": "object",
-        "properties": {
-            "name": {"type": "string", "description": "Tool name, snake_case, matching the function name in code."},
-            "description": {"type": "string", "description": "One line: what the tool does."},
-            "code": {
-                "type": "string",
-                "description": "Full Python source: exactly one top-level function named `name`, with a docstring.",
-            },
-        },
-        "required": ["name", "description", "code"],
-    },
-)
-def propose_new_tool(name: str, description: str, code: str) -> str:
-    """Never actually reached -- charlie.core._exec_one intercepts this tool name before
-    dispatch here (it needs Brain/event-bus access this plain registry func doesn't have),
-    the same pattern shell_execute's voice_mode gets special-cased."""
-    return "Error: propose_new_tool must be intercepted by the tool loop, not executed directly."
 
 
 @registry.register_tool(
@@ -3666,11 +3639,8 @@ def get_self_extension_approval_callback() -> Optional[Callable[[dict], Optional
 @registry.register_tool(
     name="charlie_self_extension_propose",
     description=(
-        "Propose a controlled self-extension (config update, reusable skill, "
-        "or small Python code tool). The main runtime stages an instructions-only candidate from "
-        "a durable owner correction; use this tool for an explicit request to create a skill or "
-        "another self-extension. Do not stage one-off facts or sensitive content. Reusable skills "
-        "stay inactive until the owner approves the exact content hash."
+        "Request a validated settings update. Charlie does not generate or repair its code, "
+        "or create skills from prompts; import a manually authored SKILL.md through Extensions."
     ),
     schema={
         "type": "object",

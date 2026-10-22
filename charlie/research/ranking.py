@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Iterable, List, Optional
 from urllib.parse import urlparse
 
@@ -24,9 +25,14 @@ _STOPWORDS = {
     "use", "used", "what", "when", "where", "which", "with", "briefing", "daily", "intelligence",
     "best", "official", "source", "sources", "using", "give", "tell",
     "two", "three", "sentences",
+    "compare",
     "under", "below", "within", "less", "than",
 }
+BRIEFING_INTENT_TERMS = {
+    "daily", "intelligence", "latest", "current", "today", "news", "week", "weekly",
+}
 _IDENTIFIER_RE = re.compile(r"\b[a-z]{2,}-\d+[a-z0-9-]*\b", re.I)
+_VERSION_RE = re.compile(r"(?<!\d)\d+(?:\.\d+){1,3}(?!\d)")
 _CAPITALIZED_ENTITY_PHRASE_RE = re.compile(r"\b[A-Z][a-z0-9]+(?:\s+[A-Z][a-z0-9]+)+\b")
 _ACRONYM_RE = re.compile(r"\b[A-Z]{2,}\b")
 
@@ -61,28 +67,57 @@ def _query_entity_tokens(query: str) -> set[str]:
     }
 
 
-def search_result_matches_query(query: str, result: SearchResult) -> bool:
+def search_result_matches_query(
+    query: str, result: SearchResult, *, require_version: bool = True,
+) -> bool:
     """Reject pages that only match generic request wording.
 
     SearXNG can return HTTP 200 with a thematically unrelated page. Requiring
-    one subject token for short queries and two for longer queries prevents
-    those pages from becoming research evidence while retaining concise
-    release and product searches.
+    enough of a multiword entity prevents incidental mentions from becoming
+    research evidence while retaining single-name product searches.
     """
-    if is_briefing_query(query):
-        return bool(result.published_at)
+    briefing = is_briefing_query(query)
+    week_bounded = bool(re.search(r"\b(?:this|last|past) week\b", query, re.I))
+    if (briefing or week_bounded) and not _freshness_timestamp(result.published_at):
+        return False
     terms = _tokens(query) - _STOPWORDS
-    content_text = f"{result.title} {result.snippet} {result.domain}"
+    if briefing:
+        terms -= BRIEFING_INTENT_TERMS
+    content_text = f"{result.title} {result.snippet} {result.domain} {result.url}"
+    versions = _VERSION_RE.findall(query)
+    if require_version and versions and not any(
+        re.search(rf"(?<!\d){re.escape(version)}(?!\d)", content_text)
+        for version in versions
+    ):
+        return False
     content = _tokens(content_text)
     if not terms:
-        return False
+        return briefing
     entity_terms = _query_entity_tokens(query)
-    if entity_terms and not (entity_terms & content):
+    acronym_terms = {
+        token
+        for value in _ACRONYM_RE.findall(query)
+        for token in _tokens(value)
+        if token not in _STOPWORDS
+    }
+    if acronym_terms and not (acronym_terms & content):
+        return False
+    entity_phrases = [
+        _tokens(value) - _STOPWORDS
+        for value in _CAPITALIZED_ENTITY_PHRASE_RE.findall(query)
+    ]
+    entity_phrases = [phrase for phrase in entity_phrases if phrase]
+    if entity_phrases:
+        if not any(
+            len(phrase & content) >= min(2, len(phrase))
+            for phrase in entity_phrases
+        ):
+            return False
+    elif entity_terms and not (entity_terms & content):
         return False
     if len(terms) == 1 and len(next(iter(terms))) == 2:
         identity = _tokens(f"{result.title} {result.domain or urlparse(result.url).hostname or ''}")
         return bool(terms & identity)
-    # Requiring two discarded genuine hits: a real hit usually matches only the product name.
     return len(terms & content) >= 1
 
 
@@ -91,15 +126,40 @@ def _freshness_timestamp(value: str | None) -> float:
         return 0.0
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
+    except (AttributeError, TypeError, ValueError):
+        try:
+            parsed = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    try:
         return parsed.timestamp()
-    except (TypeError, ValueError):
+    except (OverflowError, OSError, ValueError):
         return 0.0
 
 
 def _fresh_query(query: str) -> bool:
-    return bool(re.search(r"\b(today|current|latest|daily briefing|intelligence briefing|news)\b", query, re.I))
+    return bool(re.search(
+        r"\b(today|current|latest|daily briefing|intelligence briefing|news|"
+        r"(?:this|last|past) week)\b",
+        query,
+        re.I,
+    ))
+
+
+def _freshness_bounds(query: str) -> tuple[float, float]:
+    now = datetime.now(timezone.utc)
+    week_start = now.replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ) - timedelta(days=now.weekday())
+    if re.search(r"\bthis week\b", query, re.I):
+        return week_start.timestamp(), now.timestamp()
+    if re.search(r"\blast week\b", query, re.I):
+        return (week_start - timedelta(days=7)).timestamp(), week_start.timestamp()
+    if re.search(r"\bpast week\b", query, re.I):
+        return (now - timedelta(days=7)).timestamp(), now.timestamp()
+    return (now - timedelta(days=45)).timestamp(), now.timestamp()
 
 
 def _score(query: str, result: SearchResult) -> float:
@@ -131,22 +191,31 @@ def rank_search_results(results: Iterable[SearchResult], plan: ResearchPlan, lim
     best: dict[str, SearchResult] = {}
     queries = [item.text for item in plan.queries] or [plan.goal]
     for result in results:
-        if not any(search_result_matches_query(query, result) for query in queries):
+        if not search_result_matches_query(plan.goal, result) or not any(
+            search_result_matches_query(query, result) for query in queries
+        ):
             continue
         key = canonicalize_url(result.url)
         if key not in best or _score(plan.goal, result) > _score(plan.goal, best[key]):
             best[key] = result
     candidates = list(best.values())
     if _fresh_query(plan.goal):
-        dated = [item for item in candidates if _freshness_timestamp(item.published_at)]
-        if dated:
-            newest = max(_freshness_timestamp(item.published_at) for item in dated)
-            candidates = [
-                item
-                for item in candidates
-                if not _freshness_timestamp(item.published_at)
-                or newest - _freshness_timestamp(item.published_at) <= 45 * 86400
-            ]
+        cutoff, upper_bound = _freshness_bounds(plan.goal)
+        week_bounded = bool(re.search(r"\b(?:this|last|past) week\b", plan.goal, re.I))
+        last_week = bool(re.search(r"\blast week\b", plan.goal, re.I))
+        fresh_candidates = []
+        for item in candidates:
+            published_at = _freshness_timestamp(item.published_at)
+            in_window = (
+                cutoff <= published_at < upper_bound
+                if last_week
+                else cutoff <= published_at <= upper_bound
+            )
+            if published_at and in_window:
+                fresh_candidates.append(item)
+            elif not published_at and not week_bounded:
+                fresh_candidates.append(item)
+        candidates = fresh_candidates
     ranked = sorted(candidates, key=lambda item: _score(plan.goal, item), reverse=True)
     return ranked[: max(1, limit)]
 
@@ -167,8 +236,8 @@ def _document_score(document: SourceDocument) -> float:
 
 
 def _normalise_semantic(scores: dict) -> dict:
-    """Map cosine similarity itself onto [0, 1], independent of batch peers."""
-    return {key: max(0.0, min(1.0, (value + 1.0) / 2.0)) for key, value in scores.items()}
+    """Clamp cosine scores; orthogonal vectors must not become relevance 0.5."""
+    return {key: max(0.0, min(1.0, value)) for key, value in scores.items()}
 
 
 def _token_relevance(query_tokens: set, document: SourceDocument) -> float:
@@ -196,9 +265,22 @@ async def rank_documents(
     semantic_scores = _normalise_semantic(semantic.scores) if semantic else {}
     semantic_mode = semantic.mode if semantic else "disabled"
 
+    relevance_queries = [item.text for item in plan.queries] or [plan.goal]
     for document in unique.values():
         if not getattr(document, "source_class", None) or document.source_class == SourceClass.UNKNOWN.value:
             document.source_class = classify(document.url).value
+        document_result = SearchResult(
+            document.title,
+            document.url,
+            document.content,
+            published_at=document.published_at,
+            domain=document.domain,
+        )
+        if not search_result_matches_query(plan.goal, document_result) or not any(
+            search_result_matches_query(query, document_result) for query in relevance_queries
+        ):
+            document.relevance_score = 0.0
+            continue
         content_tokens = _tokens(f"{document.title} {document.content}")
         if requires_identifier and numeric_tokens and not numeric_tokens.intersection(content_tokens):
             document.relevance_score = 0.0

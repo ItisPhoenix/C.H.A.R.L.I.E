@@ -9,9 +9,14 @@ from typing import Optional
 from charlie.research.models import ResearchMode
 
 _CURRENT_SIGNALS = re.compile(
-    r"\b(latest|current|currently|today|now|right now|live|recent|recently|lately|breaking|trending|news|"
+    r"\b(latest|newest|current|currently|today|now|right now|live|recent|recently|lately|breaking|trending|news|"
     r"price|prices|cost|buy|shopping|recommend|recommendation|travel|"
     r"availability|schedule|score|weather|sports|on twitter|on x\b)\b",
+    re.IGNORECASE,
+)
+_CURRENT_WEEK = re.compile(r"\b(?:this|last|past)\s+week\b", re.IGNORECASE)
+_CURRENT_ANNOUNCEMENT = re.compile(
+    r"\b(?:announc\w*|findings?|results?|news|updates?|releases?|published)\b",
     re.IGNORECASE,
 )
 _SOCIAL_CONVERSATION_SIGNALS = re.compile(
@@ -42,8 +47,8 @@ _RESEARCH_SIGNALS = re.compile(
 )
 _EXPLICIT_RESEARCH_KEYWORD = re.compile(r"\bresearch\b", re.IGNORECASE)
 _FETCHED_EVIDENCE_SIGNALS = re.compile(
-    r"\b(?:official\s+(?:source|sources|publication|page)|(?<!open[- ])sources?|citations?|"
-    r"evidence|publication|paper)\b",
+    r"\b(?:official\s+(?:sources?(?![\s-]+code\b)|publication|page)|"
+    r"(?<!open[- ])sources?(?![\s-]+code\b)|citations?|evidence|publication|paper)\b",
     re.IGNORECASE,
 )
 _SUSTAINED_RESEARCH_SIGNALS = re.compile(
@@ -134,13 +139,11 @@ def choose_mode(query: str, requested: str | ResearchMode | None = None) -> Rese
         return ResearchDecision(False, None, "local desktop or file action")
     if _INTERACTIVE_SIGNALS.search(text) and re.search(r"\bon\s+(youtube|amazon|x|twitter)\b", text, re.I):
         return ResearchDecision(False, None, "interactive site task", interactive=True)
+    if explicit is not None:
+        return ResearchDecision(True, explicit, "explicit mode")
     if explicit_research:
-        if explicit in {ResearchMode.STANDARD, ResearchMode.DEEP}:
-            return ResearchDecision(True, explicit, "explicit mode")
         mode = ResearchMode.DEEP if re.search(r"deep|in[- ]depth|thorough", text, re.I) else ResearchMode.STANDARD
         return ResearchDecision(True, mode, "explicit research intent")
-    if explicit is ResearchMode.QUICK:
-        return ResearchDecision(True, explicit, "explicit mode")
     # Relative reminder times contain freshness words such as "now" and "schedule".
     # Keep clear local state edits on the tool path instead of sending them to web search.
     if is_local_state_update(text):
@@ -157,7 +160,11 @@ def choose_mode(query: str, requested: str | ResearchMode | None = None) -> Rese
         return ResearchDecision(True, ResearchMode.QUICK, "quick web summary")
     if _RESEARCH_SIGNALS.search(text):
         return ResearchDecision(True, ResearchMode.QUICK, "quick web search")
-    if _CURRENT_SIGNALS.search(text) or is_release_lookup_query(text):
+    if (
+        _CURRENT_SIGNALS.search(text)
+        or is_release_lookup_query(text)
+        or (_CURRENT_WEEK.search(text) and _CURRENT_ANNOUNCEMENT.search(text))
+    ):
         return ResearchDecision(True, ResearchMode.QUICK, "quick web search for fresh information")
     return ResearchDecision(False, None, "no live-web signal")
 

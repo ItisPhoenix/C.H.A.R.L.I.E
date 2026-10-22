@@ -55,25 +55,6 @@ export function ResearchPanel({
     }
   };
 
-  const renderResourceDetails = (id: string, singular: string, plural: string, count: number | undefined, resources: ResearchResultData["searchResults"]) => {
-    const itemCount = count ?? resources?.length ?? 0;
-    const label = itemCount === 1 ? singular : plural;
-    if (resources?.length) return <details key={id} className="research-resource-disclosure">
-      <summary><strong>{itemCount}</strong> {label}</summary>
-      <ol className="research-resource-items">
-        {resources.map((resource, index) => (
-          <li key={`${resource.url}-${index}`}>
-            <a href={resource.url} target="_blank" rel="noreferrer">
-              <strong>{resource.title}</strong>
-              <span>{resource.domain}</span>
-              <small>{resource.url}</small>
-            </a>
-          </li>
-        ))}
-      </ol>
-    </details>;
-    return count !== undefined ? <span key={id} className="research-resource-count"><strong>{count}</strong> {label}</span> : null;
-  };
   const normalizedAnswer = answer.replace(/\s+/g, " ").toLowerCase();
   const answerSupportedPassageIds = new Set((result.claims ?? [])
     .filter((claim) => claim.relationship === "supports"
@@ -153,11 +134,7 @@ export function ResearchPanel({
     </ol>
   </details>;
   const sourceCountDetails = sourceDetails || (result.sources !== undefined && <span key="sources" className="research-resource-count"><strong>{sources.length}</strong> {sources.length === 1 ? "source cited" : "sources cited"}</span>);
-  const acquisitionRows = [
-    renderResourceDetails("links", "link found", "links found", result.searchResultCount, result.searchResults),
-    renderResourceDetails("pages", "page read", "pages read", result.documentCount, result.readPages),
-    sourceCountDetails,
-  ].filter(Boolean);
+  const acquisitionRows = [sourceCountDetails].filter(Boolean);
   const providerOutcomes = result.providerOutcomes ?? [];
   const providerChallenge = providerOutcomes.some((outcome) => outcome.status === "challenge");
   const providerFailure = providerOutcomes.some((outcome) => outcome.status === "failed" || outcome.status === "unavailable");
@@ -196,7 +173,7 @@ export function ResearchPanel({
       : "Some requested points remain unverified.";
   }
   const acquisitionDetails = (acquisitionRows.length > 0 || outcomeMessage) && (
-    <div className="research-acquisition-details" aria-label={result.mode === "quick" ? "Search links and sources" : "Research activity and sources"}>
+    <div className="research-acquisition-details" aria-label={result.mode === "quick" ? "Search sources" : "Research sources"}>
       {outcomeMessage && <p role="status">{outcomeMessage}</p>}
       {acquisitionRows}
     </div>

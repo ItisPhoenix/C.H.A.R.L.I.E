@@ -38,6 +38,7 @@ OFFICIAL_REGISTRY: Dict[str, Dict[str, Any]] = _load_official_registry()
 
 # Major Indian retailers
 PUBLIC_AUTHORITY_DOMAINS: Set[str] = {
+    "europa.eu",
     "w3.org",
     "ietf.org",
     "iso.org",

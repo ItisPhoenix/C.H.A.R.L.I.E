@@ -216,7 +216,6 @@ _NON_CANCELLABLE_FOREGROUND_TOOLS = frozenset(
         "desktop_window",
         "desktop_move_window",
         "start_background_task",
-        "propose_new_tool",
     }
 )
 _LAUNCH_ID: str = str(uuid.uuid4())  # sidebar filters "this launch" vs "all history" by this
@@ -1206,7 +1205,7 @@ def apply_extension_operation(
     operation = payload.get("operation")
     name = payload.get("name")
     allowed_operations = {"install", "enable", "disable", "uninstall"}
-    allowed_kinds = {"skill", "openapi", "generated"}
+    allowed_kinds = {"skill", "openapi"}
     fingerprint = canonical_extension_request_fingerprint(str(operation or "invalid"), payload)
     if (
         not isinstance(payload.get("request_id"), str)
@@ -5607,7 +5606,8 @@ async def main() -> int:
                 logger.error(f"Metric emitter error: {e}")
 
         # Run the canonical voice/runtime loop with the event publisher.
-        async with EventBus(pub_port=5555) as bus:
+        event_port = int(os.getenv("CHARLIE_EVENT_PORT", "5555"))
+        async with EventBus(pub_port=event_port) as bus:
             event_bus = bus
             _main_event_bus = bus
             # Expose Brain so main-owned health publication can project the
@@ -5705,6 +5705,7 @@ async def main() -> int:
 
             self_extension_orchestrator = SelfExtensionOrchestrator(
                 repo_root=Path(__file__).resolve().parent,
+                skills_dir=Path(__file__).resolve().parent / "skills",
                 settings_service=settings_service,
                 settings_snapshot_callback=_schedule_settings_snapshot,
                 config=config,
@@ -6188,7 +6189,7 @@ async def main() -> int:
         _main_event_bus = None
         loop.call_exception_handler = _orig_handler
 
-        _log_port_release("127.0.0.1", 5555)
+        _log_port_release("127.0.0.1", event_port)
 
         # Released before logging.shutdown() so the line below still reaches the
         # file. Releasing last means no other instance can start while this one

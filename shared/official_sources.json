@@ -76,9 +76,17 @@
       "tld": "org",
       "aliases": []
     },
+    "golang": {
+      "domains": ["go.dev"],
+      "aliases": ["Go language"]
+    },
     "nodejs": {
       "tld": "org",
       "aliases": ["node"]
+    },
+    "sqlite": {
+      "domains": ["sqlite.org"],
+      "aliases": []
     },
     "rust": {
       "domains": ["rust-lang.org"],

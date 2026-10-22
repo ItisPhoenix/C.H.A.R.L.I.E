@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Callable, List, Optional
 
 
@@ -16,9 +17,7 @@ def declared_tools_for(kind: str, name: str, source: str, raw_text: str) -> List
 
         return [op.operation_id for op in parse_openapi_spec(raw_text, base_url=source).operations]
     if kind == "generated":
-        from charlie.extensions.generated import parse_generated_tool
-
-        return [parse_generated_tool(name, raw_text).name]
+        raise ValueError("Generated code extensions are disabled.")
     raise ValueError(f"Unknown extension kind '{kind}'")
 
 
@@ -69,6 +68,8 @@ def install_extension(
     script_runner: Optional[Callable[[str, List[str]], str]] = None,
 ) -> List[str]:
     """Parse and register a supported extension into `registry`."""
+    if kind == "generated":
+        raise ValueError("Generated code extensions are disabled.")
     before_tools = set(getattr(registry, "_tools", {}))
     try:
         if kind == "skill":
@@ -84,11 +85,6 @@ def install_extension(
 
             spec = parse_openapi_spec(raw_text, base_url=source)
             return register_openapi_operations(registry, spec)
-        if kind == "generated":
-            from charlie.extensions.generated import parse_generated_tool, register_generated_tool
-
-            spec = parse_generated_tool(name, raw_text)
-            return register_generated_tool(registry, spec)
         raise ValueError(f"Unknown extension kind '{kind}'")
     except Exception:
         for tool_name in set(getattr(registry, "_tools", {})) - before_tools:

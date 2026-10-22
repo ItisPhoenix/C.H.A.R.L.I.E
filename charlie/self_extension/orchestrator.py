@@ -16,14 +16,13 @@ from charlie.config import Config
 from charlie.events import EventMeta, EventSource, EventType
 from charlie.self_extension.adapters.code_adapter import CodeAdapter
 from charlie.self_extension.adapters.config_adapter import ConfigAdapter
-from charlie.self_extension.adapters.skill_adapter import SkillAdapter
+from charlie.self_extension.adapters.skill_adapter import SkillAdapter, SkillAdapterResult
 from charlie.self_extension.checkpoint import CheckpointManager
 from charlie.self_extension.classifier import ExtensionClassifier
 from charlie.self_extension.code_worker import run_worker, validate_ast_allow_list
 from charlie.self_extension.guard import AuthorizationGuard
 from charlie.self_extension.models import (
     ExtensionCheckpoint,
-    ExtensionClassification,
     ExtensionKind,
     ExtensionPlan,
     ExtensionRequest,
@@ -37,41 +36,6 @@ from charlie.settings_service import SettingsService
 logger = logging.getLogger("charlie.self_extension.orchestrator")
 
 _DEFAULT_TX_STORE = Path("data/extension_transactions.json")
-
-# Requests that need capabilities the CODE_SMALL pure-function subset never grants.
-_CODE_RESTRICTED_TERMS = (
-    "filesystem", "file system", "read file", "write file", "network",
-    "socket", "http", "process", "os command",
-)
-
-_CODE_GENERATION_ATTEMPTS = 2
-_CODE_GENERATION_TIMEOUT_S = 20.0
-_CODE_GENERATION_MAX_CHARS = 8000
-
-_CODE_GENERATION_PROMPT = """You write one small, self-contained Python module that satisfies a \
-user's request.
-
-Request:
-<request>
-{prompt}
-</request>
-
-The module must:
-- define exactly one top-level function and any imports it needs, and nothing else;
-- give every parameter a default, so it is callable with no arguments;
-- carry a docstring, which becomes the capability's description;
-- be pure computation: only standard-library maths, text, date, and collection
-  modules. No filesystem, network, process, environment, or clock-independent
-  side effects, and no print, input, eval, exec, open, or reflection;
-- be deterministic: the same inputs always return the same value.
-
-Reply with one JSON object and nothing else:
-{{"name": "<function name>", "source": "<the module source>", "test_inputs": {{}}}}
-`test_inputs` is a JSON object of keyword arguments using JSON-serialisable values,
-covering the function's parameters, chosen so one call demonstrates the requested
-behaviour. Do not state the expected output; it is observed by running the function.
-"""
-
 
 def repeated_success_signature(request: str, capability: str, operation: str) -> Optional[str]:
     """Hash an exact, normalized owner request and the operation that verified it."""
@@ -209,7 +173,7 @@ class SelfExtensionOrchestrator:
             config=self._config,
         )
         self._skill_adapter = SkillAdapter(
-            skills_dir=skills_dir,
+            skills_dir=skills_dir or self._repo_root / "skills",
             registry=self._registry,
             capability_index=self._capability_index,
         )
@@ -266,49 +230,11 @@ class SelfExtensionOrchestrator:
 
         kind = request.classification.kind
         if kind == ExtensionKind.SKILL:
-            name = self._plan_name(prompt, "custom_skill")
-            instructions = self._skill_instruction_text(prompt)
-            request.plan = ExtensionPlan(
-                plan_id=f"plan-{uuid.uuid4().hex[:8]}",
-                kind=kind,
-                description=f"Stage reusable skill candidate '{name}' for owner review.",
-                steps=["validate instructions-only SKILL.md", "stage inactive candidate", "request owner review"],
-                raw_text=(
-                    "---\n"
-                    f"name: {name}\n"
-                    "description: Reusable procedure requested by the user.\n"
-                    "---\n"
-                    "# Procedure\n\n"
-                    f"{instructions}\n"
-                ),
+            request.planning_error = (
+                "Prompt-created skills are disabled; import a manually authored SKILL.md through Extensions."
             )
-            request.affected_capabilities = [f"skill_{name}"]
         elif kind == ExtensionKind.CODE_SMALL:
-            try:
-                name, source, inputs, expected = self._build_code_plan(prompt)
-            except ValueError as exc:
-                request.requires_approval = True
-                request.planning_error = f"APPROVAL_REQUIRED: {exc}"
-                return request
-            request.plan = ExtensionPlan(
-                plan_id=f"plan-{uuid.uuid4().hex[:8]}",
-                kind=kind,
-                description=f"Add bounded pure function '{name}'.",
-                steps=["validate AST", "worker test", "owner approval", "checkpoint", "write", "register"],
-                tests_to_run=[f"{name}({inputs!r}) == {expected!r}"],
-                code_source=source,
-                tool_name=name,
-                test_inputs=inputs,
-                expected_output=expected,
-                launch_argv=[
-                    f"code:{name}",
-                    # Full digest: this value is what the owner approves and what
-                    # the binding covers, so a 16-hex prefix is forgeable.
-                    f"sha256:{hashlib.sha256(source.encode('utf-8')).hexdigest()}",
-                ],
-            )
-            request.affected_capabilities = [f"code_{name}"]
-            request.requires_approval = True
+            request.planning_error = "Model-authored code generation and repair are disabled."
         elif kind == ExtensionKind.CONFIG:
             request.plan = ExtensionPlan(
                 plan_id=f"plan-{uuid.uuid4().hex[:8]}",
@@ -357,99 +283,8 @@ class SelfExtensionOrchestrator:
         return candidate[:48]
 
     def _build_code_plan(self, prompt: str) -> tuple[str, str, Dict[str, Any], Any]:
-        """Propose, statically validate, and worker-test source for this exact request.
-
-        Raises ValueError with a truthful reason when policy, the model, or the
-        worker's own containment boundary rejects the proposal.  Nothing here
-        executes in this process: the only execution is the contained subprocess
-        in ``code_worker.run_worker``.
-        """
-        lower = prompt.lower()
-        if any(term in lower for term in _CODE_RESTRICTED_TERMS):
-            raise ValueError(
-                "requested behaviour needs filesystem, network, or process access, which the "
-                "CODE_SMALL pure-function subset never grants; use a policy-controlled capability."
-            )
-
-        explicit = re.search(r"\b(?:called|named)\s+([A-Za-z_]\w*)", prompt, re.IGNORECASE)
-        requested_name = explicit.group(1) if explicit else ""
-
-        rejection = ""
-        for attempt in range(_CODE_GENERATION_ATTEMPTS):
-            source_text = self._request_code_generation(prompt, requested_name, rejection)
-            try:
-                name, source, inputs = self._parse_code_proposal(source_text, requested_name)
-                self._check_code_contract(source, name, inputs)
-            except ValueError as exc:
-                rejection = str(exc)
-                logger.info("CODE_SMALL proposal rejected (attempt %s): %s", attempt + 1, rejection)
-                continue
-            # No execution here: this is the proposal path, before the owner has
-            # approved anything. The first run is the approved apply/verify step.
-            return name, source, inputs, None
-
-        raise ValueError(
-            f"the model did not produce a policy-clean, worker-verified pure function: {rejection}"
-        )
-
-    def _request_code_generation(
-        self,
-        prompt: str,
-        requested_name: str,
-        rejection: str = "",
-    ) -> str:
-        """One non-streaming completion on the configured LLM route.
-
-        Same endpoint, model, and auth-header helper as Brain.probe_primary_llm
-        and CharlieDoctor._probe_chat_endpoint.
-        """
-        if not self._config.llm_url or not self._config.llm_model:
-            raise ValueError("code generation needs a configured LLM_URL and LLM_MODEL.")
-
-        instruction = _CODE_GENERATION_PROMPT.format(prompt=prompt[:_CODE_GENERATION_MAX_CHARS])
-        if requested_name:
-            instruction += f'\nThe function must be named "{requested_name}".'
-        if rejection:
-            instruction += (
-                f"\n\nYour previous attempt was rejected: {rejection}\n"
-                "Return a corrected JSON object only."
-            )
-
-        payload = {
-            "model": self._config.llm_model,
-            "messages": [{"role": "user", "content": instruction}],
-            "stream": False,
-        }
-        if getattr(self._config, "llm_reasoning_enabled", False):
-            payload["reasoning"] = {"enabled": True}
-
-        try:
-            import httpx
-
-            from charlie.utils import build_auth_headers
-        except Exception as exc:  # pragma: no cover - transport is a hard dependency
-            raise ValueError(f"no HTTP transport available for code generation: {exc}") from exc
-
-        try:
-            with httpx.Client(
-                base_url=self._config.llm_url,
-                headers=build_auth_headers(self._config.llm_key),
-                timeout=_CODE_GENERATION_TIMEOUT_S,
-                trust_env=self._config.llm_trust_env,
-            ) as client:
-                response = client.post("chat/completions", json=payload)
-        except Exception as exc:
-            raise ValueError(f"code generation request failed: {type(exc).__name__}") from exc
-
-        if response.status_code >= 400:
-            raise ValueError(f"code generation request failed: HTTP {response.status_code}")
-        try:
-            content = response.json()["choices"][0]["message"]["content"]
-        except Exception as exc:
-            raise ValueError("code generation returned no readable completion.") from exc
-        if not isinstance(content, str) or not content.strip():
-            raise ValueError("code generation returned an empty completion.")
-        return content
+        """Refuse legacy callers that request model-authored Python source."""
+        raise ValueError("Model-authored code generation and repair are disabled.")
 
     @staticmethod
     def _parse_code_proposal(
@@ -567,6 +402,15 @@ class SelfExtensionOrchestrator:
                 logger.info("Resuming transaction %s from RESTARTING -> VERIFYING", tx_id)
                 try:
                     tx = ExtensionTransaction.from_dict({**tx_dict, "transaction_id": tx_id})
+                    kind = tx.request.classification.kind if tx.request.classification else None
+                    if kind == ExtensionKind.CODE_SMALL or (tx.plan and tx.plan.kind == ExtensionKind.CODE_SMALL):
+                        tx.status = TransactionStatus.FAILED
+                        tx.error_message = "Model-authored code generation and repair are disabled; no rollback was attempted."
+                        tx.finished_at = time.time()
+                        self._transactions[tx_id] = tx
+                        self._emit(EventType.SELF_EXTENSION_FAILED, {"tx_id": tx_id, "reason": tx.error_message})
+                        self._persist_transactions()
+                        continue
                     tx.status = TransactionStatus.VERIFYING
                     self._transactions[tx_id] = tx
                     affected = self._affected_capability_ids(tx)
@@ -834,6 +678,22 @@ class SelfExtensionOrchestrator:
         kind = request.classification.kind
         self._emit(EventType.SELF_EXTENSION_CLASSIFIED, {"tx_id": tx_id, "kind": kind.value})
 
+        if kind in {ExtensionKind.SKILL, ExtensionKind.CODE_SMALL}:
+            message = (
+                "Prompt-created skills are disabled; import a manually authored SKILL.md through Extensions."
+                if kind == ExtensionKind.SKILL
+                else "Model-authored code generation and repair are disabled."
+            )
+            tx.status = TransactionStatus.FAILED
+            tx.error_message = message
+            self._emit(EventType.SELF_EXTENSION_FAILED, {"tx_id": tx_id, "reason": message})
+            return ExtensionResult(
+                success=False,
+                transaction_id=tx_id,
+                status=TransactionStatus.FAILED,
+                message=message,
+            )
+
         # 2. Guard evaluation
         guard_decision = self._guard.evaluate(request)
         tx.guard_decision = guard_decision
@@ -941,107 +801,18 @@ class SelfExtensionOrchestrator:
         raw_text: str,
         tx_id: Optional[str] = None,
     ) -> ExtensionResult:
-        """Stage an explicit skill request for owner review without activation."""
+        """Refuse prompt-generated skill candidates; manual imports remain supported."""
         transaction_id = tx_id or f"tx-{uuid.uuid4().hex[:8]}"
-        tx = self._transactions.get(transaction_id) or ExtensionTransaction(
-            transaction_id=transaction_id, request=request
-        )
-        self._transactions[transaction_id] = tx
-        result = self._skill_adapter.stage_skill_candidate(skill_name, raw_text)
-        if not result.success:
-            tx.status = TransactionStatus.FAILED
-            tx.error_message = result.message
-            self._emit(EventType.SELF_EXTENSION_FAILED, {"tx_id": transaction_id, "reason": result.message})
-            return ExtensionResult(
-                success=False,
-                transaction_id=transaction_id,
-                status=TransactionStatus.FAILED,
-                message=result.message,
-            )
-        tx.status = TransactionStatus.PENDING_REVIEW
-        tx.finished_at = time.time()
-        self._emit(
-            EventType.SELF_EXTENSION_APPROVAL_REQUIRED,
-            {"tx_id": transaction_id, "reason": "skill candidate awaits exact-hash owner review"},
-        )
         return ExtensionResult(
-            success=True,
+            success=False,
             transaction_id=transaction_id,
-            status=TransactionStatus.PENDING_REVIEW,
-            message=f"Skill candidate '{skill_name}' staged and awaiting owner review; it is not active.",
-            details={
-                "candidate_name": skill_name,
-                "content_hash": result.content_hash,
-                "review_status": "pending",
-                "activated": False,
-                "verified_as_installed": False,
-            },
+            status=TransactionStatus.FAILED,
+            message="Prompt-created skills are disabled; import a manually authored SKILL.md through Extensions.",
         )
 
     def stage_reusable_correction_candidate(self, correction: str) -> Optional[ExtensionResult]:
-        """Stage a safe, durable owner correction as an inactive skill candidate."""
-        from charlie.core import _detect_correction
-        from charlie.tools import _contains_sensitive_memory_content
-
-        text = str(correction or "").strip()
-        if (
-            not _detect_correction(text)
-            or not re.search(r"\b(?:for future|in future|going forward|from now on|always|prefer)\b", text, re.I)
-            or not re.search(
-                r"\b(?:answer|response|report|summary|citation|cite|label|distinguish|separate|format|"
-                r"wording|write|explain|present|include|avoid|use|keep)\b",
-                text,
-                re.I,
-            )
-            or re.search(r"\b(?:do not|don't)\s+(?:stage|save|store|learn|remember)\b", text, re.I)
-            or _contains_sensitive_memory_content(text)
-            or len(text) > 500
-        ):
-            return None
-
-        instruction = self._safe_markdown_text(text)
-        instruction = re.sub(r"(?i)^\s*(?:charlie[:,]?\s*)?(?:actually[,.:]?\s*|no[,.:]?\s*)", "", instruction)
-        if not instruction:
-            return None
-        digest = hashlib.sha256(instruction.casefold().encode("utf-8")).hexdigest()[:12]
-        name = f"correction_{digest}"
-        raw_text = (
-            "---\n"
-            f"name: {name}\n"
-            "description: Owner correction for future work; pending review.\n"
-            "---\n"
-            "# Owner correction\n\n"
-            "When relevant, follow this user preference:\n\n"
-            f"{instruction}\n"
-        )
-        content_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
-        if any(
-            candidate.get("name") == name and candidate.get("content_hash") == content_hash
-            for candidate in self._skill_adapter.list_skill_candidates()
-        ):
-            return None
-        active = self._registry.get(f"skill_{name}")
-        if active is not None and active.enabled:
-            return None
-
-        request = ExtensionRequest(
-            user_prompt=text,
-            explicit_user_request=True,
-            classification=ExtensionClassification(
-                kind=ExtensionKind.SKILL,
-                confidence=1.0,
-                reason="reusable behavior correction stated for future work",
-            ),
-            affected_capabilities=[f"skill_{name}"],
-            plan=ExtensionPlan(
-                plan_id=f"plan-{uuid.uuid4().hex[:8]}",
-                kind=ExtensionKind.SKILL,
-                description=f"Stage durable owner correction '{name}' for review.",
-                steps=["validate instructions-only skill", "stage inactive candidate", "request owner review"],
-                raw_text=raw_text,
-            ),
-        )
-        return self.execute_transaction(request)
+        """Automatic correction learning is disabled; user memory remains available."""
+        return None
 
     def stage_repeated_success_candidate(
         self,
@@ -1055,73 +826,8 @@ class SelfExtensionOrchestrator:
         risk_class: str,
         requires_approval: bool,
     ) -> Optional[ExtensionResult]:
-        """Stage a candidate after two distinct safe turns independently verified the same request pattern."""
-        from charlie.core import _detect_correction
-        from charlie.tools import _contains_sensitive_memory_content
-
-        text = str(request_text or "").strip()
-        signature = repeated_success_signature(text, capability, operation)
-        if (
-            not signature
-            or signature != expected_signature
-            or risk_class != "safe"
-            or requires_approval
-            or _detect_correction(text)
-            or _contains_sensitive_memory_content(text)
-        ):
-            return None
-
-        verified_turns = verified_success_turn_ids(audit_entries, signature)
-        if len(verified_turns) < 2 or current_turn_id not in verified_turns:
-            return None
-
-        from charlie.log_redaction import redact_sensitive_text
-
-        safe_request = self._safe_markdown_text(redact_sensitive_text(text))
-        name = f"repeat_{signature[:12]}"
-        raw_text = (
-            "---\n"
-            f"name: {name}\n"
-            "description: Repeated verified owner workflow; pending review.\n"
-            "---\n"
-            "# Repeated verified workflow\n\n"
-            f"For requests like: “{safe_request}”\n\n"
-            f"Use Charlie's existing `{capability}.{operation}` operation. "
-            "Before reporting success, require a ResultEnvelope with `verified_success` "
-            "and an observation matching the requested postcondition.\n"
-        )
-        content_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
-        if any(
-            candidate.get("name") == name and candidate.get("content_hash") == content_hash
-            for candidate in self._skill_adapter.list_skill_candidates()
-        ):
-            return None
-        active = self._registry.get(f"skill_{name}")
-        if active is not None and active.enabled:
-            return None
-
-        request = ExtensionRequest(
-            user_prompt=text,
-            explicit_user_request=False,
-            classification=ExtensionClassification(
-                kind=ExtensionKind.SKILL,
-                confidence=1.0,
-                reason="same owner request pattern succeeded with independent verification in distinct turns",
-            ),
-            affected_capabilities=[f"skill_{name}"],
-            plan=ExtensionPlan(
-                plan_id=f"plan-{uuid.uuid4().hex[:8]}",
-                kind=ExtensionKind.SKILL,
-                description=f"Stage repeated verified workflow '{name}' for owner review.",
-                steps=["confirm two distinct verified-success turns", "stage inactive instructions-only candidate"],
-                raw_text=raw_text,
-            ),
-        )
-        result = self.stage_skill_candidate_transaction(request, skill_name=name, raw_text=raw_text)
-        if result.success:
-            result.details["trigger"] = "two_distinct_verified_successes"
-            result.details["verified_turn_count"] = len(verified_turns)
-        return result
+        """Automatic repeated-success learning is disabled."""
+        return None
 
     def execute_config_transaction(
         self,
@@ -1201,54 +907,13 @@ class SelfExtensionOrchestrator:
         raw_text: str,
         tx_id: Optional[str] = None,
     ) -> ExtensionResult:
-        """Execute reusable skill creation and capability registration."""
+        """Refuse prompt-generated skill activation; manual imports use Extensions."""
         transaction_id = tx_id or f"tx-{uuid.uuid4().hex[:8]}"
-        tx = self._transactions.get(transaction_id) or ExtensionTransaction(
-            transaction_id=transaction_id, request=request
-        )
-        self._transactions[transaction_id] = tx
-
-        self._emit(EventType.SELF_EXTENSION_APPLYING, {"tx_id": transaction_id})
-        tx.status = TransactionStatus.APPLYING
-        res = self._skill_adapter.save_skill(name=skill_name, raw_text=raw_text)
-        if not res.success:
-            tx.status = TransactionStatus.FAILED
-            tx.error_message = res.message
-            self._emit(EventType.SELF_EXTENSION_FAILED, {"tx_id": transaction_id, "reason": res.message})
-            return ExtensionResult(
-                success=False,
-                transaction_id=transaction_id,
-                status=TransactionStatus.FAILED,
-                message=res.message,
-            )
-
-        ext_id = f"skill_{skill_name}"
-        if ext_id not in tx.request.affected_capabilities:
-            tx.request.affected_capabilities.append(ext_id)
-        tx.verification_criteria = [ext_id]
-        gate_ok, gate_msg = self._run_verification_gate(transaction_id, affected_ext_ids=[ext_id])
-        if not gate_ok:
-            rollback = self._skill_adapter.remove_skill(skill_name)
-            tx.status = TransactionStatus.ROLLED_BACK
-            if not rollback.success:
-                tx.error_message = f"rollback_failed: {rollback.message}; verification: {gate_msg}"
-            self._emit(EventType.SELF_EXTENSION_ROLLED_BACK, {"tx_id": transaction_id})
-            return ExtensionResult(
-                success=False,
-                transaction_id=transaction_id,
-                status=TransactionStatus.ROLLED_BACK,
-                message=f"Skill extension rolled back — verification gate failed: {gate_msg}",
-            )
-
-        tx.status = TransactionStatus.COMPLETED
-        tx.finished_at = time.time()
-        self._emit(EventType.SELF_EXTENSION_COMPLETED, {"tx_id": transaction_id})
         return ExtensionResult(
-            success=True,
+            success=False,
             transaction_id=transaction_id,
-            status=TransactionStatus.COMPLETED,
-            message=res.message,
-            affected_capabilities=[ext_id],
+            status=TransactionStatus.FAILED,
+            message="Prompt-created skills are disabled; import a manually authored SKILL.md through Extensions.",
         )
 
     def execute_code_transaction(
@@ -1260,81 +925,13 @@ class SelfExtensionOrchestrator:
         expected_output: Optional[Any] = None,
         tx_id: Optional[str] = None,
     ) -> ExtensionResult:
-        """Execute small code extension: AST allow-list, write, worker test, register."""
+        """Refuse legacy model-authored code activation without touching files."""
         transaction_id = tx_id or f"tx-{uuid.uuid4().hex[:8]}"
-        tx = self._transactions.get(transaction_id) or ExtensionTransaction(
-            transaction_id=transaction_id, request=request
-        )
-        self._transactions[transaction_id] = tx
-
-        self._emit(EventType.SELF_EXTENSION_APPLYING, {"tx_id": transaction_id})
-        tx.status = TransactionStatus.APPLYING
-
-        self._emit(EventType.SELF_EXTENSION_TESTING, {"tx_id": transaction_id})
-        res = self._code_adapter.apply_code_extension(
-            name=name,
-            code=code,
-            test_inputs=test_inputs,
-            expected_output=expected_output,
-            transaction_id=transaction_id,
-        )
-
-        if not res.success:
-            tx.status = TransactionStatus.FAILED
-            tx.error_message = res.message
-            self._emit(EventType.SELF_EXTENSION_FAILED, {"tx_id": transaction_id, "reason": res.message})
-            return ExtensionResult(
-                success=False,
-                transaction_id=transaction_id,
-                status=TransactionStatus.FAILED,
-                message=res.message,
-            )
-
-        if res.checkpoint:
-            tx.checkpoint = res.checkpoint
-
-        ext_id = f"code_{name}"
-        if ext_id not in tx.request.affected_capabilities:
-            tx.request.affected_capabilities.append(ext_id)
-        tx.verification_criteria = [ext_id]
-
-        # Handle requires_restart: persist state and emit RESTARTING event
-        if getattr(request, "requires_restart", False):
-            tx.status = TransactionStatus.RESTARTING
-            self._persist_transactions()
-            self._emit(EventType.SELF_EXTENSION_RESTARTING, {"tx_id": transaction_id})
-            # Service restart would be triggered here via recovery infrastructure.
-            # Transaction will be resumed as VERIFYING on next process startup.
-            return ExtensionResult(
-                success=True,
-                transaction_id=transaction_id,
-                status=TransactionStatus.RESTARTING,
-                message=f"Code extension '{name}' applied. Restart required; verification will resume on startup.",
-                affected_capabilities=[ext_id],
-            )
-
-        # Post-change verification gate
-        gate_ok, gate_msg = self._run_verification_gate(transaction_id, affected_ext_ids=[ext_id])
-        if not gate_ok:
-            self._code_adapter.rollback_code_extension(name, checkpoint=tx.checkpoint)
-            tx.status = TransactionStatus.ROLLED_BACK
-            self._emit(EventType.SELF_EXTENSION_ROLLED_BACK, {"tx_id": transaction_id})
-            return ExtensionResult(
-                success=False,
-                transaction_id=transaction_id,
-                status=TransactionStatus.ROLLED_BACK,
-                message=f"Code extension rolled back — verification gate failed: {gate_msg}",
-            )
-
-        tx.status = TransactionStatus.COMPLETED
-        tx.finished_at = time.time()
-        self._emit(EventType.SELF_EXTENSION_COMPLETED, {"tx_id": transaction_id})
         return ExtensionResult(
-            success=True,
+            success=False,
             transaction_id=transaction_id,
-            status=TransactionStatus.COMPLETED,
-            message=res.message,
-            affected_capabilities=[ext_id],
+            status=TransactionStatus.FAILED,
+            message="Model-authored code generation and repair are disabled.",
         )
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1390,7 +987,11 @@ class SelfExtensionOrchestrator:
         return self._skill_adapter.list_skill_candidates()
 
     def stage_skill_candidate(self, name: str, raw_text: str):
-        return self._skill_adapter.stage_skill_candidate(name, raw_text)
+        return SkillAdapterResult(
+            False,
+            "Prompt-created skills are disabled; import a manually authored SKILL.md through Extensions.",
+            name,
+        )
 
     def resolve_skill_candidate_review_token(self, token: str, expected_status: str = "pending"):
         return self._skill_adapter.resolve_skill_candidate_review_token(token, expected_status)

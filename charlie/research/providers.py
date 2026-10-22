@@ -152,7 +152,7 @@ def _matches_domain_filters(url: str, domain_filters: Optional[List[str]]) -> bo
 
 
 _QUERY_LEADING_NOISE_RE = re.compile(
-    r"^\s*(?:research|search|find|look\s+into|tell\s+me\s+about)\s+",
+    r"^\s*(?:research|search|find|look\s+into|tell\s+me\s+about)\s*[:,\-]?\s+",
     re.IGNORECASE,
 )
 _QUERY_GENERIC_NOISE_RE = re.compile(
@@ -201,27 +201,43 @@ class SearXNGProvider:
         from charlie.research.ranking import search_result_matches_query
 
         def has_relevant_results(payload: dict) -> bool:
-            return any(search_result_matches_query(query, SearchResult(
-                str(item.get("title") or ""), str(item.get("url") or ""),
-                str(item.get("content") or item.get("snippet") or ""),
-            )) for item in payload.get("results") or [])
+            return any(
+                search_result_matches_query(
+                    query,
+                    SearchResult(
+                        str(item.get("title") or ""),
+                        str(item.get("url") or ""),
+                        str(item.get("content") or item.get("snippet") or ""),
+                        domain=_domain(str(item.get("url") or "")),
+                    ),
+                )
+                for item in payload.get("results") or []
+            )
+
         provider_query = _normalise_provider_query(query)
-        params: Dict[str, Any] = {"q": provider_query, "format": "json", "language": "en"}
-        if self.engines.strip():
-            params["engines"] = self.engines.strip()
         lowered = provider_query.lower()
+        configured_engines = [engine.strip() for engine in self.engines.split(",") if engine.strip()]
+
+        def build_query(engines: List[str]) -> str:
+            query_text = " ".join([f"!{engine}" for engine in engines] + [provider_query])
+            if domain_filters:
+                query_text += f" ({' OR '.join('site:' + domain for domain in domain_filters)})"
+            return query_text
+
+        params: Dict[str, Any] = {
+            "q": build_query(configured_engines),
+            "format": "json",
+            "language": "en",
+        }
         if any(word in lowered for word in ("news", "headline", "breaking")):
             params["categories"] = "news"
             if any(word in lowered for word in ("today", "latest", "current", "now", "live", "trending")):
                 params["time_range"] = "day"
-        if domain_filters:
-            params["q"] = f"{provider_query} ({' OR '.join('site:' + domain for domain in domain_filters)})"
-        configured_engines = [engine.strip() for engine in self.engines.split(",") if engine.strip()]
         async with httpx.AsyncClient(timeout=self.timeout_s, follow_redirects=True) as client:
             response = await client.get(f"{self.base_url.rstrip('/')}/search", params=params)
             response.raise_for_status()
             payload = response.json()
-            if not has_relevant_results(payload) and (payload.get("results") or payload.get("unresponsive_engines")):
+            if not has_relevant_results(payload):
                 # Do not drop a curated pool back to the instance defaults:
                 # those defaults are exactly where suspended/irrelevant Google
                 # and Bing results re-entered the evidence chain. A one-engine
@@ -232,7 +248,7 @@ class SearXNGProvider:
                         "SearXNG returned no relevant results; retrying configured fallback engine(s): %s",
                         ",".join(fallback_engines),
                     )
-                    params["engines"] = ",".join(fallback_engines)
+                    params["q"] = build_query(fallback_engines)
                     response = await client.get(f"{self.base_url.rstrip('/')}/search", params=params)
                     response.raise_for_status()
                     payload = response.json()

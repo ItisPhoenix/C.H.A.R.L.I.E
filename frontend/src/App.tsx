@@ -1449,10 +1449,6 @@ export function ResearchProgressWidget({ progress, steps = [progress], connected
         onClick={() => setCollapsed((value) => !value)}
       ><CaretDown size={14} weight="bold" aria-hidden="true" /></button>
     </div>
-    {(progress.sourceCount !== undefined || progress.evidenceCount !== undefined) && <p className="research-acquisition-summary">
-      {progress.sourceCount !== undefined && `${progress.sourceCount} pages read`}
-      {progress.evidenceCount !== undefined && `${progress.sourceCount !== undefined ? " · " : ""}${progress.evidenceCount} evidence passages`}
-    </p>}
     {collapsed && progress.text && <p className="research-progress-current">{progress.text}</p>}
     <ol id={detailsId} className="research-progress-steps" hidden={collapsed}>
       {steps.map((step, index) => <li key={step.id ?? `${step.stage ?? "research"}-${step.timestamp ?? index}`} aria-current={index === steps.length - 1 ? "step" : undefined}>

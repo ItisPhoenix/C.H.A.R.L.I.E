@@ -62,7 +62,7 @@ logger = logging.getLogger("charlie.research.engine")
 
 
 ProgressCallback = Callable[[ResearchProgress], Any]
-BrowserFetchCallback = Callable[[SearchResult], Awaitable[Optional[SourceDocument]]]
+BrowserFetchCallback = Callable[..., Awaitable[Optional[SourceDocument]]]
 BriefPlannerCallback = Callable[[str, ResearchBrief], Awaitable[Dict[str, Any]]]
 CandidateExtractorCallback = Callable[[ResearchBrief, List[SourceDocument]], Awaitable[List[Dict[str, Any]]]]
 
@@ -178,7 +178,9 @@ def _research_brief(query: str, mode: ResearchMode) -> ResearchBrief:
     brief.original_request = query
     brief.objective = query
     brief.depth = mode.value
-    brief.required_subquestions = [Subquestion(id="q1", question=query, required_fields=["q1"])]
+    brief.required_subquestions = [Subquestion(
+        id="q1", question=query, required_fields=["q1"], evidence_requirements=[query.strip()],
+    )]
     return brief
 
 
@@ -367,8 +369,8 @@ class ResearchEngine:
     def _configure_budget(self, mode: ResearchMode, *, sustained: bool) -> float:
         scope = "sustained" if sustained else mode.value
         limits = {
-            "quick": (20.0, 4.0, 1, 2, 2, 1, 8.0, 2),
-            "standard": (75.0, 12.0, 6, 12, 4, 2, 12.0, 5),
+            "quick": (40.0, 4.0, 2, 2, 2, 1, 8.0, 1),
+            "standard": (75.0, 4.0, 6, 12, 4, 2, 12.0, 5),
             "deep": (150.0, 20.0, 12, 24, 5, 4, 15.0, 6),
             "sustained": (300.0, 30.0, 24, 40, 6, 6, 20.0, 10),
         }
@@ -406,7 +408,7 @@ class ResearchEngine:
             per_source_s,
         )
         self._is_background_sustained = sustained
-        return max(0.0, total_s - reserve_s)
+        return max(0.0, total_s)
 
     def _consume_llm_call(self) -> bool:
         if self._llm_call_limit is not None and self._llm_calls_used >= self._llm_call_limit:
@@ -446,10 +448,38 @@ class ResearchEngine:
         return brief
 
     async def _read_model_facts(self, report: ResearchReport) -> None:
-        if not report.sources or self.fact_extractor is None or not self._consume_llm_call():
+        if not report.sources or not report.evidence or self.fact_extractor is None:
             return
+        passages_by_source: dict[str, List[str]] = {}
+        remaining_chars = 10_000
+        for item in report.evidence[:24]:
+            statement = item.statement.strip()
+            if not statement or len(statement) >= remaining_chars:
+                continue
+            passages_by_source.setdefault(item.source_id, []).append(statement)
+            remaining_chars -= len(statement) + 1
+        fact_sources = [
+            replace(
+                source,
+                content="\n".join(passages_by_source[source.source_id]),
+                content_hash="",
+                document_id="",
+            )
+            for source in report.sources
+            if source.source_id in passages_by_source
+        ]
+        if not fact_sources:
+            return
+        remaining = self._remaining_acquisition_s()
+        if remaining is not None and remaining <= 2.0:
+            return
+        if not self._consume_llm_call():
+            return
+        timeout_s = min(20.0, remaining - 2.0) if remaining is not None else 20.0
         try:
-            proposals = await self.fact_extractor(report.brief, report.sources)
+            proposals = await asyncio.wait_for(
+                self.fact_extractor(report.brief, fact_sources), timeout=timeout_s
+            )
             facts = model_facts(proposals, report.sources, policy=report.brief.source_policy)
             question_ids = {item.id for item in report.coverage}
             retained = {(fact.aspect, fact.value, fact.quote, fact.source_id): fact for fact in report.facts}
@@ -563,6 +593,7 @@ class ResearchEngine:
         sources: List[SourceDocument],
         query: str,
         policy: str = "official_required",
+        relevance_queries: Optional[List[str]] = None,
     ) -> List[EvidenceItem]:
         per_source = max(1, int(getattr(self.config, "research_evidence_per_source", 8)))
         ceiling = per_source * max(1, len(sources))
@@ -572,7 +603,24 @@ class ResearchEngine:
             per_source_max=per_source,
             max_items=ceiling,
             policy=policy,
+            relevance_queries=relevance_queries,
         )
+
+    async def _refresh_report_sources(
+        self, report: ResearchReport, documents: List[SourceDocument], policy: str,
+    ) -> None:
+        report.sources = (
+            await rank_documents(documents, report.plan, len(documents))
+            if report.plan and documents else list(documents)
+        )
+        report.citations = assign_citations(report.sources)
+        report.evidence = self._extract_evidence(
+            report.sources,
+            report.query,
+            policy=policy,
+            relevance_queries=[item.text for item in report.plan.queries] if report.plan else None,
+        )
+        report.bind_passages()
 
     async def _search(self, plan: ResearchPlan) -> List[SearchResult]:
         providers = self._providers()
@@ -670,19 +718,27 @@ class ResearchEngine:
         cached = self.document_cache.get(cache_key)
         if cached is not None and len(cached.content) >= (max_chars or 14000) * 0.8:
             return cached
+        fetch_timeout = timeout_s if timeout_s is not None else self._source_timeout_s or float(
+            getattr(self.config, "research_fetch_timeout_s", 20)
+        )
+        remaining = self._remaining_acquisition_s()
+        if remaining is not None:
+            fetch_timeout = min(fetch_timeout, remaining)
+        if fetch_timeout <= 0:
+            return None
         status_out: list = []
         try:
             document = await fetch_document(
                 result,
-                timeout_s=timeout_s or self._source_timeout_s or float(
-                    getattr(self.config, "research_fetch_timeout_s", 20)
-                ),
+                timeout_s=fetch_timeout,
                 status_out=status_out,
                 max_chars=max_chars or 14000,
             )
         except ValueError:
             logger.info("Research URL rejected: %s", result.url)
             document = None
+        if document is not None:
+            document.content = sanitize_source_text(document.content)
         fallback_enabled = (
             getattr(self.config, "research_crawl_enabled", False) or self.browser_fetch is not None
         )
@@ -692,19 +748,42 @@ class ResearchEngine:
             and document.extraction_method == "html-text"
             and len(document.content) < 1200
         )
-        if (document is None or thin_extraction) and fallback_enabled and not terminal_fetch_status:
+        empty_extraction = bool(document is not None and not document.content.strip())
+        fallback_timeout = fetch_timeout
+        remaining = self._remaining_acquisition_s()
+        if remaining is not None:
+            fallback_timeout = min(fallback_timeout, remaining)
+        if (
+            (document is None or thin_extraction or empty_extraction)
+            and fallback_enabled
+            and not terminal_fetch_status
+            and fallback_timeout > 0
+        ):
             try:
                 if self.browser_fetch is not None:
-                    crawled = await self.browser_fetch(result)
-                else:
-                    crawled = await crawl_document(
-                        result,
-                        timeout_s=timeout_s or self._source_timeout_s or float(
-                            getattr(self.config, "research_fetch_timeout_s", 20)
-                        ),
+                    callback = self.browser_fetch
+                    try:
+                        parameters = inspect.signature(callback).parameters.values()
+                        accepts_timeout = any(
+                            parameter.name == "timeout_s"
+                            or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                            for parameter in parameters
+                        )
+                    except (TypeError, ValueError):
+                        accepts_timeout = False
+                    operation = (
+                        callback(result, timeout_s=fallback_timeout)
+                        if accepts_timeout else callback(result)
                     )
+                else:
+                    operation = crawl_document(
+                        result, timeout_s=fallback_timeout,
+                    )
+                crawled = await asyncio.wait_for(operation, timeout=fallback_timeout)
                 if crawled is not None:
-                    document = crawled
+                    crawled.content = sanitize_source_text(crawled.content)
+                    if crawled.content.strip():
+                        document = crawled
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -713,7 +792,6 @@ class ResearchEngine:
             logger.debug("Research source returned HTTP %s: %s", status_out[-1], result.url)
 
         if document is not None:
-            document.content = sanitize_source_text(document.content)
             if not document.content.strip():
                 return None
             document.refresh_identity()
@@ -743,6 +821,21 @@ class ResearchEngine:
             selected.append(result)
         batch_size = 1 if mode is ResearchMode.QUICK else max(1, self._concurrency_limit or 1)
         policy = report.brief.source_policy if report.brief else "balanced"
+        committed: Set[str] = set()
+
+        async def commit(document: SourceDocument) -> None:
+            document.source_class = classify(document.url, brief=report.brief).value
+            if policy == "official_required" and report.brief and not _source_allowed(
+                document, policy, report.brief.explicit_domains,
+            ):
+                return
+            identity = document.canonical_url or document.url
+            if identity in committed:
+                return
+            committed.add(identity)
+            documents.append(document)
+            await self._refresh_report_sources(report, documents, policy)
+
         for offset in range(0, len(selected), batch_size):
             remaining = self._remaining_acquisition_s()
             if (cancel_event and cancel_event.is_set()) or (remaining is not None and remaining <= 0):
@@ -750,22 +843,12 @@ class ResearchEngine:
             if self._source_limit is not None and self._source_attempts >= self._source_limit:
                 break
             batch = await self._fetch_sources(
-                selected[offset:offset + batch_size], mode, timeout_s=remaining,
+                selected[offset:offset + batch_size], mode, timeout_s=remaining, on_document=commit,
             )
             for document in batch:
-                document.source_class = classify(document.url, brief=report.brief).value
-            if policy == "official_required" and report.brief:
-                batch = [doc for doc in batch if _source_allowed(
-                    doc, policy, report.brief.explicit_domains,
-                )]
-            documents.extend(batch)
-            report.sources = (
-                await rank_documents(documents, report.plan, len(documents))
-                if report.plan and documents else list(documents)
-            )
-            report.citations = assign_citations(report.sources)
-            report.evidence = self._extract_evidence(report.sources, report.query, policy=policy)
-            report.bind_passages()
+                await commit(document)
+            if _update_report_coverage(report):
+                break
         return documents
 
     async def _rank_sources(
@@ -786,13 +869,17 @@ class ResearchEngine:
             for document in documents
             if document.document_id or document.source_id or document.canonical_url or document.url
         ]
-        semantic = await gather_semantic_scores(
-            plan.goal,
-            pairs,
-            base_url=getattr(self.config, "memory_embedding_url", ""),
-            model=getattr(self.config, "memory_embedding_model", ""),
-            timeout_s=min(8.0, max(0.01, self._remaining_acquisition_s() or 8.0)),
-        )
+        remaining = self._remaining_acquisition_s()
+        semantic = None
+        semantic_timeout = min(8.0, max(0.0, remaining - 2.0)) if remaining is not None else 8.0
+        if semantic_timeout > 0.1:
+            semantic = await gather_semantic_scores(
+                plan.goal,
+                pairs,
+                base_url=getattr(self.config, "memory_embedding_url", ""),
+                model=getattr(self.config, "memory_embedding_model", ""),
+                timeout_s=semantic_timeout,
+            )
         return await rank_documents(documents, plan, limit, semantic=semantic)
 
     async def _fetch_sources(
@@ -801,6 +888,7 @@ class ResearchEngine:
         mode: ResearchMode,
         max_chars: Optional[int] = None,
         timeout_s: Optional[float] = None,
+        on_document: Optional[Callable[[SourceDocument], Awaitable[None]]] = None,
     ) -> List[SourceDocument]:
         configured_max = int(getattr(self.config, "research_max_sources", 40))
         remaining_attempts = (
@@ -836,6 +924,10 @@ class ResearchEngine:
         remaining = self._remaining_acquisition_s()
         if remaining is not None:
             timeout_s = remaining if timeout_s is None else min(timeout_s, remaining)
+        if timeout_s is not None:
+            if timeout_s <= 0:
+                return []
+            source_timeout = min(source_timeout, timeout_s)
 
         async def fetch_one(result: SearchResult) -> Optional[SourceDocument]:
             nonlocal completed
@@ -855,6 +947,8 @@ class ResearchEngine:
             completed += 1
             if document is not None:
                 self._fetched_urls.add(document.url)
+                if on_document is not None:
+                    await on_document(document)
             try:
                 await self._notify(
                     ResearchProgress(
@@ -910,10 +1004,13 @@ class ResearchEngine:
         domain_filters: Optional[List[str]] = None,
     ) -> ResearchReport:
         started = time.perf_counter()
-        brief = await self._plan_brief(query, mode)
+        brief = _research_brief(query, mode) if mode is ResearchMode.QUICK else await self._plan_brief(query, mode)
         if domain_filters:
             brief.explicit_domains = list(dict.fromkeys(brief.explicit_domains + domain_filters))
         plan = self.plan(query, mode, domain_filters=brief.explicit_domains)
+        if mode is ResearchMode.QUICK and plan.queries:
+            primary = plan.queries[0]
+            plan.queries[0] = ResearchQuery(query, primary.purpose, primary.domain_filters)
         report = ResearchReport(query=query, mode=mode, plan=plan)
         self._active_report = report
         report.brief = brief
@@ -936,42 +1033,53 @@ class ResearchEngine:
             )
 
         await self._notify(ResearchProgress("planning", f"Planning {mode.value} research", mode=mode))
-        if mode is not ResearchMode.QUICK:
-            deterministic_queries = list(plan.queries)
-            planned_queries = []
-            if self.query_planner is not None and self._consume_llm_call():
-                try:
-                    queries = await self.query_planner(
-                        f"Original request: {query}\n"
-                        f"Plan at most {initial_query_budget} distinct search queries."
-                    )
-                    if isinstance(queries, (list, tuple)):
-                        planned_query_texts = []
-                        seen_planned = set()
-                        for text in queries:
-                            if not isinstance(text, str) or not text.strip():
-                                continue
-                            normalized = text.strip()
-                            if normalized.casefold() in seen_planned:
-                                continue
-                            planned_query_texts.append(normalized)
-                            seen_planned.add(normalized.casefold())
-                            if len(planned_query_texts) >= initial_query_budget:
-                                break
-                        planned_queries = [
-                            ResearchQuery(text, "targeted evidence", list(plan.domain_filters))
-                            for text in planned_query_texts
-                        ]
-                except Exception:
-                    logger.info("Optional research query planning failed; using deterministic queries", exc_info=True)
-            plan.queries = []
-            seen_queries: set[str] = set()
-            for candidate in deterministic_queries + planned_queries:
-                key = candidate.text.strip().casefold()
-                if key and key not in seen_queries:
-                    plan.queries.append(candidate)
-                    seen_queries.add(key)
-            plan.queries = plan.queries[:initial_query_budget]
+        deterministic_queries = list(plan.queries)
+        planned_queries: List[ResearchQuery] = []
+        planned_limit = max(0, initial_query_budget - len(deterministic_queries))
+        if planned_limit and mode is ResearchMode.QUICK and self.query_planner is not None and self._consume_llm_call():
+            try:
+                queries = await self.query_planner(
+                    f"Original request: {query}\n"
+                    f"The exact request is already the first search. Plan at most {planned_limit} additional distinct queries."
+                )
+                if isinstance(queries, (list, tuple)):
+                    seen_planned = {clean_query(item.text).strip().casefold() for item in deterministic_queries}
+                    for text in queries:
+                        if not isinstance(text, str) or not text.strip():
+                            continue
+                        normalized = text.strip()
+                        key = clean_query(normalized).strip().casefold()
+                        if key in seen_planned:
+                            continue
+                        planned_queries.append(
+                            ResearchQuery(normalized, "targeted evidence", list(plan.domain_filters))
+                        )
+                        seen_planned.add(key)
+                        if len(planned_queries) >= planned_limit:
+                            break
+            except Exception:
+                logger.info("Optional research query planning failed; using deterministic queries", exc_info=True)
+        elif planned_limit and mode is not ResearchMode.QUICK:
+            seen_planned = {clean_query(item.text).strip().casefold() for item in deterministic_queries}
+            for subquestion in brief.required_subquestions:
+                normalized = subquestion.question.strip()
+                key = clean_query(normalized).strip().casefold()
+                if not normalized or key in seen_planned:
+                    continue
+                planned_queries.append(
+                    ResearchQuery(normalized, "targeted evidence", list(plan.domain_filters))
+                )
+                seen_planned.add(key)
+                if len(planned_queries) >= planned_limit:
+                    break
+        plan.queries = []
+        seen_queries: set[str] = set()
+        for candidate in deterministic_queries + planned_queries:
+            key = candidate.text.strip().casefold()
+            if key and key not in seen_queries:
+                plan.queries.append(candidate)
+                seen_queries.add(key)
+        plan.queries = plan.queries[:initial_query_budget]
         if cancel_event and cancel_event.is_set():
             report.stop_reason = "cancelled"
             return report
@@ -1036,7 +1144,12 @@ class ResearchEngine:
             if report.sources
             else assign_search_citations(report.search_results)
         )
-        report.evidence = self._extract_evidence(report.sources, query, policy=brief.source_policy)
+        report.evidence = self._extract_evidence(
+            report.sources,
+            query,
+            policy=brief.source_policy,
+            relevance_queries=[item.text for item in plan.queries],
+        )
         report.bind_passages()
 
         await self._read_model_facts(report)
@@ -1123,25 +1236,41 @@ class ResearchEngine:
                 report.search_results.extend(extra)
                 if report.plan is not None:
                     report.plan.queries.extend(followup.queries)
+                unique_documents = {
+                    document.canonical_url or document.url: document
+                    for document in report.sources
+                }
+
+                async def commit_followup(document: SourceDocument) -> None:
+                    document.source_class = classify(document.url, brief=brief).value
+                    if brief.source_policy == "official_required" and not _source_allowed(
+                        document, brief.source_policy, brief.explicit_domains,
+                    ):
+                        return
+                    unique_documents[document.canonical_url or document.url] = document
+                    await self._refresh_report_sources(
+                        report, list(unique_documents.values()), brief.source_policy,
+                    )
+
                 new_documents = await self._fetch_sources(
                     extra,
                     mode,
                     timeout_s=self._remaining_acquisition_s(),
+                    on_document=commit_followup,
                 )
                 if not new_documents:
                     break
                 for document in new_documents:
-                    document.source_class = classify(document.url, brief=brief).value
-                unique_documents = {
-                    document.canonical_url or document.url: document
-                    for document in report.sources + new_documents
-                }
+                    await commit_followup(document)
                 report.sources = await self._rank_sources(
                     list(unique_documents.values()), plan, mode
                 )
                 report.citations = assign_citations(report.sources)
                 report.evidence = self._extract_evidence(
-                    report.sources, query, policy=brief.source_policy
+                    report.sources,
+                    query,
+                    policy=brief.source_policy,
+                    relevance_queries=[item.text for item in plan.queries],
                 )
                 report.bind_passages()
                 await self._read_model_facts(report)

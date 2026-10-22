@@ -422,7 +422,6 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .research-panel--inline .research-body { padding: 0; overflow: visible; }
 .research-panel--inline .research-acquisition-details { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px; margin: 18px 0 6px; }
 .research-panel--inline .research-acquisition-details > details[open] { flex-basis: 100%; }
-.research-acquisition-summary { color: #d8d8d8; font-size: 12px; }
 .research-panel--voice { border-color: #414141; background: rgb(25 25 25 / 76%); box-shadow: 0 22px 64px rgb(0 0 0 / 24%); }
 .research-panel--voice header { padding: 23px 28px 20px; background: rgb(25 25 25 / 84%); }
 .research-panel--voice .research-label { color: #ddd; font-size: 12px; letter-spacing: .02em; }
@@ -437,12 +436,6 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .research-resource-disclosure summary:hover { color: #fff; }
 .research-resource-disclosure summary:focus-visible { outline: 2px solid #aaa; outline-offset: 3px; }
 .research-resource-disclosure summary strong, .research-resource-count strong { color: #f0f0f0; font-weight: 600; font-variant-numeric: tabular-nums; }
-.research-resource-items { margin: 8px 0 4px; padding: 0; list-style: none; }
-.research-resource-items li { margin: 0 0 10px; }
-.research-resource-items a { display: grid; gap: 2px; color: #f0f0f0; text-decoration: none; font-size: 13px; line-height: 1.45; }
-.research-resource-items a span, .research-resource-items a small { color: #c9c9c9; font-size: 11px; overflow-wrap: anywhere; }
-.research-resource-items a:hover strong { color: #fff; text-decoration: underline; }
-.research-resource-items a:focus-visible { outline: 2px solid #aaa; outline-offset: 3px; }
 .research-resource-count { color: #e1e1e1; font-size: 13px; line-height: 1.5; }
 @media (min-width: 761px) and (max-width: 920px) {
   /* The 30% stage is too narrow for the scaled right-side controls at tablet widths. */

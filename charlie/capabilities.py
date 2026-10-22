@@ -131,13 +131,6 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "risk_class": "safe",
         "timeout_sec": 15.0,
     },
-    "propose_new_tool": {
-        "id": "system.tool.propose",
-        "domain": "system",
-        "tool_registry_owner": "tools",
-        "risk_class": "reversible",
-        "timeout_sec": 15.0,
-    },
     "system_control": {
         "id": "media.control.compatibility",
         "domain": "media",
@@ -502,7 +495,8 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "domain": "research",
         "tool_registry_owner": "tools",
         "risk_class": "safe",
-        "timeout_sec": 15.0,
+        # Leave time for the configured quick budget and its final synthesis.
+        "timeout_sec": 50.0,
     },
     "web_research": {
         "id": "research.web.synthesize",
@@ -635,8 +629,6 @@ BUILTIN_TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "tool_registry_owner": "extensions",
         "risk_class": "reversible",
         "timeout_sec": 15.0,
-        # Proposal writes source and activates a contained worker, so it must
-        # serialize against filesystem and process mutation.
         "required_leases": ("file", "terminal"),
     },
 }

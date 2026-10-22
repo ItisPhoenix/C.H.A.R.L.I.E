@@ -15,7 +15,10 @@ class IterationBudget:
     turns_used: int = 0
     turn_cost: Dict[str, int] = field(
         default_factory=lambda: {
-            "web_search": 1,
+            # Price long research calls so one turn cannot loop through many searches.
+            "web_search": 8,
+            "web_research": 12,
+            "browser_read": 6,
             "shell_execute": 1,
             "file_read": 1,
             "file_write": 1,

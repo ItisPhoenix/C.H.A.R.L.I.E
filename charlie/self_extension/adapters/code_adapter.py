@@ -99,7 +99,13 @@ class CodeAdapter:
         expected_output: Optional[Any] = None,
         transaction_id: Optional[str] = None,
     ) -> CodeAdapterResult:
-        """Validate (AST allow-list), checkpoint, guard, write, worker test, and register."""
+        """Refuse model-authored code before touching the repository or registry."""
+        return CodeAdapterResult(
+            success=False,
+            message="Model-authored code generation and repair are disabled.",
+            tool_name=name,
+        )
+
         tx_id = transaction_id or f"code-{name}"
 
         try:
