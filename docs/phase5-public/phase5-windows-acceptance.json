@@ -1,0 +1,235 @@
+{
+  "task": "Phase 5 Windows independence, native control and interactive notch",
+  "branch": "integration/final-runtime-acceptance",
+  "head_at_start": "8dec668",
+  "updated": "2026-11-17",
+  "items": [
+    {
+      "id": "P1",
+      "requirement": "Charlie background device connection stays operational with Rakazo window closed; real UserDevices observe/act verified, no duplicate connection, pairing/revocation preserved",
+      "status": "partial",
+      "evidence": "REAL HOST: no Rakazo/electron process during Test A; gateway state=connected device <id>. Read-only SSH: Ubuntu route() uses findFirst orderBy connectedAt desc (user-device-gateway.ts:634-652) and userComputerConnected passes explicit deviceId (run-tools-user-computer.ts:140-145). Electron owns local host-computer server and native consent UI; Charlie is a separate paired peer. Component observe 161.8 ms / 835 chars.",
+      "remaining": "Ubuntu-originated observe/act with Rakazo closed still not executed. Five UserDevices methods unimplemented; screenAct set/scroll/menu now fail honestly instead of false success.",
+      "next": "Owner-triggered normal Ubuntu request; do not bypass approval gate."
+    },
+    {
+      "id": "P2",
+      "requirement": "Deterministic Windows app discovery and launch",
+      "status": "passed_component",
+      "evidence": "REAL HOST: 116 Start apps; Calculator AppID resolved; app_open ok=True, 1068.8 ms, window observed; test windows closed.",
+      "remaining": "Ubuntu voice-driven launch not re-run.",
+      "next": "Owner request through normal channel."
+    },
+    {
+      "id": "P3",
+      "requirement": "Dedicated configurable push-to-talk",
+      "status": "partial",
+      "evidence": "REAL RUNTIME: PTT armed in logs/charlie.log:8788.",
+      "remaining": "Physical key/mic acceptance pending.",
+      "next": "Owner hold/release test."
+    },
+    {
+      "id": "P4",
+      "requirement": "Native two-eyed Windows notch",
+      "status": "partial",
+      "evidence": "REAL HOST: notch window handle 13634006; test process stopped. REAL RUNTIME: no false Ready during ASR load.",
+      "remaining": "Visual, resource and multi-monitor acceptance pending.",
+      "next": "Owner review."
+    },
+    {
+      "id": "P5",
+      "requirement": "Ubuntu UserDevices approval stable identity",
+      "status": "blocked_authorization",
+      "evidence": "Phase 4.1 audit + read-only SSH confirm separate gate; no Ubuntu change.",
+      "remaining": "Owner authorization required.",
+      "next": "Await owner decision."
+    },
+    {
+      "id": "51-A",
+      "requirement": "Test A: companion connected with Rakazo fully closed",
+      "status": "passed",
+      "evidence": "REAL HOST: no Rakazo/electron process; companion PID 9928 alive; gateway status state=connected, device <id>.",
+      "remaining": "None for connectivity alone.",
+      "next": null
+    },
+    {
+      "id": "51-B",
+      "requirement": "Test B: Ubuntu-originated observation request with real request ID and desktop data",
+      "status": "passed",
+      "evidence": "Earlier blocker resolved by owner-origin run <id> (15:56 UTC). Gateway observes <uuid> (chars=3815) and <uuid> (chars=3601); effects <id> / <id> user_computer_observe completed; audits <id> / <id> tool.call success. Original note retained: internal forward endpoint requires a service secret; direct use would bypass the owner approval gate and was never used.",
+      "remaining": "None for owner-origin observation. Observation tree content is sealed in DB/UI, so pre/post tree text was not independently inspected.",
+      "next": null
+    },
+    {
+      "id": "51-C",
+      "requirement": "Test C: Ubuntu-originated authorized action with independent postcondition",
+      "status": "passed",
+      "evidence": "Owner-origin run <id>: gateway screenAct <uuid> kinds=['click'] completed=1/1 ms=2172.0; effect <id> user_computer_act request {\"app\":\"Windows desktop\",\"actions\":[{\"kind\":\"click\",\"element\":108}]} completed; audit <id> tool.call success. Owner forbade typing/shortcuts/launching; effect contains exactly one click, no keyboard action. Post-action observation 657cd564... chars=3601 and Chief reported CrossDeck tab active. Original note retained: component screenAct false-success defect fixed and verified locally.",
+      "remaining": "Exact pre-click UIA element identity not independently re-derivable because observation trees are sealed; no release blocker for the action itself.",
+      "next": null
+    },
+    {
+      "id": "51-D",
+      "requirement": "Test D: controlled disconnect/reconnect without stale routing or duplicate execution",
+      "status": "partial",
+      "evidence": "REAL HOST: emergency stop file produced state=stopped pid=3980; restart cleared stale stop and reached state=connected pid=2108 same device ID. Logs at 11:16:48 disconnect, 11:16:53 reconnect. No request in flight, so no duplicate-execution proof.",
+      "remaining": "Repeat with an in-flight authorized request; force-kill leaves stale status file (not an application disconnect path).",
+      "next": "Owner-origin request during controlled disconnect."
+    },
+    {
+      "id": "51-E",
+      "requirement": "Test E: security negatives",
+      "status": "partial",
+      "evidence": "REAL HOST: unauthenticated WSS connect rejected HTTP 401; consent decide({'method':'stop'}) denied. Emergency stop verified in 51-D.",
+      "remaining": "Revoked-session execution denial not executed. A disposable-pairing test plan is now prepared in CHARLIE_PHASE51_SECURITY_RECOVERY_ACCEPTANCE.md (Test A); it needs explicit owner authorization.",
+      "next": "Owner authorizes Test A; do not revoke the production device <id>."
+    },
+    {
+      "id": "51-F",
+      "requirement": "Diagnose why Ubuntu-origin requests fail and Chief reports Chromium",
+      "status": "root_cause_verified",
+      "evidence": "READ-ONLY SSH + REAL HOST: at start no Charlie gateway process and user_device_connections empty; Charlie device cmwjf4i39001... paired win32, not revoked, sole fresh connection after diagnostic gateway start. Chief bots.computerId=<id> bound to docker/team suspended Chromium sandbox, computerSwitching=false. executor.ts:1349-1360 removes user screen tools when no connected device; executor-readonly-approval.test.ts:3539-3550 confirms win32 connection required. No new user_computer effect since 2026-11-16 23:11 UTC.",
+      "remaining": "Ubuntu production config/code change to prefer the connected Windows device requires owner authorization; owner-origin web/voice observation still not performed.",
+      "next": "Owner authorizes Option A/B/C in CHARLIE_PHASE51_ROUTING_ROOT_CAUSE.md and triggers normal observation with gateway up."
+    },
+    {
+      "id": "51-G",
+      "requirement": "Reliability hardening: modifier handling, request IDs, heartbeat/stale detection, mark freshness, accurate failures",
+      "status": "passed_component",
+      "evidence": "REAL HOST: 5/5 observations median 283.3ms; wait action completed 1/1; menu action completed 0/1 with NotImplementedError; dead-PID status detected stale; unauth WSS 401; stop denied; gateway connected with heartbeat. Backups in phase51-reliability-20261117.",
+      "remaining": "Owner-origin repeat observation; in-flight disconnect/reconnect test; Ubuntu Chromium preference fix authorization.",
+      "next": "Owner live request with gateway up; authorize Ubuntu config change."
+    },
+    {
+      "id": "51-H",
+      "requirement": "Verify latest owner-origin observation: device receipt, ID correlation, success, no unintended action, no duplicate, health",
+      "status": "partial",
+      "evidence": "REAL HOST + read-only Ubuntu: gateway request <uuid> at local 18:57:42.960 = UTC 13:27:42.960; effect <id> completed at 13:27:43.535; audit <id> tool.call success at 13:27:44.211; same run <id> and bot <id>. One effect, one audit, no screenAct/device_exec for run. Current gateway process absent; status file stale (pid 34296 dead, heartbeat age ~19819s); Ubuntu connections empty.",
+      "remaining": "Gateway restart authorization needed before more live tests; in-flight cancellation/duplicate test not executed.",
+      "next": "Owner authorizes gateway restart and wait-only emergency-stop cancellation test."
+    },
+    {
+      "id": "51-I",
+      "requirement": "Diagnose gateway/companion termination and verify lifecycle ownership",
+      "status": "partial",
+      "evidence": "REAL HOST: gateway log ends abruptly after 18:57:43 request with no shutdown line; companion log ends 19:01:55 with forrtl error(200) window-CLOSE from ctranslate2/libiomp5md.dll; no WER/Application Error for python; Codex/OpenCode node processes restarted 18:50-18:51 with NDIS/HTTP bind events; status file stale. Fixes: repo-owned charlie/companion_launcher.py, stale read_gateway_status(), shutdown log. Verified manual start->connected, heartbeat 1794922991->1794923007, clean stop->stopped, restart->connected same device.",
+      "remaining": "Exact terminating agent unverified (Security 4689 audit disabled); companion still stopped; supervisor/recovery architecture proposed, not installed.",
+      "next": "Owner approval for process-exit auditing or foreground supervisor; wait-only cancellation test."
+    },
+    {
+      "id": "51-J",
+      "requirement": "Controlled recovery: wait-only cancellation, duplicate protection, reconnect and fresh observation",
+      "status": "blocked_owner_ingress",
+      "evidence": "REAL HOST: gateway connected pid=20984 device <id>, Rakazo absent; protocol limits verified (24 actions, 5s wait cap, 120s deadline, owning-socket cancel). Deployed web UI at 8443 redirected to /sign-in; no authenticated owner session available. 9443 is API and requires Bearer. No internal request manufactured.",
+      "remaining": "Owner must sign in to in-app browser and send wait-only request through normal chat UI; then emergency stop ~5s after acceptance.",
+      "next": "Await owner sign-in; do not bypass approval or use internal endpoints."
+    },
+    {
+      "id": "51-K",
+      "requirement": "Verify owner-origin 50s wait-only request: 10 waits, timing, no unintended action/duplicate/error/disconnect, gateway healthy",
+      "status": "passed",
+      "evidence": "REAL HOST + read-only Ubuntu: gateway request <uuid> screenAct at local 19:31:32.586 = UTC 14:01:32.586, completed 19:32:22.779 with kinds=['wait' x10], completed=10/10, ms=50174.0. Effect <id> completed, request has ten 5000ms waits; audit <id> tool.call success. Observe request 756a7ae3… and effect cmwkrgfo… same run. No other effects/audits, no duplicate/error/disconnect/takeover; gateway connected pid 20984 correct device; Rakazo absent; stop file absent.",
+      "remaining": "In-flight cancellation test prepared but NOT executed; owner authorization required before writing stop file.",
+      "next": "Await explicit owner authorization for cancellation test; do not interrupt yet."
+    },
+    {
+      "id": "51-L",
+      "requirement": "Authorized in-flight cancellation of wait-only request, truthful Ubuntu outcome, no duplicate/physical action, manual gateway restart",
+      "status": "passed",
+      "evidence": "REAL HOST: request <uuid> screenAct accepted 19:44:18.461, effect <id> executing with ten waits, emergency stop written 19:45:02.047 (43.6s in, still in flight), gateway logged aborted/disconnect/exiting, status stopped. Ubuntu effect result error + audit <id> tool.call failure; no success, no duplicate, no physical action. Fixed unhandled ConnectionClosedOK in _emit with backup phase51-cancel-20261117. Restart: connected pid 24332 same device <id>, one fresh Ubuntu connection row.",
+      "remaining": "Cancelled frame cannot reach closed socket by design; repeated cancellation and true socket-replacement tests not performed.",
+      "next": "Optional repeated cancellation or owner-authorized socket-replacement test; Ubuntu tool preference fix still blocked."
+    },
+    {
+      "id": "51-M",
+      "requirement": "Final operational reliability: runtime closed-socket verification, process ownership, Ubuntu effect semantics, tool selection, bounded stability",
+      "status": "partial",
+      "evidence": "REAL HOST runtime probe: _emit with mid-close fake socket and real closed websocket (state=3) logged 'device frame dropped' and returned without exception. IsProcessInJob=False so no job-breakaway fix justified. Heartbeat advanced 1794925435->1794925450 over 18s; screenObserve probe 867 chars 107.1ms; one fresh Ubuntu connection row; Rakazo absent. Read-only Ubuntu: completeExternalEffect always sets status=completed regardless of result.error; Chief still computerId=<id> computerSwitching=false.",
+      "remaining": "Ubuntu effect outcome semantics patch and Chief personal-computer preference require owner authorization; long-term process independence needs authorized supervisor/service.",
+      "next": "Owner decision on Ubuntu proposal and authorized supervisor; Phase 5.1 cannot close."
+    },
+    {
+      "id": "51-N",
+      "requirement": "Authorized user-level startup/recovery, Chief preference instruction, Ubuntu effect-outcome patch proposal",
+      "status": "partial",
+      "evidence": "REAL HOST: Scheduled Task Charlie Companion Watchdog registered (AtLogOn, pythonw), watchdog process parent from Task Scheduler, gateway/companion restarted on unexpected exit, intentional stop suppressed via no-restart marker, manual restart reconnected same device. Backups phase51-startup-20261117. Read-only UI/DB: Chief instructions still length 11590; /rpc/bots/update returned 409 conflict; prepared text and backup exist. Ubuntu proposal written, not deployed.",
+      "remaining": "Chief supported-UI save blocked by 409; owner must complete save or authorize another supported path. Phase 5.1 not closed.",
+      "next": "Owner saves prepared Chief instruction text via UI, then verify DB length/tail and one normal owner-origin Windows request."
+    },
+    {
+      "id": "51-O",
+      "requirement": "Fix Chief instruction save conflict using supported UI/API, verify preference and preserved Docker access",
+      "status": "passed",
+      "evidence": "Supported RPC bots/get returned current instructions len 11590, updatedAt 15:29:13.201Z; backed up to chief-instructions-before-conflict-fix-20261117-1529.txt. Merged prepared section and saved via bots/update with expectedInstructions=current: HTTP 200. RPC readback len 12374, marker count 1, original Identity/Honcho sections present. DB read-only: len 12374, marker count 1, updatedAt 15:43:01.589. Normal owner-origin UI question; Chief replied prefer connected Windows UserDevices and keep Docker Team Computer for non-Windows tasks. Zero external_effects and zero tool_call audit events after 15:44 UTC; computerId and computerSwitching unchanged.",
+      "remaining": "Overall Phase 5.1 still needs repeatable normal-interface computer actions; this item resolved.",
+      "next": "Owner-controlled Windows observation/action with Rakazo closed if further closure evidence required."
+    },
+    {
+      "id": "51-P",
+      "requirement": "Final acceptance review of owner CrossDeck request; declare Phase 5.1 PASS only on real evidence",
+      "status": "partial",
+      "evidence": "Read-only review. Owner request 15:56:24-15:56:44 UTC correlated end-to-end: run <id> completed/error=null; 3 gateway request IDs, 3 user_computer_* effects and 3 tool.call success audits all same run; one real click on UIA element 108, completed 1/1, no keyboard/type/shortcut; Windows device <id> was sole connected device and all effects were user_computer_*, not Docker computer_*; Chief computerId/computerSwitching unchanged. No extra effects/audits/errors in 15:56:00-15:57:30 window. Gateway connected pid=2108 device <id>, heartbeat 1794931314->1794931465; watchdog task Running, parent chain Task Scheduler->pythonw watchdog->run.py --device-gateway; companion intentionally stopped/suppressed for mic privacy. Chief reply from authenticated UI reports final active window Brave / ItisPhoenix/CrossDeck at crossdeck-3.0; host enumeration confirms two such Brave tabs plus Tauri CrossDeck 3.0. Report: CHARLIE_PHASE51_FINAL_ACCEPTANCE_REVIEW.md.",
+      "remaining": "Unverified security/recovery negatives: revoked-session denial; true socket-replacement and repeated in-flight cancellation. Sealed observation trees prevent independent re-derivation of pre/post UIA text and the exact 21:26 active-window title. The Ubuntu effect-outcome defect listed here was subsequently fixed and deployed — see 51-Q.",
+      "next": "Owner authorization for revoked-device negative test and socket-replacement test if required. Phase 5.1 remains PARTIAL only on those items."
+    },
+    {
+      "id": "51-Q",
+      "requirement": "Fix Ubuntu external_effects outcome handling (success/failure/uncertain), backward-compatible, tested and deployed to Charlie API/worker",
+      "status": "passed",
+      "evidence": "Root cause: completeExternalEffect always stored status=completed with raw result; run-effects passed it through. Fix: new effect-outcome.ts with effectOutcome/storeEffectOutcome/replayEffectResult; approval-effect.ts stores explicit outcome and strips marker on replay; mission reconciler requires outcome=success. TDD: RED then 13 new tests, 33 approval-effect regressions, 111 tests across 7 relevant files, tsc clean. Built charlie/effect-outcome:20261117-r1 from deployed commit <hash> with only applicable patch; deployed only api/worker via existing 13-file compose chain; both running healthy; all other services unchanged. Backups in <deploy-user-home>/charlie-backups/20261117-effect-outcome/ including image tars and rollback override files. REAL post-deploy: new effect <id> = user_computer_observe status=completed result {\"app\":\"Windows desktop\",\"outcome\":\"success\"}, audit <id> tool.call success, run <id> completed, gateway request e14f2433 on device <id>. Real cancellation record classifies as failure with shipped source; legacy row unchanged. Report CHARLIE_PHASE51_UBUNTU_EFFECT_OUTCOME_FIX.md.",
+      "remaining": "No new failure effect generated post-deploy (would need another authorized interruption); failure proven by tests and real-record classification. charlie-mission-reconciler.ts fix is working-tree only (file absent from deployed commit).",
+      "next": null
+    },
+    {
+      "id": "51-R",
+      "requirement": "Final security and recovery acceptance: deployed fix healthy, disposable revoked-device test and controlled WebSocket replacement prepared, non-disruptive controls verified",
+      "status": "partial",
+      "evidence": "Fresh read-only: API/worker charlie/effect-outcome:20261117-r1 running healthy; post-deploy effect <id> still completed with outcome=success; one live connection (production device <id>). Gateway auto-reconnected 22:17:38 after host-restart disconnects 22:17:28/31/32, observe e14f2433 at 22:20:39; watchdog task Running; gateway connected pid 2108 heartbeat current; companion suppressed. Audit: auth.sign_in and tool.call success, outcomes truthful; no running/queued runs. Reused infrastructure: apps/api/src/user-devices.ts + user-devices.test.ts (revoke 4001, owner-only, security event), user-device-emulator.ts, user-device-gateway.test.ts:294 (socket replacement 4000 + in-flight failure), user-device-gateway.postgres.test.ts:87 (one connection row), charlie/device_gateway.py _seen/_task_ws/_emit/_cancel_socket_tasks. Report CHARLIE_PHASE51_SECURITY_RECOVERY_ACCEPTANCE.md.",
+      "remaining": "Test A (revoked-device rejection on disposable pairing) and Test B (controlled WebSocket replacement) are fully prepared but NOT executed — both require owner authorization for revocation/connection interruption/production changes. Original hard-kill agent still unverified (Security 4689 disabled); watchdog recovery verified.",
+      "next": "Unblock requires a supported way to isolate a test pairing under a different userId/session or per-run device pinning; see CHARLIE_PHASE51_TESTS_BLOCKED_ISOLATION.md. Tests remain unexecuted."
+    },
+    {
+      "id": "51-S",
+      "requirement": "Execute authorized Test A (disposable revocation) and Test B (controlled WebSocket replacement) with guaranteed isolation from last-connect-wins routing",
+      "status": "passed",
+      "evidence_update": "Isolation provided by deployed deterministic routing (51-U); both tests executed and passed on disposable pairings 2026-11-18 — see 51-V.",
+      "evidence": "Owner authorized both tests but required that disposable test connections not capture normal Chief requests via last-connect-wins routing, and to stop if isolation cannot be guaranteed. Source review: user-device-gateway.ts route()/connected() select freshest connection by connectedAt desc filtered by userId; run-tools-user-computer.ts connectedUserComputer pins deviceId only per run, re-resolving each new run. A test pairing under the owner's only available authenticated session becomes freshest on attach; staleness is racy and older connectedAt would need a prohibited direct DB write. No supported isolated test user/session or global pin. Stopped before creating any pairing. Fresh state: no new pairing; sole connection <id> heartbeat current; api/worker charlie/effect-outcome:20261117-r1 healthy. Report CHARLIE_PHASE51_TESTS_BLOCKED_ISOLATION.md.",
+      "remaining": "Test A and Test B unexecuted. Release blocker: isolation precondition unmet. Existing component tests (user-devices.test.ts:281, user-device-gateway.test.ts:294) cover close codes/auth rejection/routing/failure/duplication/audit but do not substitute for live execution.",
+      "next": "Provide supported pair-under-different-user or per-run pinning, or an explicit owner statement that a no-request maintenance window overrides the isolation condition."
+    },
+    {
+      "id": "51-T",
+      "requirement": "Design and verify deterministic device targeting with stable owner preference; prepare patch/deploy/rollback without deploying",
+      "status": "partial",
+      "evidence": "Ubuntu working-tree patch (not deployed): new user_device_preferences table + migration; preference-aware UserDevices.route() with explicit deviceId precedence and missing-table tolerance/fail-closed; owner-only PUT/DELETE /api/devices/preferred with CSRF/origin check; two security event types. TDD RED (3 preference tests failed) then GREEN: user-device-gateway.test.ts 32 passed incl. newer device cannot redirect explicit/preferred targeting, fail-closed, last-connect-wins baseline; user-devices.test.ts 20 passed incl. owner-only, 401/404, audit; run-tools-user-computer.test.ts 15 passed; tsc clean for adapters/api/contracts/db; 67 tests total. Isolated test infrastructure only; no live pairing. Production unchanged: api/worker still charlie/effect-outcome:20261117-r1 healthy, user_device_preferences absent in prod DB. Report CHARLIE_PHASE51_DETERMINISTIC_DEVICE_ROUTING.md.",
+      "remaining": "Deployment not authorized/performed. Owner must set the preference after deploy; test isolation is not solved until then. Migration/app build not exercised against production.",
+      "next": "Closed by 51-U.",
+      "evidence_update": "Deployed 2026-11-17: image charlie/routing-preferred:20261117-r1, migration 251, preference set; see 51-U."
+    },
+    {
+      "id": "51-U",
+      "requirement": "Safe production deployment of deterministic device routing from deployed revision, preserving custom modifications and effect-outcome fix",
+      "status": "passed",
+      "evidence": "Preflight: deployed image charlie/effect-outcome:20261117-r1 GIT_SHA <hash>; working tree HEAD 7437f6419 differs (would remove 168 schema lines/5 security event types) so build used isolated git archive of DEPLOYED commit + both approved patches; custom models 4/4 and space.invite event preserved in image. Isolated tree: install/generate OK, tsc clean adapters/api/contracts/db, 113 tests passed. Compose render changed only api/worker/migrate. Migration applied: 251 total, only 20261117193000_user_device_preferred added, table columns verified. Rollout api then worker, both running healthy on charlie/routing-preferred:20261117-r1 sha256:2ae7a030; unrelated services unchanged. Preference set via supported API PUT /api/devices/preferred/<id>=204, DB row + device.preferred.set audit. End-to-end effect <id> completed with outcome=success, audit tool.call success, gateway request 472cb9e9 on production device; WSS auto-recovered; Windows gateway connected, watchdog Running. Backups/rollback in <deploy-user-home>/charlie-backups/20261117-routing-deploy/. Report CHARLIE_PHASE51_ROUTING_DEPLOYMENT.md.",
+      "remaining": "Phase 5.1 not complete: Test A (revoked-device rejection) and Test B (controlled WebSocket replacement) remain unexecuted; need fresh go-ahead now that isolation is available. Original hard-kill agent still unverified.",
+      "next": "Closed by 51-V.",
+      "evidence_update": "Test A and Test B executed and passed 2026-11-18; see 51-V."
+    },
+    {
+      "id": "51-V",
+      "requirement": "Execute Test A (revoked-device rejection) and Test B (controlled WebSocket replacement) on disposable pairings without touching production device",
+      "status": "passed",
+      "evidence": "Preconditions verified: api/worker charlie/routing-preferred:20261117-r1 healthy; preference <id>; Windows gateway connected + watchdog Running; fresh normal observation routed to production with outcome=success. Test A: disposable device <id> paired 201, authenticated WSS OPEN, GET /api/devices read-only check connected:true, revoked via DELETE 204, socket received revoked + CLOSE code=4001 reason=Revoked, reconnect with token HTTP 401, audit device.revoked by=owner, production device unaffected. Test B: disposable device <id> paired 201, A received in-flight screenObserve request 3777673f, B connected and A CLOSE code=4000 reason=Replaced, in-flight effect cmwl1rhzj result error + outcome=failure with audit tool.call failure, fresh request 2642051f only on B replied with effect cmwl1s697 outcome=success and audit success, no duplicate ids/misrouting, gateway log zero requests to production device in Test B window. Preference restored to production (204), both test devices revoked by owner, tokens shredded, scripts removed, logs /tmp/p5*-events*.log retained. api/worker healthy, Windows gateway connected, watchdog Running. Report CHARLIE_PHASE51_FINAL_SECURITY_ACCEPTANCE.md.",
+      "remaining": "Phase 5.1 full closure still blocked by P3 (PTT physical acceptance), P4 (notch visual review), P5 (Ubuntu approval stable identity authorization), 51-I (hard-kill agent unverified).",
+      "next": "Owner completes/waives P3/P4/P5/51-I to officially close Phase 5.1. Phase 5.2 scope proposed, not started."
+    },
+    {
+      "id": "G1",
+      "requirement": "Safety and preservation",
+      "status": "passed",
+      "evidence": "Backup charlie/device_gateway.py in %LOCALAPPDATA%\\Charlie\\backups\\phase51-20261117. No Ubuntu writes, no Git commit/push, no autostart, no user process killed; only task-created processes stopped.",
+      "remaining": "Final git status reviewed in report.",
+      "next": null
+    }
+  ]
+}
