@@ -48,7 +48,11 @@ class Element:
 # desktop_observe call. Desktop tools run serialized behind core.py's
 # interactive lock, so this module-level cache is never touched concurrently.
 _controls: Dict[int, Any] = {}
+_controls_at: float = 0.0
 _lock = threading.Lock()
+# A numbered mark is only valid against the observation that produced it. After
+# an LLM round-trip the window may have changed; bound how long a mark may live.
+MARK_STALENESS_SECONDS = 30.0
 
 # Screen rect of the most recent ocr.capture() grab, for image-to-screen coord mapping,
 # plus the monotonic clock reading at which that grab was taken.
@@ -164,6 +168,16 @@ def control_from_hwnd(hwnd: int) -> Optional[Any]:
         return None
 
 
+def snapshot_tree_staleness() -> Optional[str]:
+    global _controls_at
+    if not _controls or _controls_at <= 0:
+        return "no observation recorded"
+    age = time.monotonic() - _controls_at
+    if age > MARK_STALENESS_SECONDS:
+        return f"observation is stale ({age:.1f}s old); re-observe before acting"
+    return None
+
+
 def snapshot_tree(
     max_depth: int = _MAX_DEPTH_DEFAULT, root: Optional[Any] = None, max_marks: int = _MAX_MARKS_DEFAULT
 ) -> List[Element]:
@@ -177,9 +191,11 @@ def snapshot_tree(
         marks: List[Element] = []
         controls: Dict[int, Any] = {}
         _walk(window, marks, controls, depth=0, max_depth=max_depth, max_marks=max_marks)
+        global _controls_at
         with _lock:
             _controls.clear()
             _controls.update(controls)
+            _controls_at = time.monotonic() if controls else 0.0
         return marks
     except Exception:
         logger.warning("UIA snapshot failed", exc_info=True)
@@ -199,6 +215,9 @@ def resolve_mark(mark_id: int) -> Any:
         control = _controls.get(mark_id)
     if control is None:
         raise KeyError(f"Mark id {mark_id} not found -- call desktop_observe again.")
+    reason = snapshot_tree_staleness()
+    if reason is not None:
+        raise TimeoutError(f"Mark id {mark_id} unusable: {reason}")
     return control
 
 

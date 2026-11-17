@@ -9,6 +9,7 @@ never cache one across calls.
 import ctypes
 import ctypes.wintypes
 import logging
+import re
 import sys
 import time
 from typing import Dict, List, Optional
@@ -51,6 +52,27 @@ def _enum_raw() -> List[tuple]:
 
 def list_windows() -> List[Dict]:
     return [{"hwnd": h, "title": t} for h, t, vis in _enum_raw() if vis and t]
+
+
+def _title_tokens(value: str) -> tuple[str, ...]:
+    return tuple(match.group(0).casefold() for match in re.finditer(r"[a-z0-9]+(?:\+\+|#)?", value or "", re.I))
+
+
+def find_window_matches(title_query: str) -> List[Dict]:
+    """Match one exact title or a whole-word phrase, preserving similar names."""
+    query = _title_tokens(title_query)
+    if not query:
+        return []
+    windows = list_windows()
+    exact = [window for window in windows if window["title"].casefold() == title_query.strip().casefold()]
+    if exact:
+        return exact
+    matches = []
+    for window in windows:
+        title = _title_tokens(str(window.get("title") or ""))
+        if any(title[index:index + len(query)] == query for index in range(len(title) - len(query) + 1)):
+            matches.append(window)
+    return matches
 
 
 def find_window(title_substr: str) -> Optional[Dict]:
@@ -192,6 +214,20 @@ def manage_window(title_substr: str, action: str) -> str:
             "may block it) -- call desktop_windows again to confirm it actually closed."
         )
     return f"Error: unknown action '{action}'. Valid: minimize, maximize, restore, close."
+
+
+def manage_window_by_identity(target: Dict, action: str) -> str:
+    """Use the native state API on one revalidated HWND after CUA cannot apply it."""
+    ops = {"minimize": _SW_MINIMIZE, "maximize": _SW_MAXIMIZE, "restore": _SW_RESTORE}
+    if action not in ops:
+        return f"Error: unknown action '{action}'. Valid: minimize, maximize, restore."
+    if not window_target_is_current(target):
+        return "Refused: the exact window target is stale."
+    hwnd = int(target.get("window_id") or target.get("hwnd") or 0)
+    _user32.ShowWindow(hwnd, ops[action])
+    verified = _VERIFY_STATE[action](_user32, hwnd)
+    tag = " (verified)" if verified else " (state unconfirmed)"
+    return f"{action.capitalize()}d: {target.get('title') or ''}{tag}."
 
 
 def close_window_and_verify(title_substr: str, timeout_s: float = 1.5) -> bool:

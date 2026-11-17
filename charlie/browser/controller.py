@@ -156,14 +156,33 @@ def _launch(*, headless: Optional[bool] = None) -> None:
         user_data_dir=config.browser_profile_path,
         headless=headless_mode,
         viewport={"width": 1280, "height": 900},
+        accept_downloads=True,
     )
-    launch_mode = "bundled Chromium"
-    try:
-        _context = _playwright.chromium.launch_persistent_context(**launch_kwargs)
-    except Exception:
-        logger.warning("Bundled Chromium unavailable, falling back to the installed browser", exc_info=True)
-        _context = _playwright.chromium.launch_persistent_context(channel="chrome", **launch_kwargs)
-        launch_mode = "installed Chrome fallback"
+    # Brave is the owner's preferred Windows browser. It is launched with a
+    # Charlie-owned profile only: personal Brave windows/sessions are untouched.
+    from charlie.computer.manifest import resolve_browser_executable
+
+    candidates: list[tuple[str, dict]] = []
+    brave = resolve_browser_executable("brave")
+    if brave:
+        candidates.append(("Brave (installed, isolated profile)", {"executable_path": brave}))
+    candidates.extend([
+        ("bundled Chromium", {}),
+        ("installed Chrome fallback", {"channel": "chrome"}),
+        ("installed Edge fallback", {"channel": "msedge"}),
+    ])
+    launch_mode = ""
+    last_error: Optional[Exception] = None
+    for label, extra in candidates:
+        try:
+            _context = _playwright.chromium.launch_persistent_context(**launch_kwargs, **extra)
+            launch_mode = label
+            break
+        except Exception as exc:
+            last_error = exc
+            logger.warning("Browser launch with %s failed: %s", label, type(exc).__name__)
+    if _context is None:
+        raise BrowserUnavailable(f"no browser engine available: {last_error}")
     _context.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
     _page = _context.new_page()
     _headless_mode = headless_mode
