@@ -129,6 +129,25 @@ class NativeExecutor:
             return ExecOutcome(False, tier="native", error=f"{type(exc).__name__}: {exc}",
                                duration_ms=(time.perf_counter() - t) * 1000)
 
+    def app_control(self, operation: str, name: str) -> ExecOutcome:
+        """Call the one deterministic app helper; never a shell or a second resolver."""
+        t = time.perf_counter()
+        try:
+            from charlie import app_control
+
+            actions = {"discover": app_control.discover, "launch": app_control.launch,
+                       "focus": app_control.focus, "verify": app_control.verify}
+            fn = actions.get(operation)
+            if fn is None:
+                return ExecOutcome(False, tier="native", error=f"unknown app operation {operation}")
+            value = fn(name)
+            self._cache.invalidate("windows")
+            return ExecOutcome(bool(value.get("ok")), value, {"operation": operation}, "native",
+                               duration_ms=(time.perf_counter() - t) * 1000)
+        except Exception as exc:
+            return ExecOutcome(False, tier="native", error=f"{type(exc).__name__}: {exc}",
+                               duration_ms=(time.perf_counter() - t) * 1000)
+
     def app_close(self, name: str) -> ExecOutcome:
         t = time.perf_counter()
         try:
@@ -335,6 +354,8 @@ class NativeExecutor:
             return self.focus_window(params.get("title", ""))
         if method == "app_open":
             return self.app_open(params.get("name", ""))
+        if method in {"app_discover", "app_launch", "app_focus", "app_verify"}:
+            return self.app_control(method[4:], params.get("app", ""))
         if method == "app_close":
             return self.app_close(params.get("name", ""))
         if method == "shell":

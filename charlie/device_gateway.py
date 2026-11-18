@@ -34,13 +34,19 @@ PING_INTERVAL_S = 25.0
 RECONNECT_MIN_S = 1.0
 RECONNECT_MAX_S = 60.0
 
+# Typed personal-device app control. Readback is non-destructive; launching and
+# taking foreground are modifying and need a fresh, action-specific decision.
+APP_METHODS = frozenset({"appDiscover", "appLaunch", "appFocus", "appVerify"})
+APP_WRITE_METHODS = frozenset({"appLaunch", "appFocus"})
+APP_READ_METHODS = APP_METHODS - APP_WRITE_METHODS
+
 # Non-destructive bootstrap/read methods run without a fresh prompt but still
 # pass the local capability/lease policy. provision/prepare only create an empty
 # per-bot workspace directory; they are not remote execution.
 READONLY_METHODS = frozenset({
     "environment", "isRunning", "snapshot", "listFiles", "readFile",
     "provision", "prepare", "screenObserve",
-})
+}) | APP_READ_METHODS
 # Everything else requires a fresh, action-specific consent decision.
 SENSITIVE_METHODS = frozenset({
     "execute", "writeFile", "screenAct", "cancelRunWork",
@@ -48,7 +54,9 @@ SENSITIVE_METHODS = frozenset({
     # Browser control is never covered by shell/app standing consent. It needs
     # an explicit browser scope plus per-action grants for private/state-changing work.
     "browserObserve", "browserAct", "browserFind", "browserSession",
-})
+}) | APP_WRITE_METHODS
+
+_APP_BAD_CHARS = ("\\", "/", ";", "|", "`", "$", "\n", "\r", "\x00")
 
 
 def device_state_path() -> Path:
@@ -102,7 +110,7 @@ def deadline_ms(request: dict) -> int:
         timeout = request.get("command", {}).get("timeoutMs", 300_000)
         timeout = max(1_000, min(int(timeout), 3_600_000))
         return timeout + 30_000
-    if method.startswith("screen"):
+    if method.startswith("screen") or method.startswith("app"):
         return 120_000
     if method.startswith("browser"):
         return 180_000
@@ -220,6 +228,17 @@ class DeviceGateway:
                                            "content": file_info.get("content", "")})
             if not r.ok:
                 raise RuntimeError(r.error or "writeFile failed")
+            return r.value
+        if method in APP_METHODS:
+            label = request.get("app", "")
+            if (not isinstance(label, str) or not label or len(label) > 120
+                    or any(c in label for c in _APP_BAD_CHARS)):
+                raise ValueError("invalid app label")
+            # Structured result is returned even when ok=false so ambiguity and
+            # not-found reasons stay truthful and visible to the caller.
+            r = ex.dispatch(f"app_{method[3:].lower()}", {"app": label})
+            if r.value is None:
+                raise RuntimeError(r.error or f"app control failed: {method}")
             return r.value
         if method in {"screenObserve", "screenAct"}:
             return await self._dispatch_screen(method, request, ex, request_id=request_id)

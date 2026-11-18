@@ -6,6 +6,7 @@ now, without building a permanent installed-application database.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -24,6 +25,20 @@ from charlie.utils import is_process_running
 logger = logging.getLogger("charlie.desktop.apps")
 
 
+def _log_open_app_stage(stage: str, started_at: float, *, outcome: str) -> None:
+    from charlie.execution_context import get_current_execution_context
+
+    context = get_current_execution_context()
+    logger.info(
+        "desktop_open_app_stage | stage=%s | turn_id=%s | channel=%s | elapsed_ms=%.1f | outcome=%s",
+        stage,
+        context.turn_id if context else None,
+        context.channel if context else None,
+        (time.perf_counter() - started_at) * 1000,
+        outcome,
+    )
+
+
 @dataclass(frozen=True)
 class AppResolution:
     name: str
@@ -31,6 +46,7 @@ class AppResolution:
     process_name: Optional[str] = None
     window_title: Optional[str] = None
     source: str = "runtime"
+    candidates: tuple[str, ...] = ()
 
 
 def _normalize(value: str) -> str:
@@ -115,6 +131,58 @@ def _start_menu_target(name: str) -> Optional[str]:
     return None
 
 
+_START_APPS_TTL_S = 30.0
+_start_apps_cache: Optional[tuple[float, list[tuple[str, str]]]] = None
+
+
+def _start_apps() -> list[tuple[str, str]]:
+    """Registered Start apps: packaged AppUserModelIDs plus classic shortcuts."""
+    global _start_apps_cache
+    now = time.monotonic()
+    if _start_apps_cache is not None and now - _start_apps_cache[0] < _START_APPS_TTL_S:
+        return _start_apps_cache[1]
+    found: list[tuple[str, str]] = []
+    if sys.platform == "win32":
+        try:
+            proc = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                 "Get-StartApps | Select-Object Name,AppID | ConvertTo-Json -Compress -Depth 2"],
+                capture_output=True, text=True, timeout=8, shell=False,
+            )
+            data = json.loads(proc.stdout) if proc.returncode == 0 and proc.stdout.strip() else []
+            if isinstance(data, dict):
+                data = [data]
+            for item in data:
+                display = str(item.get("Name") or "").strip()
+                app_id = str(item.get("AppID") or "").strip()
+                # An AppID is a shell namespace identity, never a path. Refuse
+                # anything that could be read as a file/command by a caller.
+                if not display or not app_id or len(app_id) > 512:
+                    continue
+                if any(char in app_id for char in '\\/:*?"<>|'):
+                    continue
+                found.append((display, app_id))
+        except Exception as exc:
+            logger.debug("Start-app enumeration failed: %s", exc)
+    _start_apps_cache = (now, found)
+    return found
+
+
+def _start_app_target(name: str) -> tuple[Optional[str], tuple[str, ...]]:
+    """Resolve a registered app by AppUserModelID; refuse ambiguous aliases."""
+    wanted = _normalize(name)
+    apps = _start_apps()
+    matches = [(display, app_id) for display, app_id in apps if _normalize(display) == wanted]
+    if not matches:
+        matches = [(display, app_id) for display, app_id in apps if wanted in _normalize(display)]
+    if not matches:
+        return None, ()
+    identities = {app_id for _, app_id in matches}
+    if len(identities) != 1:
+        return None, tuple(dict.fromkeys(display for display, _ in matches))[:8]
+    return "shell:AppsFolder\\" + next(iter(identities)), ()
+
+
 def resolve_local_app(name: str) -> Optional[AppResolution]:
     """Find a currently available app/window using live OS sources."""
     clean = name.strip().strip("\"'")
@@ -145,11 +213,20 @@ def resolve_local_app(name: str) -> Optional[AppResolution]:
     target = _start_menu_target(clean)
     if target:
         return AppResolution(name=clean, launch_target=target, source="start-menu")
+
+    target, ambiguous = _start_app_target(clean)
+    if ambiguous:
+        return AppResolution(name=clean, candidates=ambiguous, source="ambiguous")
+    if target:
+        return AppResolution(name=clean, launch_target=target, process_name=None,
+                             source="app-user-model-id")
     return None
 
 
 def launch_and_verify(resolution: AppResolution, timeout_s: float = 3.0) -> bool:
     """Launch/focus one resolved target and verify process/window evidence."""
+    if resolution.candidates:
+        return False
     if resolution.window_title:
         from charlie.desktop.windows import find_window, focus_window
 
@@ -365,12 +442,16 @@ def launch_apps(matched_apps: list[str], launched_commands: Optional[list[str]] 
     success_apps: list[str] = []
     already_open_apps: list[str] = []
     failed_apps: list[tuple[str, str]] = []
+    ambiguous_apps: list[tuple[str, tuple[str, ...]]] = []
     for app in matched_apps:
         name = str(app).strip()
         key = name.casefold()
         entry = APP_REGISTRY.get(key)
         if entry is None or entry.is_website:
             resolution = resolve_local_app(name)
+            if resolution is not None and resolution.candidates:
+                ambiguous_apps.append((name, resolution.candidates))
+                continue
             if resolution is None or not launch_and_verify(resolution):
                 failed_apps.append((name, "runtime-verification-failed"))
             else:
@@ -379,22 +460,44 @@ def launch_apps(matched_apps: list[str], launched_commands: Optional[list[str]] 
             continue
 
         process_name = entry.close_process
-        if process_name and is_process_running(process_name):
+        process_probe_started = time.perf_counter()
+        process_running = bool(process_name and is_process_running(process_name))
+        _log_open_app_stage(
+            "application_resolution",
+            process_probe_started,
+            outcome="running_process" if process_running else "process_not_running",
+        )
+        if process_running:
             from charlie.desktop.windows import focus_window
 
+            execution_started = time.perf_counter()
             focus_window(process_name.removesuffix(".exe"))
+            _log_open_app_stage("execution", execution_started, outcome="focus_requested")
             already_open_apps.append(name)
             continue
 
+        resolution_started = time.perf_counter()
         resolution = resolve_local_app(name)
+        _log_open_app_stage(
+            "application_resolution",
+            resolution_started,
+            outcome=resolution.source if resolution else "not_found",
+        )
+        if resolution is not None and resolution.candidates:
+            ambiguous_apps.append((name, resolution.candidates))
+            continue
         if resolution and (resolution.launch_target or resolution.window_title):
             already_open = bool(resolution.window_title or resolution.process_name)
+            execution_started = time.perf_counter()
             if launch_and_verify(resolution):
+                _log_open_app_stage("execution", execution_started, outcome="launched_or_focused")
                 (already_open_apps if already_open else success_apps).append(name)
             else:
+                _log_open_app_stage("execution", execution_started, outcome="launch_or_focus_failed")
                 failed_apps.append((name, "runtime-verification-failed"))
             continue
 
+        execution_started = time.perf_counter()
         try:
             launched = launch_and_verify(
                 AppResolution(name=name, launch_target=entry.open_cmd, process_name=entry.close_process)
@@ -402,6 +505,11 @@ def launch_apps(matched_apps: list[str], launched_commands: Optional[list[str]] 
         except Exception as exc:
             logger.debug("App launch failed for %s: %s", name, exc)
             launched = False
+        _log_open_app_stage(
+            "execution",
+            execution_started,
+            outcome="launched" if launched else "launch_failed",
+        )
         if launched:
             success_apps.append(name)
         else:
@@ -409,6 +517,11 @@ def launch_apps(matched_apps: list[str], launched_commands: Optional[list[str]] 
 
     if not success_apps and not already_open_apps:
         failed_names = [f"{name} ({error})" for name, error in failed_apps]
+        if ambiguous_apps:
+            choices = "; ".join(
+                f"{name}: {', '.join(options)}" for name, options in ambiguous_apps[:3]
+            )
+            return f"Several apps match {choices}. Which one did you mean?"
         return f"I could not open {', '.join(failed_names)}."
 
     parts: list[str] = []
@@ -418,6 +531,9 @@ def launch_apps(matched_apps: list[str], launched_commands: Optional[list[str]] 
         parts.append(f"{format_app_list(already_open_apps)} was already open -- switched to it.")
     if failed_apps:
         parts.append(f"(Failed to open: {format_app_list([name for name, _ in failed_apps])})")
+    if ambiguous_apps:
+        choices = "; ".join(f"{name}: {', '.join(options)}" for name, options in ambiguous_apps[:3])
+        parts.append(f"(Unclear which app you meant: {choices})")
     return " ".join(parts)
 
 

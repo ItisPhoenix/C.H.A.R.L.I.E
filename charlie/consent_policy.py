@@ -131,7 +131,7 @@ def decide(request: dict) -> tuple[bool, str]:
         if "screen" in scopes:
             allowed_methods.add("screenAct")
         if "apps" in scopes:
-            allowed_methods.add("execute")
+            allowed_methods.update({"execute", "appDiscover", "appVerify", "appLaunch", "appFocus"})
         # Browser is an explicit opt-in scope: shell/screen/apps never imply it.
         if "browser" in scopes:
             allowed_methods.update({"browserObserve", "browserFind", "browserAct", "browserSession"})
@@ -149,6 +149,9 @@ def decide(request: dict) -> tuple[bool, str]:
             return True, "bounded consent"
         if method == "execute" and ("shell" in scopes or "apps" in scopes):
             audit_decision(request, True, "bounded:shell")
+            return True, "bounded consent"
+        if method in {"appLaunch", "appFocus"} and "apps" in scopes:
+            audit_decision(request, True, "bounded:apps")
             return True, "bounded consent"
         if method == "writeFile" and "files" in scopes:
             audit_decision(request, True, "bounded:files")
